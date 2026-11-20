@@ -20,7 +20,8 @@ update's turn (work_coord). Under ``plugins.isolation: host`` the tool
 answers with the reason. After a restart, Hermes' own re-run of a crash-killed
 workstream turn is retired (acceptance test 6), and a live sibling's marker kept.
 Hermes' turn stopper, which a clean shutdown runs, is watched on both its
-paths, so a workstream it stops is recovered rather than taken for a user's stop.
+paths, and the gateway's stop where its listener runs the workstreams, so a
+workstream either stops is recovered rather than taken for a user's stop.
 """
 
 from __future__ import annotations
@@ -592,6 +593,50 @@ def test_a_clean_shutdown_is_told_from_a_users_stop(tmp_path: Path) -> None:
                           timeout=120, env={**os.environ, "HERMES_HOME": str(home)}, cwd=str(tmp_path))
     assert done.returncode == 0 and out.is_file(), done.stderr[-2000:]
     assert json.loads(out.read_text()) == {"watched": True, "sigterm": True, "exit": True}
+
+
+GATEWAY_STOP_PROBE = r"""
+import asyncio, importlib.util, json, sys
+from pathlib import Path
+
+root, out = Path(sys.argv[1]), Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("conduit_push", root / "__init__.py",
+                                              submodule_search_locations=[str(root)])
+package = importlib.util.module_from_spec(spec)
+sys.modules["conduit_push"] = package
+spec.loader.exec_module(package)
+from conduit_push import work_tool
+from gateway import run_api
+from gateway.run import GatewayRunner
+
+# Hermes' own shutdown tests build a bare runner the same way. Its teardown
+# (_stop_impl) is the gateway's real exit, so a no-op stands in for it: what's
+# checked is what stop() leaves on the runner, which the plugin reads.
+GatewayRunner._stop_impl = lambda self: asyncio.sleep(0)
+gateway = object.__new__(GatewayRunner)
+run_api._ACTIVE_RUNNER = gateway
+seen = {"watched": work_tool._watch_gateway(), "before": work_tool._is_shutting_down()}
+run_api._ACTIVE_RUNNER = None  # the gateway lets go of its runner before the last turn unwinds
+asyncio.run(gateway.stop())
+seen["stopping"] = work_tool._is_shutting_down()
+out.write_text(json.dumps(seen))
+"""
+
+
+def test_a_gateway_shutdown_is_told_from_a_users_stop(tmp_path: Path) -> None:
+    """Where the gateway's listener runs, workstreams are its session
+    authority's turns, and the gateway's stop() interrupts them, not the
+    dashboard's turn stopper (which a gateway process may never load: Hermes
+    v0.23.3 on a separate gateway unit). The plugin reads the stop off the
+    gateway's runner, kept from before the gateway lets go of it."""
+    home = tmp_path / "home"
+    home.mkdir()
+    python = Path(_hermes_bin()).with_name("python")
+    out = tmp_path / "seen.json"
+    done = subprocess.run([str(python), "-c", GATEWAY_STOP_PROBE, str(ROOT), str(out)], capture_output=True,
+                          text=True, timeout=120, env={**os.environ, "HERMES_HOME": str(home)}, cwd=str(tmp_path))
+    assert done.returncode == 0 and out.is_file(), done.stderr[-2000:]
+    assert json.loads(out.read_text()) == {"watched": True, "before": False, "stopping": True}
 
 
 YOLO_PROBE = r"""

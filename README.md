@@ -5550,9 +5550,11 @@ gateway (`POST /api/gateway/restart`), then this dashboard:
 - `GET /capabilities` lists under `degraded` what the plugin can't do on this
   Hermes right now, and leaves the field out when there is nothing (plugin
   0.177.16+). Conduit shows each as a line on the plugin's page in Settings,
-  so it isn't only in the host's log. `workstream-recovery`: Hermes' turn
-  stopper wasn't found where the plugin looks, so a workstream a clean
-  restart stops is left interrupted instead of picked up again.
+  so it isn't only in the host's log. `workstream-recovery`: the plugin
+  can't tell this Hermes' own stop on its way out (the dashboard's turn
+  stopper, or the gateway's stop where its listener runs the workstreams),
+  so a workstream a clean restart stops is left interrupted instead of
+  picked up again.
   `workspace-files`: Hermes has a managed-files policy and couldn't say which
   folder it keeps files in, so the Folder refuses until it can. Both clear
   by themselves, and a new process starts with none.

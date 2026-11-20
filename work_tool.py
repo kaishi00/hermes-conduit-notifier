@@ -3386,18 +3386,58 @@ _SHUTDOWN_MARK = "_conduit_shutting_down"
 
 
 def _is_shutting_down() -> bool:
-    return _shutting_down.is_set() or any(getattr(sys.modules.get(name), _SHUTDOWN_MARK, False) is True
-                                          for name in _SHUTDOWN_MODULES)
+    return (_shutting_down.is_set()
+            or any(getattr(sys.modules.get(name), _SHUTDOWN_MARK, False) is True for name in _SHUTDOWN_MODULES)
+            or any(_gateway_stopping(gateway) for gateway in _gateways))
 _SHUTDOWN_HOOK = "_stop_turns_before_exit"
 _SHUTDOWN_MODULES = ("tui_gateway.session_reaper", "tui_gateway.server")
+# Where the gateway's listener runs here, workstreams are its session
+# authority's turns, and the gateway stops them itself on its way out: its
+# stop() keeps the task it runs in until the process ends. Kept once seen,
+# since the gateway lets go of its runner before the last turn has unwound.
+_GATEWAY_STOP = "_stop_task"
+_gateways: list = []
+
+
+def _gateway_stopping(gateway: Any) -> bool:
+    return getattr(gateway, _GATEWAY_STOP, None) is not None
+
+
+def _watch_gateway() -> bool:
+    """True when the gateway running this process's chats can say it's
+    stopping (always the same runner, so one is enough)."""
+    gateway = getattr(sys.modules.get("gateway.run_api"), "_ACTIVE_RUNNER", None)  # as gateway_chats.runner()
+    if gateway is None or not hasattr(gateway, _GATEWAY_STOP):
+        return False
+    if not any(seen is gateway for seen in _gateways):
+        _gateways.append(gateway)
+    return True
 
 
 def _watch_shutdown() -> bool:
-    """Hermes interrupts every running turn on its way out (on SIGTERM, and
-    again at exit), and those turns end as interrupted, as a user's stop
-    does. Its turn stopper is wrapped to say so first, so turn_finished
-    leaves them for the next process's sweep. True once both its paths are
-    watched."""
+    """Hermes interrupts every running turn on its way out, and those turns
+    end as interrupted, as a user's stop does. turn_finished leaves them for
+    the next process's sweep once it can tell. In the dashboard, Hermes' turn
+    stopper (on SIGTERM, and again at exit) is wrapped to say so first; where
+    the gateway's listener runs here, the gateway's own stop says so. True
+    once the host running workstreams here is watched: both of the stopper's
+    paths, or the gateway."""
+    tui = _watch_tui_stopper()
+    gateway = _watch_gateway()
+    watched = gateway if _on_gateway() else tui
+    # On Conduit's plugin page too (the capabilities route's `degraded`),
+    # until a later turn finds it. Both callers ask once the session host is
+    # up, when the stopper is there if this Hermes has it where we look.
+    (degraded.clear if watched else degraded.note)(degraded.WORKSTREAM_RECOVERY)
+    return watched
+
+
+def _on_gateway() -> bool:
+    """Whether workstreams here are the gateway's session authority's turns."""
+    return work_broker.on_authority(work_broker.server())
+
+
+def _watch_tui_stopper() -> bool:
     watched = True
     for name in _SHUTDOWN_MODULES:
         module = sys.modules.get(name)
@@ -3417,10 +3457,6 @@ def _watch_shutdown() -> bool:
 
         stopping._conduit_watch = True  # type: ignore[attr-defined]
         setattr(module, _SHUTDOWN_HOOK, stopping)
-    # On Conduit's plugin page too (the capabilities route's `degraded`),
-    # until a later turn finds it. Both callers ask once the session host is
-    # up, when the stopper is there if this Hermes has it where we look.
-    (degraded.clear if watched else degraded.note)(degraded.WORKSTREAM_RECOVERY)
     return watched
 
 
@@ -3451,8 +3487,8 @@ def start_recovery(home: Optional[Path] = None) -> None:
             time.sleep(RECOVERY_POLL_S)
         # Whatever the policy: turning workstreams off doesn't stop one that's running.
         if not _watch_shutdown():
-            logger.warning("conduit_push: Hermes' turn stopper wasn't found, so a workstream a clean restart "
-                           "stops is left interrupted rather than recovered")
+            logger.warning("conduit_push: Hermes' turn stopper (or the gateway's stop) wasn't found, so a "
+                           "workstream a clean restart stops is left interrupted rather than recovered")
         # A room's asks still waiting for the owner are watched again whatever the policy (Ask me first needs no
         # workstreams, and a Run work ask kept before they were turned off still hears its answer), once the
         # session host is up, so a yes can start what it asks.

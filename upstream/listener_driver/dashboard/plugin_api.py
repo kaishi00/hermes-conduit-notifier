@@ -207,6 +207,13 @@ def _work_send(profile: str, session_id: str, text: str) -> Dict[str, Any]:
     return {"sent": list(work_broker.Broker(home).send(session_id, text, "after"))}
 
 
+def _work_shutdown_watch() -> Dict[str, Any]:
+    """What work_tool asks once the session host is up: which host runs the
+    workstreams here, and whether its stop can be told from a user's."""
+    work_tool = _conduit(".work_tool", "_watch_shutdown")
+    return {"on_gateway": work_tool._on_gateway(), "watched": work_tool._watch_shutdown()}
+
+
 def _pulse_send(chat_id: str) -> Dict[str, Any]:
     pulse_host = _conduit("pulse_host", "_send_on_authority")
     sent = pulse_host.send(chat_id, "PULSE check in", model={"provider": "custom", "model": "fake-model-2"})
@@ -236,6 +243,11 @@ async def work_run(bot: str = "") -> Dict[str, Any]:
 @router.get("/work-send")
 async def work_send(session: str, text: str, bot: str = "") -> Dict[str, Any]:
     return await asyncio.to_thread(_work_send, bot, session, text)
+
+
+@router.get("/work-shutdown-watch")
+async def work_shutdown_watch() -> Dict[str, Any]:
+    return await asyncio.to_thread(_work_shutdown_watch)
 
 
 @router.get("/pulse-send")

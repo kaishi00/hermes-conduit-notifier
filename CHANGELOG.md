@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.187.4 (2026-11-20)
+
+### Fixes
+
+- A workstream a Hermes restart stops picks up again on a Hermes whose gateway runs your chats (the Webapp, or one gateway serving every bot). It was left interrupted as if you had stopped it, and Conduit's plugin page said the plugin couldn't find how Hermes stops its turns.
+
 ## 0.187.3 (2026-11-20)
 
 ### Fixes
