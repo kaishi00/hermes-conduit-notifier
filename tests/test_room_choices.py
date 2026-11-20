@@ -254,6 +254,28 @@ def test_a_rooms_people_are_kept_with_its_choices(tmp_path):
     assert ChoicesStore(tmp_path).last_with(["name:mona", "link:abc"]) == RoomChoices(tools="look", daily_limit=5)
 
 
+def test_a_rooms_choices_are_read_from_disk_only_when_the_file_changes(tmp_path, monkeypatch):
+    # Notifier issue 961: every tool call in a room with other people read the whole file again.
+    store = ChoicesStore(tmp_path)
+    store.set(ROOM, {"tools": "look"})
+    reads = {"n": 0}
+    real_read = ChoicesStore._read
+
+    def counted(self, **kwargs):
+        reads["n"] += 1
+        return real_read(self, **kwargs)
+
+    monkeypatch.setattr(ChoicesStore, "_read", counted)
+    for _ in range(5):
+        assert store.get(ROOM).tools == "look"
+    assert reads["n"] <= 1
+    # A write, here or from another process, replaces the file: the next read sees it.
+    ChoicesStore(tmp_path).set(ROOM, {"tools": "data"})
+    assert store.get(ROOM).tools == "data"
+    (tmp_path / choices_module.FILE_NAME).unlink()
+    assert store.get(ROOM) == store.defaults()
+
+
 def test_the_last_room_with_the_same_people_is_the_one_set_most_recently(tmp_path):
     clock = Clock()
     store = ChoicesStore(tmp_path, clock=clock)

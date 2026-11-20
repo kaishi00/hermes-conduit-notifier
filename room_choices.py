@@ -69,6 +69,10 @@ _ROOM_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}")
 
 _thread_lock = threading.Lock()
+# Reads kept by path with the file's (inode, time, size) as read (ChoicesStore._load).
+MAX_KEPT_READS = 64
+_reads: dict[str, tuple[tuple[int, int, int], dict[str, Any]]] = {}
+_read_lock = threading.Lock()
 logger = logging.getLogger(__name__)
 # Per file: an unreadable one is logged the first time and every 100th.
 _unreadable_counts: dict[str, int] = {}
@@ -237,6 +241,31 @@ class ChoicesStore:
             return RoomChoices(), True
 
     def _load(self, *, for_write: bool = False) -> dict[str, Any]:
+        """The file's choices. A read for a room's turn (every tool call in a
+        room with other people) is kept while the file's inode, time and size
+        are unchanged: every write replaces it whole (_save), so a write
+        always changes them (notifier issue 961). A write reads it again."""
+        try:
+            info = os.stat(self.path)
+            stamp: Optional[tuple[int, int, int]] = (info.st_ino, info.st_mtime_ns, info.st_size)
+        except OSError:
+            stamp = None
+        key = str(self.path)
+        if not for_write and stamp is not None:
+            with _read_lock:
+                kept = _reads.get(key)
+            if kept is not None and kept[0] == stamp:
+                return kept[1]
+        state = self._read(for_write=for_write)
+        if not for_write and stamp is not None:
+            # Kept as read: the read paths never change it.
+            with _read_lock:
+                _reads[key] = (stamp, state)
+                while len(_reads) > MAX_KEPT_READS:
+                    _reads.pop(next(iter(_reads)))
+        return state
+
+    def _read(self, *, for_write: bool = False) -> dict[str, Any]:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:

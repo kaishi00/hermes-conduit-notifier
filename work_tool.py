@@ -67,8 +67,8 @@ from typing import Any, Callable, Optional
 import uuid
 from urllib.parse import quote, unquote
 
-from . import (degraded, hermes_store, room_rules, room_work, screen_lock, work_broker, work_coord, work_models,
-               work_store, work_trees, work_watch)
+from . import (degraded, hermes_store, room_rules, room_work, screen_lock, stamps, work_broker, work_coord,
+               work_models, work_store, work_trees, work_watch)
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -4176,6 +4176,15 @@ def _workstream(session_id: Any, home: Optional[Path] = None) -> tuple[Optional[
     return home, work
 
 
+# Sessions a read found aren't workstreams, by (registry, session), with the
+# registry's stamp as read: every tool call of every ordinary chat asks twice
+# (notifier issue 960). Any write to the registry, from any process, changes
+# the stamp, so a session made a workstream is found on its next call.
+NOT_WORK_KEPT = 1024
+_not_work: "OrderedDict[tuple[str, str], tuple]" = OrderedDict()
+_not_work_lock = threading.Lock()
+
+
 def _lookup(session_id: Any, home: Optional[Path] = None) -> tuple[Optional[Path], Optional[work_store.Work], bool]:
     """``_workstream``, and whether the bot's registry exists but couldn't
     be read (the session may then be a workstream)."""
@@ -4184,8 +4193,22 @@ def _lookup(session_id: Any, home: Optional[Path] = None) -> tuple[Optional[Path
         return home, None, False
     try:
         store = work_store.Store(home)
-        work = store.by_session(session_id)
-        if work is not None or session_id in _not_compacted or not store.running_count(calls=True):
+        key = (str(store.path), session_id)
+        stamp = stamps.sqlite_store(store.path)
+        if stamp is not None:
+            with _not_work_lock:
+                if _not_work.get(key) == stamp:
+                    _not_work.move_to_end(key)
+                    return home, None, False
+        work, at_work = store.session_lookup(session_id)
+        if work is not None or session_id in _not_compacted or not at_work:
+            if work is None and stamp is not None:
+                # Nothing the store holds can make it one until the store changes.
+                with _not_work_lock:
+                    _not_work[key] = stamp
+                    _not_work.move_to_end(key)
+                    while len(_not_work) > NOT_WORK_KEPT:
+                        _not_work.popitem(last=False)
             return home, work, False
         found = _compacted_from(home, session_id, store)
         if found is False:
@@ -4770,6 +4793,9 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
             _finished.clear()
         _finished.add(session_id)
         text = _replies.pop(session_id, "")
+        # Taken on every way out, so a workstream that never turns again
+        # doesn't keep its last runner alive.
+        turn_gateway = _turn_gateways.pop((str(home), work.ref), None)
     store = work_store.Store(home)
     if work.status == "stopped":
         with _wake_lock:
@@ -4790,8 +4816,6 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
             _redirecting.discard((str(home), work.ref))
         if redirected:
             return True  # a work_send redirected it: the new turn runs, and settles it
-        with _wake_lock:
-            turn_gateway = _turn_gateways.pop((str(home), work.ref), None)
         if _is_shutting_down() or _gateway_stopping(turn_gateway):
             # Hermes stopped it on its way out: a restart, not the user. Left
             # running, so the next process's sweep recovers it.
@@ -6875,6 +6899,7 @@ def stop() -> None:
         _finished.clear()
         _unjournaled.clear()
         _turn_began.clear()
+        _turn_gateways.clear()
         _replies.clear()
         _redirecting.clear()
         _agents.clear()

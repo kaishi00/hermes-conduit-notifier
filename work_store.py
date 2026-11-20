@@ -473,6 +473,17 @@ class Store:
                               "ORDER BY created_at LIMIT 1", (session_id,)).fetchone()
         return _work(row) if row else None
 
+    def session_lookup(self, session_id: Any) -> tuple[Optional[Work], int]:
+        """``by_session`` and ``running_count(calls=True)`` in one read: the
+        hooks ask both for every tool call (notifier issue 960)."""
+        if not isinstance(session_id, str) or not session_id or not self.path.is_file():
+            return None, 0
+        with self._db(write=False) as con:
+            row = con.execute("SELECT * FROM work WHERE session_id = ? AND kind = 'workstream' "
+                              "ORDER BY created_at LIMIT 1", (session_id,)).fetchone()
+            count = con.execute(f"SELECT COUNT(*) AS n FROM work WHERE {_AT_WORK}").fetchone()
+        return (_work(row) if row else None), int(count["n"])
+
     def titles(self, refs: Any) -> dict[str, str]:
         """``{ref: title}`` for these refs, open or closed, reading only those
         two columns of only those rows (the Work panel's poll names the work

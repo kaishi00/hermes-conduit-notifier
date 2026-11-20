@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.187.8 (2026-11-20)
+
+### Fixes
+
+- Every tool call in an ordinary chat opened several fresh database reads to check for workstreams and Pulse work; they're now skipped while nothing has changed, so tool calls start a few milliseconds sooner.
+- Rooms with no one else in them, and the room choices of shared rooms, were read again on every tool call; they're now read only when the room files change.
+
 ## 0.187.7 (2026-11-20)
 
 ### Fixes

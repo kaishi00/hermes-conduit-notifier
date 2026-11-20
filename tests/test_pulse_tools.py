@@ -480,6 +480,30 @@ def test_when_pulse_cant_read_its_chat_only_its_known_chats_are_held(live, monke
     assert pulse.pre_tool_call(CHAT, "other", "terminal", {}) is None
 
 
+def test_a_chat_with_nothing_in_flight_reads_pulses_store_only_when_it_changes(live, monkeypatch):
+    # Notifier issue 960: every tool call of every chat read Pulse's store,
+    # even with Pulse off, to learn nothing was in flight.
+    import sys
+
+    monkeypatch.setattr(sys.modules["conduit_push.stamps"], "SETTLED_NS", 0)
+    pulse._nothing_in_flight.clear()
+    reads = {"n": 0}
+    readable = store.in_flight_attempts
+
+    def counted(*args, **kwargs):
+        reads["n"] += 1
+        return readable(*args, **kwargs)
+
+    monkeypatch.setattr(store, "in_flight_attempts", counted)
+    for index in range(5):
+        assert pulse.pre_tool_call(CHAT, f"t{index}", "terminal", {}) is None
+    assert reads["n"] == 1
+    # An attempt starting writes the store: the next call reads it and holds the turn.
+    follow_up_turn(live)
+    assert pulse.pre_tool_call(SID, "next", "terminal", {}) == block(pulse.HELD_MESSAGE)
+    pulse._nothing_in_flight.clear()
+
+
 def test_no_pulse_store_holds_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(pulse, "get_hermes_home", lambda: tmp_path)
     assert pulse.pre_tool_call(SID, "t1", "terminal", {}) is None

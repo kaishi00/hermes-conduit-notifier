@@ -55,7 +55,7 @@ from typing import Any, Callable, Optional
 
 from hermes_constants import get_hermes_home
 
-from . import compaction_skip
+from . import compaction_skip, stamps
 from . import pulse_delivery as delivery
 from . import pulse_ahead as ahead
 from . import pulse_brief as brief
@@ -562,6 +562,12 @@ def looks_today(pulse_store: store.PulseStore, now: Optional[float] = None) -> d
             if label in tools.LABELS and isinstance(count, int) and not isinstance(count, bool)}
 
 
+# Pulse stores whose last read found no attempt in flight, with their stamp
+# then (``_in_flight_here``).
+_nothing_in_flight: dict[str, tuple] = {}
+_nothing_in_flight_lock = threading.Lock()
+
+
 def _in_flight_here(session_id: str) -> Optional[list[float]]:
     """When each Pulse attempt in flight in this chat (or what compression
     made of it; every chat for an empty ``session_id``) was made: [] for
@@ -576,10 +582,21 @@ def _in_flight_here(session_id: str) -> Optional[list[float]]:
     path = Path(home) / store.DB_NAME
     if not path.exists():
         return []
+    # Nothing in flight when the store was last read, and it hasn't changed
+    # since: still nothing (notifier issue 960). Starting an attempt writes it.
+    stamp = stamps.sqlite_store(path)
+    if stamp is not None and _nothing_in_flight.get(str(path)) == stamp:
+        return []
     now = time.time()
     try:
         made: dict[str, float] = {}
-        for key, created_at, detail in store.in_flight_attempts(path):
+        attempts = store.in_flight_attempts(path)
+        if not attempts and stamp is not None:
+            with _nothing_in_flight_lock:
+                _nothing_in_flight[str(path)] = stamp
+                while len(_nothing_in_flight) > 64:
+                    _nothing_in_flight.pop(next(iter(_nothing_in_flight)))
+        for key, created_at, detail in attempts:
             if key and detail != delivery.ENDED and now - created_at < delivery.STUCK_S:
                 made[key] = min(created_at, made.get(key, created_at))
         chains = {key: hermes.chain_ids(Path(home), key) for key in made}
