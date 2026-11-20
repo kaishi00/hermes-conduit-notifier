@@ -13,6 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.187.7 (2026-11-20)
+
+### Fixes
+
+- A workstream a gateway restart stopped could be marked as stopped by you, instead of picked up again, if a new gateway took over in the same process before it finished unwinding.
+- A watch run while you were in a voice call with Hermes was told its call would ring; it now hears that no call rings while you're already on one.
+
+### New and improved
+
+- While an approval waits on you with calls on, the plugin reads its calls file only when it changes, instead of twice a second.
+- When a profile can't place calls, its error now says why: no iPhone is paired and no computer asked for its rings in the last 30 days.
+
 ## 0.187.6 (2026-11-20)
 
 ### Fixes

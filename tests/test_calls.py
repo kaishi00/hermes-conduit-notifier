@@ -1403,6 +1403,76 @@ def test_an_approval_answered_on_a_call_resolves_only_the_request_it_read_out(ho
     assert store.waiting_for("sk-1") is None
 
 
+def test_an_approval_follower_reads_the_calls_file_only_when_it_changes(home, fake, monkeypatch):
+    # notifier #962: a poll that finds the approval unanswered is trusted
+    # until the file changes; the answer, a write, is still seen at once.
+    import threading
+    import time as _time
+
+    calls_store = sys.modules["conduit_push.calls_store"]
+    resolved = threading.Event()
+    approval = types.ModuleType("tools.approval")
+    approval.list_gateway_approvals = lambda key: [{"request_id": "r-1", "command": "rm -rf build"}]
+
+    def resolve(key, choice, request_id=None):
+        resolved.set()
+        return 1
+
+    approval.resolve_gateway_approval = resolve
+    monkeypatch.setitem(sys.modules, "tools.approval", approval)
+    monkeypatch.setattr(calls, "APPROVAL_ANSWER_POLL_S", 0.01)
+    monkeypatch.setattr(calls, "alert", lambda *args, **kwargs: None)
+    # Any write counts as settled at once, so the test needn't wait 2 s.
+    monkeypatch.setattr(calls_store, "SETTLED_NS", 0)
+    _settings(home, alerts=True)
+    loads = {"n": 0}
+    real_load = calls_store.CallStore._load
+
+    def counted(self, *args, **kwargs):
+        loads["n"] += 1
+        return real_load(self, *args, **kwargs)
+
+    plugin._pre_approval_request(session_key="sk-1", session_id="rt-1", description="Delete the build",
+                                 command="rm -rf build", turn_id="t1")
+    monkeypatch.setattr(calls_store.CallStore, "_load", counted)
+    _time.sleep(0.5)  # about 50 polls
+    assert loads["n"] <= 4, f"{loads['n']} reads of an unchanged calls file"
+
+    monkeypatch.setattr(calls_store.CallStore, "_load", real_load)
+    store = calls._store(home)
+    assert store.answer_waiting("sk-1", choice="once")["status"] == "answered"
+    assert resolved.wait(5), "the answer's write is read on the next poll"
+
+
+def test_an_approval_follower_still_reads_an_unchanged_file_now_and_then(home, fake, monkeypatch):
+    # A wait ages out with no write, so a quiet file is read again at least
+    # every APPROVAL_QUIET_RECHECK_S.
+    import time as _time
+
+    calls_store = sys.modules["conduit_push.calls_store"]
+    approval = types.ModuleType("tools.approval")
+    approval.list_gateway_approvals = lambda key: []
+    approval.resolve_gateway_approval = lambda *args, **kwargs: 0
+    monkeypatch.setitem(sys.modules, "tools.approval", approval)
+    monkeypatch.setattr(calls, "APPROVAL_ANSWER_POLL_S", 0.01)
+    monkeypatch.setattr(calls, "APPROVAL_QUIET_RECHECK_S", 0.05)
+    monkeypatch.setattr(calls, "alert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calls_store, "SETTLED_NS", 0)
+    _settings(home, alerts=True)
+    plugin._pre_approval_request(session_key="sk-1", session_id="rt-1", description="Delete the build",
+                                 command="rm -rf build", turn_id="t1")
+    loads = {"n": 0}
+    real_load = calls_store.CallStore._load
+
+    def counted(self, *args, **kwargs):
+        loads["n"] += 1
+        return real_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(calls_store.CallStore, "_load", counted)
+    _time.sleep(0.5)
+    assert 4 <= loads["n"] <= 40, f"{loads['n']} reads in 0.5 s with a 0.05 s recheck"
+
+
 def test_a_call_answer_waits_for_hermes_to_list_its_approval(home, fake, monkeypatch):
     # The answer is kept until a pending request takes it: one Hermes lists
     # a moment late still gets it.
