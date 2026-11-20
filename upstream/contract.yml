@@ -227,6 +227,10 @@ notes:
     a clean shutdown runs, _stop_turns_before_exit (in tui_gateway.session_reaper, for the SIGTERM
     handler, and in tui_gateway.server, for _shutdown_sessions), is wrapped to mark the shutdown:
     without it a clean restart's stopped workstream is taken for a user's stop and never recovered.
+    Where the gateway's listener runs the workstreams (its session authority), the gateway's own
+    stop() interrupts them instead, which GatewayRunner._stop_task (set by stop(), kept until the
+    process ends) says; the runner is kept from gateway.run_api._ACTIVE_RUNNER, which the gateway
+    clears before the last turn has unwound. A gateway process may never load the TUI stopper.
     Don't Ask approvals in workstreams (Edit Bot > Work) call config.set with key=yolo and
     scope=session on the workstream's live session before each turn: Hermes' per-session /yolo,
     kept on the session row, never process-wide (the call always names a live session). Turning

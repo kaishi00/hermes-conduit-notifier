@@ -3958,6 +3958,7 @@ def restart(hermes, monkeypatch):
     after everything in the registry."""
     hermes._sessions.clear()
     work._shutting_down.clear()  # a new process
+    work._gateways.clear()
     for name in work._SHUTDOWN_MODULES:
         if hasattr(sys.modules.get(name), work._SHUTDOWN_MARK):
             delattr(sys.modules[name], work._SHUTDOWN_MARK)
@@ -4542,6 +4543,56 @@ def test_a_clean_restart_is_recovered_like_a_crash(on, hermes, monkeypatch):
     call("work_list")
     sent, = submitted_to(hermes, WORKER_1)
     assert "Hermes restarted" in sent["text"]
+
+
+def test_a_gateway_restart_is_recovered_like_a_crash(on, hermes, monkeypatch):
+    # Where the gateway's listener runs, workstreams are its session
+    # authority's turns, and the gateway's stop() interrupts them: the
+    # dashboard's turn stopper isn't loaded there (.52 on Hermes v0.23.3).
+    monkeypatch.setitem(sys.modules, work.degraded._HOLDER, types.ModuleType(work.degraded._HOLDER))
+    monkeypatch.delitem(sys.modules, "tui_gateway.session_reaper", raising=False)
+    monkeypatch.setattr(work, "_on_gateway", lambda: True)
+    start()
+    gateway = types.SimpleNamespace(_stop_task=None)  # the stand-in API keeps running the chats
+    monkeypatch.setitem(sys.modules, "gateway.run_api", types.SimpleNamespace(_ACTIVE_RUNNER=gateway))
+    work.turn_started(WORKER_1)
+    assert work.degraded.current() == []
+    work.step_started(WORKER_1, "read_file", {"path": "b.log"}, tool_call_id="c2")
+    gateway._stop_task = object()  # GatewayRunner.stop()
+    sys.modules["gateway.run_api"]._ACTIVE_RUNNER = None  # let go of before the last turn unwinds
+    work.step_ended(WORKER_1, "read_file", tool_call_id="c2", status="cancelled")
+    work.turn_finished(WORKER_1, failed=False, interrupted=True)
+    assert on.get("W1").status == "running"  # not taken for the user's stop
+    restart(hermes, monkeypatch)
+    call("work_list")
+    sent, = submitted_to(hermes, WORKER_1)
+    assert "Hermes restarted" in sent["text"]
+
+
+def test_a_gateway_that_cant_say_its_stopping_is_said_on_the_plugin_page(on, hermes, monkeypatch):
+    monkeypatch.setitem(sys.modules, work.degraded._HOLDER, types.ModuleType(work.degraded._HOLDER))
+    hermes_stops_turns(monkeypatch, lambda: None)  # the dashboard's stopper doesn't count on the gateway
+    server = types.ModuleType("tui_gateway.server")
+    server._stop_turns_before_exit = lambda: None
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", server)
+    monkeypatch.setitem(sys.modules, "gateway.run_api", types.SimpleNamespace(_ACTIVE_RUNNER=types.SimpleNamespace()))
+    monkeypatch.setattr(work, "_on_gateway", lambda: True)
+    assert work._watch_shutdown() is False and work.degraded.current() == ["workstream-recovery"]
+    sys.modules["gateway.run_api"]._ACTIVE_RUNNER = types.SimpleNamespace(_stop_task=None)
+    assert work._watch_shutdown() is True and work.degraded.current() == []
+
+
+def test_a_gateway_replaced_in_process_doesnt_keep_saying_its_stopping(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_on_gateway", lambda: True)
+    stopped = types.SimpleNamespace(_stop_task=None)
+    monkeypatch.setitem(sys.modules, "gateway.run_api", types.SimpleNamespace(_ACTIVE_RUNNER=stopped))
+    work._watch_shutdown()
+    stopped._stop_task = object()
+    assert work._is_shutting_down()
+    sys.modules["gateway.run_api"]._ACTIVE_RUNNER = types.SimpleNamespace(_stop_task=None)
+    work._watch_shutdown()  # the next workstream turn, under the new runner
+    assert not work._is_shutting_down()
+    work._gateways.clear()
 
 
 def test_a_restart_while_a_workstream_waits_for_its_agents_keeps_what_it_said(on, hermes, monkeypatch):
