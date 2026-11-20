@@ -681,11 +681,22 @@ def test_a_list_that_isnt_json_short_of_its_limit_is_asked_the_same_again(report
     with caplog.at_level(logging.INFO, logger=pulse.logger.name):
         assert listed(live)["state"] == pulse.RUN_READY
     first, second = live.llm.calls
-    assert first["max_tokens"] == second["max_tokens"] == candidates.REPLY_TOKENS
+    # Asked the same, with the room every provider took before (a refusal of 8,000 gets its report).
+    assert (first["max_tokens"], second["max_tokens"]) == (candidates.REPLY_TOKENS,
+                                                          candidates.FALLBACK_REPLY_TOKENS)
     assert first["instructions"] == second["instructions"]
     assert any(record.getMessage().endswith(f"wasn't the JSON asked for (model deepseek-v4.1-flash, 1200 of "
                                             f"{candidates.REPLY_TOKENS} reply tokens, 19 characters)")
                for record in caplog.records)
+
+
+def test_an_unread_reply_logs_a_reported_zero_and_says_unknown_only_when_unreported(caplog):
+    with caplog.at_level(logging.INFO, logger=pulse.logger.name):
+        assert not pulse._log_unread(unread(0, text=""), "pulse memory", 2_000)
+        assert not pulse._log_unread(types.SimpleNamespace(parsed=None, usage=None), "pulse memory", 2_000)
+    zero, missing = [record.getMessage() for record in caplog.records]
+    assert "0 of 2000 reply tokens, 0 characters" in zero
+    assert "(model unknown, unknown of 2000 reply tokens, unknown characters)" in missing
 
 
 def test_a_list_that_fails_once_is_asked_again(reporting):
