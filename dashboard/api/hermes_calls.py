@@ -58,6 +58,10 @@ def _calls_store() -> Any:
         return _calls_store_module
 
 
+# Conduit and the desktop tell this refusal from calls being off by "paired".
+CANT_RING_DETAIL = "This Hermes profile isn't paired with Conduit, and no computer asked for its rings in the last 30 days"
+
+
 def _can_ring(store: Any) -> bool:
     """An iPhone is paired, or Conduit on a computer asked for rings lately:
     a computer with no iPhone rings for calls by itself."""
@@ -106,7 +110,7 @@ def add_call_watch(body: Any) -> Dict[str, Any]:
         raise core.TokenError(400, "Expected a JSON object")
     store = _calls_store().CallStore(core._calls_home())
     if not _can_ring(store):
-        raise core.TokenError(409, "This Hermes profile isn't paired with Conduit")
+        raise core.TokenError(409, CANT_RING_DETAIL)
     try:
         return store.add_watch(body.get("session_ids"), body.get("title", ""),
                                hold_s=body.get("hold_s", 0), ended_within_s=body.get("ended_within_s"))
@@ -145,7 +149,7 @@ def set_call_presence(body: Any) -> Dict[str, Any]:
         raise core.TokenError(400, "Expected a JSON object")
     store = _calls_store().CallStore(core._calls_home())
     if not _can_ring(store):
-        raise core.TokenError(409, "This Hermes profile isn't paired with Conduit")
+        raise core.TokenError(409, CANT_RING_DETAIL)
     try:
         return store.set_presence(body.get("hold_s"))
     except ValueError as exc:
@@ -159,7 +163,7 @@ def record_call_outcome(body: Any) -> Dict[str, Any]:
         raise core.TokenError(400, "Expected a JSON object")
     store = _calls_store().CallStore(core._calls_home())
     if not _can_ring(store):
-        raise core.TokenError(409, "This Hermes profile isn't paired with Conduit")
+        raise core.TokenError(409, CANT_RING_DETAIL)
     try:
         return store.record_outcome(
             body.get("call_id"), body.get("session_ids"), body.get("outcome"), kind=body.get("kind"),

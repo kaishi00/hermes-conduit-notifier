@@ -863,3 +863,4 @@ def test_the_model_draws_cards_only_when_they_help():
         assert "the weather" in text, "the three set the same bar"
     # The user's wishes stand as their own sentence, not inside the "never" list.
     assert "a few points. When the user has said how they want cards used" in tool.SCHEMA["description"]
+    assert "bullet points. When the user has said how they want cards used" in " ".join(skill.split())

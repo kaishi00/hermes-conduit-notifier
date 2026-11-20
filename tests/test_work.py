@@ -4595,6 +4595,25 @@ def test_a_gateway_replaced_in_process_doesnt_keep_saying_its_stopping(on, herme
     work._gateways.clear()
 
 
+def test_a_turn_the_old_runner_stopped_stays_a_restart_after_an_in_process_swap(on, hermes, monkeypatch):
+    # Notifier 958: the runner is kept per turn, so a new runner serving a
+    # later turn doesn't take the old one's interrupted end for the user's stop.
+    monkeypatch.setitem(sys.modules, work.degraded._HOLDER, types.ModuleType(work.degraded._HOLDER))
+    monkeypatch.delitem(sys.modules, "tui_gateway.session_reaper", raising=False)
+    monkeypatch.setattr(work, "_on_gateway", lambda: True)
+    start()
+    old = types.SimpleNamespace(_stop_task=None)
+    monkeypatch.setitem(sys.modules, "gateway.run_api", types.SimpleNamespace(_ACTIVE_RUNNER=old))
+    work.turn_started(WORKER_1)
+    old._stop_task = object()  # the old runner stops its turns
+    sys.modules["gateway.run_api"]._ACTIVE_RUNNER = types.SimpleNamespace(_stop_task=None)
+    work._watch_shutdown()  # another workstream's turn starts under the new runner meanwhile
+    assert not work._is_shutting_down()
+    work.turn_finished(WORKER_1, failed=False, interrupted=True)
+    assert on.get("W1").status == "running"  # left for recovery, not taken for the user's stop
+    work._gateways.clear()
+
+
 def test_a_restart_while_a_workstream_waits_for_its_agents_keeps_what_it_said(on, hermes, monkeypatch):
     # App issue 2206: the held reply is on disk, so the coordinator still hears it.
     start()

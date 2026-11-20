@@ -39,7 +39,7 @@ from typing import Any, Callable
 from hermes_constants import get_hermes_home
 
 from . import chat_on_screen, client, location_profiles, reply_sources, session_titles, turn_surface
-from .calls_store import ALERT_DELAY_S, MAX_HOLD_S, CallStore
+from .calls_store import ALERT_DELAY_S, MAX_HOLD_S, CallStore, _settled_signature
 from .location_store import LocationStore
 from .events import push_event
 
@@ -476,6 +476,10 @@ APPROVAL_ANSWER_POLL_S = 1.0
 APPROVAL_ANSWER_MAX_S = 2 * 3600.0
 # Polls a call's answer may find no matching pending approval before it's dropped.
 APPROVAL_MATCH_TRIES = 5
+# A poll that found nothing is trusted while the calls file is unchanged
+# (notifier #962), but read again at least this often: a wait ages out with
+# no write.
+APPROVAL_QUIET_RECHECK_S = 60.0
 
 
 # The chats whose approval a follower watches for a call's answer.
@@ -530,7 +534,17 @@ def follow_approval(session_key: str, command: str) -> None:
         # Its own wait, not _sleep: the plugin's unload ends it at once.
         misses = 0
         claimed = ""
+        # The file as it was when a poll last found the approval waiting and
+        # unanswered, and when that read is due again regardless. An answer, a
+        # withdrawal or a settlement is a write, which changes the file, so
+        # until it changes neither read can say anything new (as answers_ready
+        # does for parked questions, #563).
+        quiet: tuple[Any, float] | None = None
         while time.monotonic() < deadline and not _stopped.wait(APPROVAL_ANSWER_POLL_S):
+            signature = _settled_signature(store.path)
+            if quiet is not None and signature is not None and quiet[0] == signature and time.monotonic() < quiet[1]:
+                continue
+            quiet = None
             try:
                 if not store.has_waiting(session_key, "approval"):
                     if claimed:
@@ -545,6 +559,8 @@ def follow_approval(session_key: str, command: str) -> None:
                 logger.warning("Conduit could not read a call's approval answer", exc_info=True)
                 return
             if answer is None:
+                if signature is not None:
+                    quiet = (signature, time.monotonic() + APPROVAL_QUIET_RECHECK_S)
                 continue
             claimed = answer["answer_id"]
             try:

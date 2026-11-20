@@ -3398,6 +3398,11 @@ _SHUTDOWN_MODULES = ("tui_gateway.session_reaper", "tui_gateway.server")
 # until another runner serves.
 _GATEWAY_STOP = "_stop_task"
 _gateways: list = []
+# The runner serving when each workstream's turn started, by (home, ref): an
+# in-process swap of runners while a turn the old one stopped is unwinding
+# still tells that turn's end from a user's stop (notifier 958). One per
+# workstream, replaced by its next turn.
+_turn_gateways: dict[tuple[str, str], Any] = {}
 
 
 def _gateway_stopping(gateway: Any) -> bool:
@@ -4691,6 +4696,8 @@ def _turn_started(session_id: Any) -> bool:
     if work_store.Store(home).get_meta(_CHECK + work.ref):
         work_store.Store(home).set_meta(_CHECK + work.ref, "")  # a new turn: nothing left to check first
     _watch_shutdown()  # so a restart during it is told from a user's stop
+    with _wake_lock:
+        _turn_gateways[(str(home), work.ref)] = _gateways[0] if _gateways else None
     if _watched(work):
         # The user may have started it by writing in its chat: their words
         # are read into the ledger, and against the bot's other work.
@@ -4783,7 +4790,9 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
             _redirecting.discard((str(home), work.ref))
         if redirected:
             return True  # a work_send redirected it: the new turn runs, and settles it
-        if _is_shutting_down():
+        with _wake_lock:
+            turn_gateway = _turn_gateways.pop((str(home), work.ref), None)
+        if _is_shutting_down() or _gateway_stopping(turn_gateway):
             # Hermes stopped it on its way out: a restart, not the user. Left
             # running, so the next process's sweep recovers it.
             return True
