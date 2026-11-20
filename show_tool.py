@@ -67,7 +67,7 @@ SCHEMA: dict[str, Any] = {
         "card: show it, or answer in text. In a typed chat most answers need no card: use one only when the user "
         "asks to see something or it shows what prose and a short list can't (several places, a plan by day, a "
         "forecast, numbers to compare, a list to tick off, a diff), never for an explanation, advice, a short "
-        "answer or a few points, and when the user has said how they want cards used, do as they say. When you do "
+        "answer or a few points. When the user has said how they want cards used, do as they say. When you do "
         "show something, prefer cards, which Conduit draws natively: a map with pins and a route, one place in detail, several "
         "places to swipe through, big numbers (stats), a line, bar or pie chart, a weather forecast, a comparison "
         "of two to four options, steps the user can tick off (with timers), photos, videos or audio to play, people "
