@@ -5,7 +5,8 @@ description: When and how to phone the user through Conduit: calls they ask for,
 
 # Calling the user through Conduit
 
-Conduit can make the user's iPhone ring like a phone call. When they answer,
+Conduit can make the user's iPhone, or Conduit on their computer, ring like a
+phone call. When they answer,
 a live voice conversation opens in the chat that called, starting with your
 reason and that turn's final reply. Calls interrupt people, so they follow
 the user's settings in Conduit, under Calls from Hermes: "Call when I ask",

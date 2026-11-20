@@ -186,6 +186,14 @@ MAX_DELIVERED = 32
 # short enough that a computer waking up never rings for an old call.
 RING_TTL_S = 2 * 60
 MAX_RINGS = 16
+# Conduit on a computer asks for rings every few seconds while it runs. With
+# no iPhone paired, a call rings a computer that asked within COMPUTER_LISTENS_S,
+# and the call tool shows while one asked within COMPUTER_KNOWN_S (Hermes keeps
+# a tool's availability for the whole process, so it can't follow the minute).
+COMPUTER_LISTENS_S = 2 * 60
+COMPUTER_KNOWN_S = 30 * DAY_S
+# A computer's asks are noted at most this often: no write every few seconds.
+COMPUTER_NOTE_EVERY_S = 30
 RING_KINDS = ("done", "failed", "stopped", "approval", "question")
 # Where a ring stands: still ringing, or settled by the device that acted on
 # it (a call started on any device answers it; a decline or a missed call
@@ -1164,6 +1172,22 @@ class CallStore:
             state["rings"] = [*state["rings"], entry]
             state["rings"] = state["rings"][-MAX_RINGS:]
 
+    def note_computer(self) -> None:
+        """Conduit on a computer asked for rings: with no iPhone paired, calls
+        ring it while it keeps asking."""
+        if self.clock() - self._load()["computer_at"] < COMPUTER_NOTE_EVERY_S:
+            return
+        with self._locked() as state:
+            state["computer_at"] = self.clock()
+
+    def computer_listens(self) -> bool:
+        """Whether a computer asked for rings in the last COMPUTER_LISTENS_S."""
+        return self.clock() - self._load()["computer_at"] < COMPUTER_LISTENS_S
+
+    def computer_known(self) -> bool:
+        """Whether a computer asked for rings in the last COMPUTER_KNOWN_S."""
+        return self.clock() - self._load()["computer_at"] < COMPUTER_KNOWN_S
+
     def rings(self, after: Any = None) -> dict[str, Any]:
         """The calls of the last RING_TTL_S seconds that went out or settled
         after ``after`` (the ``now`` an earlier answer gave), oldest first:
@@ -1381,6 +1405,8 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
                 and isinstance(entry.get("at"), (int, float)) and not isinstance(entry.get("at"), bool)
                 and now - entry["at"] < OUTCOME_TTL_S):
             told.append({"id": entry["id"], "at": float(entry["at"])})
+    computer = raw.get("computer_at", 0.0)
+    computer_at = float(computer) if isinstance(computer, (int, float)) and not isinstance(computer, bool) and computer <= now else 0.0
     presence = raw.get("presence_until", 0.0)
     presence_until = float(presence) if isinstance(presence, (int, float)) and not isinstance(presence, bool) and presence > now else 0.0
     waiting = []
@@ -1402,7 +1428,7 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
     return {"v": VERSION, "settings": settings, "watches": watches, "history": history,
             "ends": ends[-MAX_RECENT_ENDS:], "seeded": seeded[-MAX_SEEDED:], "presence_until": presence_until,
             "outcomes": outcomes[-MAX_OUTCOMES:], "told": told[-MAX_TOLD:], "waiting": _capped_waiting(waiting),
-            "delivered": delivered[-MAX_DELIVERED:], "rings": rings[-MAX_RINGS:]}
+            "delivered": delivered[-MAX_DELIVERED:], "rings": rings[-MAX_RINGS:], "computer_at": computer_at}
 
 
 def _clip(value: Any, limit: int) -> str:

@@ -57,6 +57,7 @@ def test_status_reports_the_defaults_and_their_bounds(paired):
     assert response.json() == {
         "ok": True,
         "paired": True,
+        "can_ring": True,
         "settings": {"enabled": False, "when_asked": True, "decides": False, "alerts": False,
                      "quiet_at_screen": True, "min_gap_s": 120, "per_hour": 6, "per_day": 20, "rules": "",
                      "avoid_places": [], "avoid_unknown_place": False},
@@ -72,6 +73,18 @@ def test_status_reports_the_defaults_and_their_bounds(paired):
 
 def test_status_says_when_the_profile_is_not_paired(home):
     assert _http().get(f"{BASE}/calls").json()["paired"] is False
+    assert _http().get(f"{BASE}/calls").json()["can_ring"] is False
+
+
+def test_a_computer_asking_for_rings_can_ring_with_no_iphone(home):
+    # Conduit on a computer with no iPhone: its asks for rings let calls ring it.
+    http = _http()
+    assert http.get(f"{BASE}/calls/rings").status_code == 200
+    status = http.get(f"{BASE}/calls").json()
+    assert status["paired"] is False and status["can_ring"] is True
+    http.put(f"{BASE}/calls", json={"settings": {"enabled": True}})
+    response = http.post(f"{BASE}/calls/watches", json={"session_ids": ["st-1"], "title": "Build"})
+    assert response.status_code == 200, response.text
 
 
 def test_settings_change_and_persist(paired):

@@ -58,11 +58,19 @@ def _calls_store() -> Any:
         return _calls_store_module
 
 
+def _can_ring(store: Any) -> bool:
+    """An iPhone is paired, or Conduit on a computer asked for rings lately:
+    a computer with no iPhone rings for calls by itself."""
+    return core._load_pairing_state(core._pairing_state_path()) is not None or store.computer_known()
+
+
 def calls_status() -> Dict[str, Any]:
     module = _calls_store()
     store = module.CallStore(core._calls_home())
     return {
         "paired": core._load_pairing_state(core._pairing_state_path()) is not None,
+        # Calls can ring somewhere: the iPhone, or Conduit on a computer.
+        "can_ring": _can_ring(store),
         "settings": store.settings(),
         "bounds": {key: {"min": low, "max": high} for key, (low, high) in module.INT_BOUNDS.items()},
         # The longest "what's worth a call" note the host keeps.
@@ -72,7 +80,9 @@ def calls_status() -> Dict[str, Any]:
 
 
 def call_rings(after: Optional[float]) -> Dict[str, Any]:
-    return _calls_store().CallStore(core._calls_home()).rings(after)
+    store = _calls_store().CallStore(core._calls_home())
+    store.note_computer()
+    return store.rings(after)
 
 
 def update_call_settings(body: Any) -> Dict[str, Any]:
@@ -92,9 +102,9 @@ def add_call_watch(body: Any) -> Dict[str, Any]:
     tells the user itself."""
     if not isinstance(body, dict):
         raise core.TokenError(400, "Expected a JSON object")
-    if core._load_pairing_state(core._pairing_state_path()) is None:
-        raise core.TokenError(409, "This Hermes profile isn't paired with Conduit")
     store = _calls_store().CallStore(core._calls_home())
+    if not _can_ring(store):
+        raise core.TokenError(409, "This Hermes profile isn't paired with Conduit")
     try:
         return store.add_watch(body.get("session_ids"), body.get("title", ""),
                                hold_s=body.get("hold_s", 0), ended_within_s=body.get("ended_within_s"))
@@ -131,10 +141,11 @@ def set_call_presence(body: Any) -> Dict[str, Any]:
     renews it during the call), or not (0): nothing rings meanwhile."""
     if not isinstance(body, dict):
         raise core.TokenError(400, "Expected a JSON object")
-    if core._load_pairing_state(core._pairing_state_path()) is None:
+    store = _calls_store().CallStore(core._calls_home())
+    if not _can_ring(store):
         raise core.TokenError(409, "This Hermes profile isn't paired with Conduit")
     try:
-        return _calls_store().CallStore(core._calls_home()).set_presence(body.get("hold_s"))
+        return store.set_presence(body.get("hold_s"))
     except ValueError as exc:
         raise core.TokenError(400, str(exc))
 
@@ -144,10 +155,11 @@ def record_call_outcome(body: Any) -> Dict[str, Any]:
     turn of its chat hears so."""
     if not isinstance(body, dict):
         raise core.TokenError(400, "Expected a JSON object")
-    if core._load_pairing_state(core._pairing_state_path()) is None:
+    store = _calls_store().CallStore(core._calls_home())
+    if not _can_ring(store):
         raise core.TokenError(409, "This Hermes profile isn't paired with Conduit")
     try:
-        return _calls_store().CallStore(core._calls_home()).record_outcome(
+        return store.record_outcome(
             body.get("call_id"), body.get("session_ids"), body.get("outcome"), kind=body.get("kind"),
             title=body.get("title", ""), reason=body.get("reason", ""), age_s=body.get("age_s", 0))
     except ValueError as exc:
