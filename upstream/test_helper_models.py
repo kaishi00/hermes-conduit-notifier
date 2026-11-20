@@ -1,7 +1,9 @@
 """Predictive's fast model as one of Hermes' helper models (hermes-conduit,
 configuring Hermes from Conduit): the plugin registers `conduit_predict`, so
 Hermes' own model routes list it and set it in the profile the request
-names, where the plugin's predictions read it."""
+names, where the plugin's predictions read it. Also Hermes' own Background
+review slot, which the plugin adds to the dashboard's list until Hermes lists
+it (hermes-conduit#2871)."""
 
 from __future__ import annotations
 
