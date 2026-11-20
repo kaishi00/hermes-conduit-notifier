@@ -13,11 +13,23 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.187.3 (2026-11-20)
+## 0.187.5 (2026-11-20)
 
 ### Fixes
 
 - Update Hermes from Conduit no longer stops partway on a host where systemd runs the dashboard: stopping the dashboard during the update could kill the update with it and leave Hermes offline. The update now runs on its own.
+
+## 0.187.4 (2026-11-20)
+
+### Fixes
+
+- A Pulse report whose list comes back unreadable but not cut off is asked again with the same room, not less; only a failed model call is retried with the smaller room, for fewer items so the list fits.
+
+## 0.187.3 (2026-11-20)
+
+### Fixes
+
+- A Pulse report whose first ask fails for any reason other than running out of room is asked again with the room it had before 0.187.2, so a provider that refuses the larger request still sends its report.
 
 ## 0.187.2 (2026-11-20)
 

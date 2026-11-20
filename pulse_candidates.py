@@ -83,6 +83,10 @@ AREAS = ("work", "personal", "health", "home", "money", "social", "travel", "oth
 # room (CutOff); a provider that refuses that much room fails only the retry.
 CONTEXT_BUDGET = 14_000
 REPLY_TOKENS = 8_000
+# A retry after the call itself failed asks with the room every provider took
+# before, for RETRY_FOUND found entries so the list fits it, so one that
+# refuses 8,000 still gets its report.
+FALLBACK_REPLY_TOKENS = 6_000
 RETRY_REPLY_TOKENS = 16_000
 RETRY_FOUND = 5
 JOURNAL_DAYS = 30

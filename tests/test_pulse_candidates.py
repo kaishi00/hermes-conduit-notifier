@@ -688,10 +688,25 @@ def test_a_list_that_isnt_json_short_of_its_limit_is_asked_the_same_again(report
                for record in caplog.records)
 
 
+def test_an_unread_reply_logs_a_reported_zero_and_says_unknown_only_when_unreported(caplog):
+    with caplog.at_level(logging.INFO, logger=pulse.logger.name):
+        assert not pulse._log_unread(unread(0, text=""), "pulse memory", 2_000)
+        assert not pulse._log_unread(types.SimpleNamespace(parsed=None, usage=None), "pulse memory", 2_000)
+    zero, missing = [record.getMessage() for record in caplog.records]
+    assert "0 of 2000 reply tokens, 0 characters" in zero
+    assert "(model unknown, unknown of 2000 reply tokens, unknown characters)" in missing
+
+
 def test_a_list_that_fails_once_is_asked_again(reporting):
     live = reporting
     live.llm.replies += [RuntimeError("the model is down"), {"remembered": [], "found": [FOUND]}]
     assert listed(live)["state"] == pulse.RUN_READY
+    # The call itself failed: asked again with the room every provider took before
+    # 0.187.2, so one that refuses 8,000 still gets its report.
+    first, second = live.llm.calls
+    assert (first["max_tokens"], second["max_tokens"]) == (candidates.REPLY_TOKENS,
+                                                          candidates.FALLBACK_REPLY_TOKENS)
+    assert f"up to {candidates.RETRY_FOUND} entries" in second["instructions"]  # so it fits
     pulse.tick()
     [sent] = live.sent()
     assert "1. [follow-up] Look at the flaky deploy (you asked in Deploy)" in sent
