@@ -860,6 +860,9 @@ def _ring_computer_only(event: dict[str, Any]) -> None:
 
 def deliver(event: dict[str, Any], fallback: dict[str, Any] | None) -> None:
     if client.load_state() is None:
+        if _stopped.is_set():
+            logger.info("Conduit call request dropped: the plugin was unloaded")
+            return
         _ring_computer_only(event)
         return
     relay_failed = False

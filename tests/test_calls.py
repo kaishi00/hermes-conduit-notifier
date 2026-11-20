@@ -156,6 +156,17 @@ def test_with_no_iphone_a_call_rings_a_computer_that_asks_for_rings(home, fake):
     assert ring["id"] == watch_id
 
 
+def test_with_no_iphone_a_call_delivered_after_the_unload_rings_no_computer(home, fake):
+    fake.state = None
+    CallStore(home).note_computer()
+    calls.stop()
+    try:
+        calls.deliver({"type": "call.requested", "call": {"id": "watch_abcdefgh", "session_ids": ["st-1"]}}, None)
+    finally:
+        calls.start()
+    assert fake.sent == [] and CallStore(home).rings()["rings"] == []
+
+
 def test_with_no_iphone_and_no_computer_asking_nothing_rings(home, fake, clock):
     fake.state = None
     _watch(home, "st-1")
@@ -163,7 +174,8 @@ def test_with_no_iphone_and_no_computer_asking_nothing_rings(home, fake, clock):
     clock[0] += 5 * 60
     assert calls.can_ring() is True
     calls.turn_ended("st-1", "done", profile="default", fallback=READY)
-    assert fake.sent == [] and CallStore(home).rings()["rings"] == []
+    # The patched clock on both sides: a ring kept at its time would show.
+    assert fake.sent == [] and calls._store(home).rings()["rings"] == []
 
 
 def test_with_no_iphone_and_no_computer_ever_calls_cant_ring(home, fake):
@@ -1728,3 +1740,10 @@ def test_a_turn_whose_start_was_forgotten_still_ends_on_its_close(home, fake, tu
     _watch(home, "rt-1")
     plugin._on_session_finalize(session_id="rt-1")
     assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]
+
+
+def test_a_computer_never_heard_from_isnt_known_on_a_clock_near_the_epoch(home):
+    store = CallStore(home, clock=lambda: 50.0)
+    assert store.computer_listens() is False and store.computer_known() is False
+    store.note_computer()
+    assert store.computer_listens() is True and store.computer_known() is True

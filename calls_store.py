@@ -1175,18 +1175,22 @@ class CallStore:
     def note_computer(self) -> None:
         """Conduit on a computer asked for rings: with no iPhone paired, calls
         ring it while it keeps asking."""
-        if self.clock() - self._load()["computer_at"] < COMPUTER_NOTE_EVERY_S:
+        at = self._load()["computer_at"]
+        if at and self.clock() - at < COMPUTER_NOTE_EVERY_S:
             return
         with self._locked() as state:
             state["computer_at"] = self.clock()
 
     def computer_listens(self) -> bool:
         """Whether a computer asked for rings in the last COMPUTER_LISTENS_S."""
-        return self.clock() - self._load()["computer_at"] < COMPUTER_LISTENS_S
+        at = self._load()["computer_at"]
+        # 0 is never: a clock near the epoch mustn't read it as lately.
+        return bool(at) and self.clock() - at < COMPUTER_LISTENS_S
 
     def computer_known(self) -> bool:
         """Whether a computer asked for rings in the last COMPUTER_KNOWN_S."""
-        return self.clock() - self._load()["computer_at"] < COMPUTER_KNOWN_S
+        at = self._load()["computer_at"]
+        return bool(at) and self.clock() - at < COMPUTER_KNOWN_S
 
     def rings(self, after: Any = None) -> dict[str, Any]:
         """The calls of the last RING_TTL_S seconds that went out or settled

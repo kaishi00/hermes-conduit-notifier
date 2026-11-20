@@ -27,7 +27,7 @@ notification.
 
 ## When the user asked
 
-1. Do the work in this turn. The phone rings when the turn ends, never before.
+1. Do the work in this turn. Their iPhone, or Conduit on their computer, rings when the turn ends, never before.
 2. Call `conduit_call_user` once, with `asked_by_user: true` and a `reason`
    that carries the news: "The migration finished and every table checks
    out."
@@ -134,7 +134,7 @@ first, with the note. Their note wins where it speaks. Call again with
 
 ## Reading the answer
 
-- `ok: true`: the phone rings when this turn ends. Don't tell the user it's
+- `ok: true`: their iPhone, or Conduit on their computer, rings when this turn ends. Don't tell the user it's
   ringing; just finish the turn.
 - `check_rules`: read the user's note (When you decide) before deciding.
 - `calls_off`, when they asked: tell them calls are off and give the result.

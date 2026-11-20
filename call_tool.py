@@ -140,7 +140,8 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool],
                          "when it's time and tells you what to reply.")}
     if not calls.can_ring():
         return {"ok": False, "error": "not_paired",
-                "note": "This Hermes profile isn't paired with the Conduit app, so it can't call. Say so in your reply."}
+                "note": ("This Hermes profile isn't paired with the Conduit app on an iPhone, and Conduit on a computer "
+                         "hasn't asked for calls lately, so it can't call. Say so in your reply.")}
     if calls.in_call():
         # Already talking to Hermes (a phone, CarPlay or Apple Watch call):
         # nothing would ring, so the model mustn't promise that it will.
@@ -176,8 +177,9 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool],
             return {"ok": False, "error": "too_many", "note": "Too many calls are already waiting. Put the news in your reply."}
         return {"ok": False, "error": "invalid", "note": "The call couldn't be set up. Put the news in your reply."}
     return {"ok": True, "status": "call_at_turn_end",
-            "note": ("The user's phone rings when this turn ends, unless their call limits hold it back (they get "
-                     "the usual notification then) or they're already in a voice call with you. Finish the work "
+            "note": ("The user's iPhone, or Conduit on their computer, rings when this turn ends, unless their call limits hold it back (they get "
+                     "the usual notification then), they're already in a voice call with you, or, with no iPhone, "
+                     "Conduit isn't open on their computer. Finish the work "
                      "and end the turn with the result: the call opens with your reason and that reply. Don't "
                      "say the phone is ringing yet.")}
 
