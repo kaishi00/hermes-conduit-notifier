@@ -74,7 +74,8 @@ they run:
     bot_plugin            A bot's Conduit plugin: whether a profile has it on,
                           and turning it on there
     helper_models         Helper models: the slots Hermes uses that its
-                          dashboard doesn't list (Background review)
+                          dashboard doesn't list (Background review,
+                          Group router)
 
 A module takes what it uses from another by module (``core.TokenError``), never
 by name, so a test that replaces ``plugin_api.core._calls_home`` replaces it
