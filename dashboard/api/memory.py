@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextvars
+import inspect
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -35,6 +36,9 @@ router = core.router
 # since initializing one can open network clients.
 
 MEMORY_CONTEXT_MAX_CHARS = 8000
+# Inspect a bounded prefix even if a provider or builtin store returns much
+# more text. The last line of a truncated prefix is never used as a fact.
+MEMORY_CONTEXT_INPUT_MAX_CHARS = 64_000
 MEMORY_RECALL_MAX_CHARS = 4000
 MEMORY_MAX_QUERY_CHARS = 500
 # A voice turn recalls at most once; cap a looping client well above that.
@@ -46,6 +50,9 @@ MEMORY_CONTEXT_WINDOW_S = 60.0
 # Budget for one request, provider start included. Each provider call runs on
 # its own thread, so a hung call is abandoned rather than holding a worker.
 MEMORY_TIMEOUT_S = 10.0
+# A call waits on its context; a provider's voice facts get a share of it,
+# then the built-in notes go alone.
+MEMORY_VOICE_CONTEXT_TIMEOUT_S = 3.0
 MEMORY_WORKERS = 8
 # Requests one profile may have running or queued at once, so a slow backend
 # can't fill the shared pool for every profile.
@@ -82,6 +89,65 @@ def _clip_block(value: Any, limit: int) -> str:
     """Like _clip, but keeps line structure: memory blocks are formatted text."""
     text = str(value or "").strip()
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _complete_memory_lines(blocks: tuple[str, ...], limit: int) -> str:
+    """Pack complete voice facts first, then builtin notes, without cutting a negation.
+
+    Voice providers opt in to supplying display-ready data. Oversized lines are
+    omitted rather than sliced; old providers keep the original snapshot path.
+    """
+    picked: list[str] = []
+    used = 0
+    for block in blocks:
+        view = block[:MEMORY_CONTEXT_INPUT_MAX_CHARS]
+        if len(block) > len(view):
+            # A qualifier may be beyond the inspected prefix. Keep only lines
+            # whose terminating newline was included, never its partial tail.
+            end = view.rfind("\n")
+            view = view[:end] if end >= 0 else ""
+        lines: list[str] = []
+        block_chars = 0
+        separator = 2 if picked else 0
+        for line in view.strip().splitlines():
+            added = len(line) + bool(lines)
+            if used + separator + block_chars + added <= limit:
+                lines.append(line)
+                block_chars += added
+        text = "\n".join(lines).strip()
+        if text:
+            picked.append(text)
+            used += separator + len(text)
+    return "\n\n".join(picked)
+
+
+def _provider_voice_context(entry: Any, deadline: float) -> Optional[str]:
+    """A provider's own voice facts (``voice_prompt_block()``), or None.
+
+    Optional and not part of Hermes' provider interface (Nyx 7.24.1 has it).
+    Never a generic tool prompt. A failure, wrong type or slow answer falls back
+    to the built-in snapshot, so the method can't cost a call its notes.
+    """
+    # Inspect without invoking __getattr__ or a property on legacy providers.
+    capability = inspect.getattr_static(entry.provider, "voice_prompt_block", None)
+    if not (callable(capability) or isinstance(capability, (classmethod, staticmethod))):
+        return None
+
+    def read() -> str:
+        block = entry.provider.voice_prompt_block()
+        if not isinstance(block, str):
+            raise TypeError("voice_prompt_block must return text")
+        return block.strip()
+
+    try:
+        # A provider slower than this budget may still be healthy: the call's
+        # recall then waits its turn rather than being refused as hung.
+        return entry.call(read, min(deadline, time.monotonic() + MEMORY_VOICE_CONTEXT_TIMEOUT_S), "context",
+                          mark_stuck=False)
+    except Exception:  # noqa: BLE001 — backend text can carry private hosts or credentials
+        logger.warning("Memory provider %r voice context for Conduit failed; using built-in memory",
+                       entry.name, exc_info=True)
+        return None
 
 
 def _hermes_memory_config() -> Dict[str, Any]:
@@ -216,7 +282,9 @@ class _ProviderEntry:
         self._running = False
         self.stuck = False  # a call outlived its deadline and still holds call_lock
 
-    def call(self, fn: Callable[[], Any], deadline: float, what: str) -> Any:
+    def call(self, fn: Callable[[], Any], deadline: float, what: str, mark_stuck: bool = True) -> Any:
+        """``mark_stuck=False`` gives up waiting without calling the provider
+        hung: a short budget lapsing isn't the provider failing."""
         if self.stuck:
             raise core.TokenError(503, _MEMORY_BUSY)
         if not self.call_lock.acquire(timeout=max(deadline - time.monotonic(), 0.0)):
@@ -250,7 +318,7 @@ class _ProviderEntry:
         if not done.wait(max(deadline - time.monotonic(), 0.0)):
             with self._state:
                 completed = done.is_set()
-                if not completed and self._running:
+                if not completed and self._running and mark_stuck:
                     self.stuck = True
             if not completed:
                 logger.warning("Memory provider %r %s for Conduit timed out; abandoning the call", self.name, what)
@@ -360,8 +428,12 @@ def memory_context(key: str = "", limiter_key: Optional[str] = None) -> Dict[str
     entry = _memory_providers.get(key, name, deadline)
     # Not the provider's system_prompt_block(): that is mostly instructions
     # for its own tools, which the voice model can't call. Its memory is
-    # reached through recall instead.
-    context = _clip_block(builtin, MEMORY_CONTEXT_MAX_CHARS) if builtin else ""
+    # reached through recall, unless it offers voice facts of its own.
+    voice = _provider_voice_context(entry, deadline) if entry is not None else None
+    if not voice:
+        context = _clip_block(builtin, MEMORY_CONTEXT_MAX_CHARS) if builtin else ""
+    else:
+        context = _complete_memory_lines((voice, builtin), MEMORY_CONTEXT_MAX_CHARS)
     recall = entry is not None
     label = name if recall else ("builtin" if builtin else None)
     result: Dict[str, Any] = {"available": bool(context) or recall, "provider": label, "recall": recall, "context": context}

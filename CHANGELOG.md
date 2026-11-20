@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.185.0 (2026-11-20)
+
+### New and improved
+
+- Voice calls start knowing what a memory provider that offers voice facts remembers about you, such as Nyx 7.24.1, alongside Hermes' own notes. Other providers work as before, through recall during the call.
+
 ## 0.184.0 (2026-11-20)
 
 ### New and improved
