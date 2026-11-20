@@ -2704,7 +2704,10 @@ def test_an_ordinary_chats_tool_calls_read_the_registry_only_when_it_changes(on,
     ref = on.add("workstream", title="Promoted", status="running").ref
     on.update(ref, session_id="ordinary-chat")
     assert work._workstream("ordinary-chat")[1].ref == ref
-    work._not_work.clear()
+    # An unload forgets them, so a reload starts from the registry (#964's review).
+    work._not_work[("x", "y")] = ()
+    work.stop()
+    assert not work._not_work
 
 
 def test_an_unreadable_registry_keeps_a_turns_hooks_quiet_except_the_bot_chats(on, hermes, monkeypatch):
