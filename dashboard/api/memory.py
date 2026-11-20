@@ -140,7 +140,10 @@ def _provider_voice_context(entry: Any, deadline: float) -> Optional[str]:
         return block.strip()
 
     try:
-        return entry.call(read, min(deadline, time.monotonic() + MEMORY_VOICE_CONTEXT_TIMEOUT_S), "context")
+        # A provider slower than this budget may still be healthy: the call's
+        # recall then waits its turn rather than being refused as hung.
+        return entry.call(read, min(deadline, time.monotonic() + MEMORY_VOICE_CONTEXT_TIMEOUT_S), "context",
+                          mark_stuck=False)
     except Exception:  # noqa: BLE001 — backend text can carry private hosts or credentials
         logger.warning("Memory provider %r voice context for Conduit failed; using built-in memory",
                        entry.name, exc_info=True)
@@ -279,7 +282,9 @@ class _ProviderEntry:
         self._running = False
         self.stuck = False  # a call outlived its deadline and still holds call_lock
 
-    def call(self, fn: Callable[[], Any], deadline: float, what: str) -> Any:
+    def call(self, fn: Callable[[], Any], deadline: float, what: str, mark_stuck: bool = True) -> Any:
+        """``mark_stuck=False`` gives up waiting without calling the provider
+        hung: a short budget lapsing isn't the provider failing."""
         if self.stuck:
             raise core.TokenError(503, _MEMORY_BUSY)
         if not self.call_lock.acquire(timeout=max(deadline - time.monotonic(), 0.0)):
@@ -313,7 +318,7 @@ class _ProviderEntry:
         if not done.wait(max(deadline - time.monotonic(), 0.0)):
             with self._state:
                 completed = done.is_set()
-                if not completed and self._running:
+                if not completed and self._running and mark_stuck:
                     self.stuck = True
             if not completed:
                 logger.warning("Memory provider %r %s for Conduit timed out; abandoning the call", self.name, what)

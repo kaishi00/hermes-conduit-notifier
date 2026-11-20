@@ -315,12 +315,27 @@ def test_a_hung_voice_context_falls_back_in_time_and_other_profiles_work(hermes,
         began = time.monotonic()
         assert api.memory.memory_context("hung")["context"] == "Builtin notes."
         assert time.monotonic() - began < 0.5
-        # Still running: the next call falls back at once (the provider is busy).
+        # Still running: the next call falls back too (the provider is busy).
         assert api.memory.memory_context("hung")["context"] == "Builtin notes."
         hermes.providers["nyx"] = VoiceProvider("other profile")
         assert api.memory.memory_context("other")["context"] == "other profile\n\nBuiltin notes."
     finally:
         release.set()
+
+
+def test_a_slow_voice_read_does_not_refuse_the_calls_recall(hermes, monkeypatch):
+    monkeypatch.setattr(api.memory, "MEMORY_VOICE_CONTEXT_TIMEOUT_S", 0.05)
+    class Slow(VoiceProvider):
+        def voice_prompt_block(self):
+            time.sleep(0.3)
+            return "late"
+    hermes.config = {"memory": {"provider": "nyx"}}
+    hermes.builtin = "Builtin notes."
+    provider = hermes.providers["nyx"] = Slow()
+    assert api.memory.memory_context("slow")["context"] == "Builtin notes."
+    # The provider is slow, not hung: recall waits for the voice read to finish.
+    assert api.memory.run_memory_recall("tea", "slow")["available"] is True
+    assert provider.prefetched
 
 
 def test_voice_context_route_remains_private_and_readonly(client, hermes):

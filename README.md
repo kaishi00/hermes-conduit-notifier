@@ -789,7 +789,8 @@ reached through recall instead: its own prompt block mostly describes tools the
 voice model can't call. A provider that has the optional `voice_prompt_block()`
 method (not part of Hermes' provider interface; Nyx 7.24.1 has it) adds its own
 facts for the call's start: they come first, and whole lines of the built-in
-notes fill what's left of the 8,000 characters. If that method fails, answers
+notes fill what's left of the 8,000 characters (a line that doesn't fit, a voice
+fact included, is left out whole, never cut). If that method fails, answers
 something other than text or takes more than 3 seconds, `context` is the
 built-in snapshot alone. `provider` is
 `"builtin"`, the external provider's name, or `null`. When there is nothing to
