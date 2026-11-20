@@ -104,6 +104,13 @@ notes:
     find Pulse's chat, a Hermes before 0.22.6 is told to update, since only 0.22.6 and newer hand a
     chat Hermes Desktop made over to the gateway (issue 713). Without it, everyone gets the
     set-it-up-again advice.
+  background review helper slot: >-
+    dashboard/api/helper_models.py adds background_review to hermes_cli.web_server_config's
+    _AUX_TASK_SLOTS (and hermes_cli.web_routers.models' copy) when Hermes leaves it out
+    (NousResearch/hermes-agent#157839), so /api/model/auxiliary lists it and /api/model/set takes it
+    for Conduit's Helper models (feature map: "Helper models", hermes-conduit#2871). Without the
+    list, the row isn't offered and the model stays a config.yaml edit
+    (upstream/test_helper_models.py).
   prediction fork lifecycle: >-
     dashboard/api/chats.py uses agent.background_review.release_cache_parity_fork
     when available to attribute prediction usage and release only fork clients
@@ -417,7 +424,7 @@ imports:
   gateway.warning_notifications:
     required: ["warning_notifications_enabled"]
   hermes_cli:
-    optional: ["__version__", "active_sessions", "lifecycle"]
+    optional: ["__version__", "active_sessions", "lifecycle", "web_server_config"]
   hermes_cli._launchers:
     optional: ["runtime_command"]
   hermes_cli.active_sessions:

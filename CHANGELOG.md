@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.184.0 (2026-11-20)
+
+### New and improved
+
+- Conduit's Helper models can show and change Background review, the model Hermes uses after each turn to decide what to remember and which skills to improve. Hermes' own list leaves it out, so the plugin adds it until Hermes does.
+
 ## 0.183.0 (2026-11-19)
 
 ### New and improved

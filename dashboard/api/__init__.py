@@ -53,6 +53,7 @@ MODULES = (
     "capabilities",
     "self_update",
     "bot_plugin",
+    "helper_models",
 )
 
 
