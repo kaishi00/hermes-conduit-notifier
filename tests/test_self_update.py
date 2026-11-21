@@ -1292,7 +1292,7 @@ def test_a_held_scan_keeps_its_verdict_and_worst_findings_for_conduit(monkeypatc
     findings = [{"severity": "medium", "category": "network", "file": f"m{i}.py", "line": i, "description": "d",
                  "pattern_id": "p"} for i in range(8)]
     findings.insert(3, {"severity": "high", "category": "exec", "file": "x.py", "line": 7, "description": "subprocess"})
-    refusal = {"ok": False, "scan_blocked": True, "scan_verdict": "caution", "scan_findings": findings,
+    refusal = {"ok": False, "scan_blocked": True, "scan_verdict": "Caution", "scan_findings": findings,
                "error": "BLOCKED: community source + caution verdict"}
     job, scheduled, notified, _ = _run(tmp_path, monkeypatch=monkeypatch, pull=lambda: refusal)
     assert job["step"] == "failed" and job["code"] == "scan_blocked" and job["failed_step"] == "downloading"
