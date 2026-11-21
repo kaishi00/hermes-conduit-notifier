@@ -323,8 +323,10 @@ async def post_turn_surface_discard(request: Request, response: Response) -> Dic
 
 PREDICT_LIMIT = 40
 PREDICT_WINDOW_S = 60.0
-# A 2000-character draft of emoji is 8 KB of UTF-8 on its own.
-PREDICT_MAX_BODY_BYTES = 16384
+# A 2000-character draft is up to 12 KB as JSON on its own (8 KB of emoji,
+# or six bytes for each escaped control character), and the user's
+# 1000-character instructions up to 6 KB more (hermes-conduit#2970).
+PREDICT_MAX_BODY_BYTES = 32768
 # Forks alive at once on this host, answered or not: one the route stopped
 # waiting for keeps its place until it ends.
 PREDICT_MAX_RUNNING = 4
