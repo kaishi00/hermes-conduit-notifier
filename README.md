@@ -1815,7 +1815,11 @@ question or a small task doesn't start a workstream. Change it in Conduit
   outside a workstream) is kept the same way instead of expiring, unless one
   with the same words already waits (plugin 0.189.0+). Rewording one with
   `replaces` keeps its choices, recommended one and going ahead unless the
-  call gives them (an empty `choices` makes it a yes or no). A
+  call gives them (an empty `choices` makes it a yes or no). The chat that
+  asked sees its open questions in each turn's note, and every spoken turn
+  (a call, CarPlay, the Watch) hears all of them, so the user can answer by
+  voice; an answer given in another chat goes to the chat that asked, as a
+  tapped one does (plugin 0.191.0+). A
   workstream you keep her out of (Keep her out of this, on its card in
   Conduit) gets nothing from her and isn't stopped by her in a turn you
   didn't start. Past eight
