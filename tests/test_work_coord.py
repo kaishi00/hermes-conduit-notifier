@@ -1027,7 +1027,7 @@ def test_a_chats_turns_list_its_own_questions_and_an_answer_said_elsewhere_reach
     assert out["ok"] and out["status"] == "answered" and "went to that chat" in out["note"], out
     assert on.proposal(item)["status"] == "answered" and on.proposal(item)["answer"] == "main: but rebase it first"
     line, = batched()
-    assert "picked «main». They added: «but rebase it first»." in line, "their words reach it too"
+    assert "picked «main»" in line and line.endswith("». They added: «but rebase it first»."), "their words reach it too"
     assert work.asked_note(OTHER_CHAT) is None, "an answered question leaves the note"
     # One the chat asked itself is still answered by work_propose's own path.
     mine = call("work_propose", {"text": "Tag it now?"}, session_id=OTHER_CHAT)["id"]
