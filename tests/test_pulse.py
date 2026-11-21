@@ -1114,6 +1114,30 @@ def test_a_harmless_non_zero_exit_is_left_out_of_failed_calls(recording):
     assert ledger.harmless_exit(row) and _failed(recording) == ""
 
 
+@pytest.mark.parametrize("output", [
+    ('time="2026-11-17T08:05:06Z" level=error msg="invalid internal status, try resetting the pause '
+     'process with \\"podman system migrate\\": cannot re-exec process to join the existing user namespace"'),
+    "Error: cannot set up namespace using \"/usr/bin/newuidmap\": newuidmap: write to uid_map failed: Operation not permitted",
+])
+def test_a_command_the_sandbox_blocked_is_left_out_of_failed_calls(recording, output):
+    """Rootless Podman in a sandbox that denies a multi-ID user namespace stops
+    before it reaches what it was for, and says so in its own words: nothing
+    came of the call, so it isn't brought up."""
+    home = pulse.get_hermes_home()
+    _terminal(home, "podman ps -a --format '{{.Names}}'", output, 125, DAY)
+    [row] = recording.store.recent_outcomes()
+    assert row["status"] == "error"
+    assert ledger.blocked_by_sandbox(row) and _failed(recording) == ""
+
+
+def test_a_real_podman_failure_stays_in_failed_calls(recording):
+    """Only the sandbox's own words go: a container that isn't there is the
+    work's failure, and the user's to hear about."""
+    _terminal(pulse.get_hermes_home(), "podman start hindsight", "Error: no such container hindsight", 125, DAY)
+    [row] = recording.store.recent_outcomes()
+    assert not ledger.blocked_by_sandbox(row) and "no such container" in _failed(recording)
+
+
 def test_a_traceback_stays_in_failed_calls_with_its_exception(recording):
     home = pulse.get_hermes_home()
     output = ("fetching listings\nTraceback (most recent call last):\n  File \"scrape.py\", line 12, in <module>\n"

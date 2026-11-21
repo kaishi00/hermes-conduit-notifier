@@ -60,6 +60,13 @@ UNSET_ERROR = re.compile(r"CONNECTION_REQUIRED|Hosted connectors are not set up|
 UNSET_RULE = ("An app, connector or account the user hasn't connected or set up (a calendar, reminders, mail or any "
               "other) is their choice: never bring it up or suggest setting it up, and never say something may be "
               "missing or incomplete because of it.")
+# Failures the environment made, not the work: rootless Podman inside a sandbox
+# that denies a multi-ID user namespace stops before it reaches what it was
+# for, and says so in words of its own. Nothing came of the call and nothing
+# the user can do about it, so the row goes, like UNSET_ERROR's.
+BLOCKED_ERROR = re.compile(r"invalid internal status, try resetting the pause process|"
+                           r"cannot re-exec process to join the existing user namespace|"
+                           r"newuidmap: write to uid_map failed: Operation not permitted")
 # Exit codes that are never harmless whatever was printed: a timeout (124),
 # a command that couldn't run (126, 127) or one killed by a signal (128+).
 LOUD_EXITS = 124
@@ -429,6 +436,15 @@ def harmless_exit(row: dict[str, Any]) -> bool:
     if row.get("tool") != "terminal" or row.get("status") != "error":
         return False
     return bool(HARMLESS.match(row.get("error") or ""))
+
+
+def blocked_by_sandbox(row: dict[str, Any]) -> bool:
+    """A terminal command the sandbox stopped before it ran (BLOCKED_ERROR): it
+    never got the user namespace it asked for, so the failure says nothing
+    about the work and there is nothing in it for the user to act on."""
+    if row.get("tool") != "terminal" or row.get("status") != "error":
+        return False
+    return bool(BLOCKED_ERROR.search(str(row.get("error") or "")))
 
 
 def record(home: Path, *, tool_name: Any, args: Any = None, result: Any = None, session_id: Any = None,
