@@ -668,11 +668,11 @@ def check_stale(result: dict, f: dict, mode: str) -> List[tuple]:
 
 
 async def case_leave_alone(run: Run) -> dict:
-    """7. Leave alone: the Bot Chat sends the builder nothing on its own, and tells the user."""
+    """7. Kept out: the Bot Chat sends the builder nothing on its own, and tells the user."""
     run.api.plans = {"/v1/users": [(0, 410, GONE)], "/v2/users": [(0, 200, USERS)]}
     builder = await run.start("Users export", builder_task(f"{run.api.base}/v1/users", run.work))
     run.store.update(builder, left_alone_at=time.time())
-    run.note(f"{builder} set to Leave alone")
+    run.note(f"the Bot Chat kept out of {builder}")
     finder = await run.start("Sync check", finder_task(f"{run.api.base}/v1/users"))
     await run.until(lambda: run.store.events(finder, kinds=("found",)), 300, "the finder's report")
     await run.quiet()
@@ -732,7 +732,7 @@ CASES = {
     4: ("the user overrides the recommendation", case_override, check_override),
     5: ("a privileged step after a message", case_approval, check_approval),
     6: ("a stale instruction", case_stale, check_stale),
-    7: ("Leave alone", case_leave_alone, check_leave_alone),
+    7: ("Kept out", case_leave_alone, check_leave_alone),
     8: ("repeated and conflicting findings", case_conflicting, check_conflicting),
 }
 

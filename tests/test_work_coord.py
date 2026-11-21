@@ -1,7 +1,7 @@
 """How a Bot Chat keeps its workstreams working together (work_coord): the
 ledger with who said what, the board in the Bot Chat's note, whether a
 message arrived, and how independently the Bot Chat acts in a turn the user
-didn't start (Coordination: Off, Ask or Automatic, and Leave alone)."""
+didn't start (Coordination: Off, Ask or Automatic, and Keep {bot} out of this)."""
 import json
 import sqlite3
 import time
@@ -220,7 +220,7 @@ def test_a_workstream_left_alone_hears_nothing_the_user_didnt_start(on, hermes, 
     start()
     left = work.app_act(home, "W1", "leave_alone")
     assert left["ok"] and left["work"]["left_alone"] and "coordinate" in left["work"]["manage"]
-    assert "(the user set it to Leave alone)" in work.digest(BOT_CHAT)
+    assert "(the user kept you out of it)" in work.digest(BOT_CHAT)
     woken(home)
     assert call("work_send", {"ref": "W1", "text": "Switch to v2."})["error"] == "left_alone"
     assert call("work_stop", {"ref": "W1"})["error"] == "left_alone"

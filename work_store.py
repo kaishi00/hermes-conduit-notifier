@@ -239,7 +239,7 @@ class Work:
     resolved_by: str = ""
     # When the user last reopened it from the Work panel's Resolved list.
     reopened_at: float = 0.0
-    # The user set it to Leave alone (0: not): the Bot Chat sends it nothing
+    # The user kept the Bot Chat out of it, "Keep {bot} out of this" (0: not): the Bot Chat sends it nothing
     # and doesn't stop it in a turn the user didn't start.
     left_alone_at: float = 0.0
     # The Hermes process that ran its latest turn ("pid:start time",

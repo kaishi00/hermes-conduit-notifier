@@ -1803,8 +1803,9 @@ question or a small task doesn't start a workstream. Change it in Conduit
   workstream (one she would start) that says nearly the same as an open one
   is refused like one about the same workstream, and with a dozen open she
   rewords one or waits (plugin 0.168.1+). A
-  workstream you set to Leave alone (its card in Conduit) gets nothing from
-  her and isn't stopped by her in a turn you didn't start. Past eight
+  workstream you keep her out of (Keep her out of this, on its card in
+  Conduit) gets nothing from her and isn't stopped by her in a turn you
+  didn't start. Past eight
   messages to one workstream in an hour from such turns, the next is refused
   and she tells you. None of this changes what Hermes lets a workstream's
   tools do: approvals, dangerous-command rules and `/yolo` stay as you set

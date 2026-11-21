@@ -283,7 +283,7 @@ def _page(store: work_store.Store, new: list[dict], opened: list[work_store.Work
     lines.append("\nThe open workstreams:")
     fresh = {event["id"] for event in new}
     for work in opened:
-        status = "left alone by the user, " if work.left_alone_at else ""
+        status = "the user kept the Bot Chat out of it, " if work.left_alone_at else ""
         lines.append(f"- {_named(work)} ({status}{work.status.replace('_', ' ')}). Its task: "
                      f"«{work_coord._short(work.goal, GOAL_CHARS)}»")
         had = [event for event in store.events(work.ref, since=now - work_coord.BOARD_AGE_S, kinds=KINDS,
