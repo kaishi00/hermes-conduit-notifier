@@ -5710,7 +5710,9 @@ def app_act(home: Path, ref: Any, action: str, body: Optional[dict] = None) -> d
     home = Path(home)
     body = body if isinstance(body, dict) else {}
     if work_coord.is_question(ref):
-        return _app_answer(home, str(ref).strip().upper(), action, body)
+        done = _app_answer(home, str(ref).strip().upper(), action, body)
+        done.pop("told", None)
+        return done
     if action not in APP_ACTIONS:
         return {"ok": False, "error": "unknown_action", "note": f"There's no {action} for work."}
     if action in APP_APPROVAL:
@@ -5773,17 +5775,22 @@ def _answer_for_another_chat(home: Path, args: dict, session_id: Any, chat: str)
     status, choice = work_coord.answer_given(asked, " ".join(str(args.get("answer") or "").split()))
     if not status:
         return None
+    words = " ".join(str(args.get("note") or "").split())
     if status == "answered":
-        done = _app_answer(home, wanted, work_coord.APP_PICK, {"choice": choice})
+        done = _app_answer(home, wanted, work_coord.APP_PICK, {"choice": choice}, note=words)
     else:
-        done = _app_answer(home, wanted, next(key for key, value in work_coord.APP_ANSWERS.items() if value == status))
+        done = _app_answer(home, wanted, next(key for key, value in work_coord.APP_ANSWERS.items() if value == status),
+                           note=words)
+    told = done.pop("told", False)
     if done.get("ok"):
         done["note"] = (f"Kept: the user's answer to {wanted}, which another chat asked, went to that chat, which "
-                        "acts on it. Tell them in a line that you passed it on.")
+                        "acts on it. Tell them in a line that you passed it on." if told else
+                        f"Kept: the user's no to {wanted} stays on your Bot Chat's board, so it isn't asked again. "
+                        "Tell them in a line.")
     return done
 
 
-def _app_answer(home: Path, item: str, action: str, body: Optional[dict] = None) -> dict:
+def _app_answer(home: Path, item: str, action: str, body: Optional[dict] = None, note: str = "") -> dict:
     """The user's answer on a question the bot asked them (work_propose),
     tapped on its card: Approve or Decline, or ``answer`` with the body's
     ``choice``, recorded as their own. It goes to the chat that asked as a
@@ -5812,10 +5819,12 @@ def _app_answer(home: Path, item: str, action: str, body: Optional[dict] = None)
         work_coord.open_questions(store)
         # One answer: a second tap finds it answered. The answer and its line
         # for the chat are one write (the outbox row).
-        done = work_coord.answer_tapped(store, item, answer, coordinator, choice)
+        done = work_coord.answer_tapped(store, item, answer, coordinator, choice, note)
     line, kept = done.pop("line", ""), done.pop("outbox", "")
     if line:
         _queue_wake(home, coordinator, line, kind="answer", item=kept)
+    # For work_propose's note (_answer_for_another_chat): whether the chat that asked was told.
+    done["told"] = bool(line)
     return done
 
 
@@ -6012,11 +6021,17 @@ def asked_note(session_id: Any, spoken: bool = False) -> Optional[str]:
     store = work_store.Store(home)
     every = work_coord.open_questions(store)
     if spoken and every:
+        # The Bot Chat's own are on its board (digest), which shares the room.
+        coordinator = is_bot_chat(chat, home)
+        heard = [row for row in every if row.get("chat")] if coordinator else every
+        if not heard:
+            return None
         titles: dict[str, str] = {}
-        for row in every:
+        for row in heard:
             if row.get("chat") and row["chat"] not in titles:
                 titles[row["chat"]] = _chat_title(row["chat"])
-        return work_coord.asked_spoken_note(every, _ago, titles)
+        return work_coord.asked_spoken_note(
+            heard, _ago, titles, work_coord.ASKED_BOT_CHAT_CHARS if coordinator else work_coord.ASKED_CHARS)
     rows = [row for row in every if (row.get("chat") or "") == chat]
     if not rows or is_bot_chat(chat, home):
         return None

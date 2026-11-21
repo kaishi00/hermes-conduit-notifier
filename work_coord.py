@@ -128,6 +128,8 @@ ANSWER_LINE = "- {id}{about}, approved by the user just now: «{text}»"
 ANSWER_PICKED = "- {id}{about}: the user picked «{choice}» just now. You asked: «{text}»"
 ANSWER_SAID = "- {id}{about}: the user answered «{choice}» just now. You asked: «{text}»"
 ANSWER_DECLINED = "- {id}{about}, declined by the user just now: «{text}»"
+# What the user added with an answer given by voice or in another chat.
+ANSWER_WORDS = " They added: «{note}»."
 # After a work update's lines, in place of "tell the user what came back".
 WAKE_TAIL = ("First see whether what came back matters to your other open work (the board in your note): act on "
              "it as your coordination setting says. Then the user: tell them in a line or two when a result is "
@@ -765,21 +767,31 @@ ASKED_SPOKEN_RULE = ("Say them when the user asks what waits on them, or when on
                      "own words for one with neither. One another chat asked goes to that chat, which acts on it.")
 
 
-def asked_spoken_note(rows: list[dict], ago: Callable[[float], str], chat_titles: dict[str, str]) -> str:
+# The asked notes' size: they ride with the Bot Chat's digest (NOTE_CHARS)
+# under Hermes' 10,000-character hook context, past which it keeps a preview.
+ASKED_CHARS = 2400
+ASKED_BOT_CHAT_CHARS = 1200
+ASKED_MORE = "- And {count} more waiting: say so when the user asks."
+
+
+def asked_spoken_note(rows: list[dict], ago: Callable[[float], str], chat_titles: dict[str, str],
+                      budget: int = ASKED_CHARS) -> str:
     """The note listing every open question (``rows``) for a spoken turn,
-    each with the chat that asked when it isn't the Bot Chat."""
-    return _asked_lines(rows, ago, chat_titles, ASKED_SPOKEN_HEAD, ASKED_SPOKEN_RULE)
+    each with the chat that asked when it isn't the Bot Chat, in at most
+    ``budget`` characters: past that, how many more wait."""
+    return _asked_lines(rows, ago, chat_titles, ASKED_SPOKEN_HEAD, ASKED_SPOKEN_RULE, budget)
 
 
 def asked_here_note(rows: list[dict], ago: Callable[[float], str]) -> str:
     """The note listing a chat's open questions (``rows``, its own)."""
-    return _asked_lines(rows, ago, None, ASKED_HERE_HEAD, ASKED_HERE_RULE)
+    return _asked_lines(rows, ago, None, ASKED_HERE_HEAD, ASKED_HERE_RULE, ASKED_CHARS)
 
 
 def _asked_lines(rows: list[dict], ago: Callable[[float], str], chat_titles: Optional[dict[str, str]],
-                 head: str, rule: str) -> str:
-    lines = []
-    for row in rows:
+                 head: str, rule: str, budget: int) -> str:
+    lines: list[str] = []
+    room = budget - len(head) - len(rule) - len(ASKED_MORE) - 8
+    for index, row in enumerate(rows):
         text = _short(row["text"], PROPOSAL_CHARS)
         choices = work_store.proposal_choices(row)
         if choices:
@@ -791,7 +803,12 @@ def _asked_lines(rows: list[dict], ago: Callable[[float], str], chat_titles: Opt
         if chat_titles is not None:
             where = (f" in the chat «{chat_titles.get(row['chat']) or 'untitled'}»" if row.get("chat")
                      else " in your Bot Chat")
-        lines.append(f"- {row['id']}, asked {ago(row['created_at'])}{where}: «{text}».{ahead}")
+        line = f"- {row['id']}, asked {ago(row['created_at'])}{where}: «{text}».{ahead}"
+        if lines and len(line) + 1 > room:
+            lines.append(ASKED_MORE.format(count=len(rows) - index))
+            break
+        room -= len(line) + 1
+        lines.append(line)
     return "\n".join([head, *lines, rule])
 
 
@@ -939,7 +956,7 @@ def is_question(ref: Any) -> bool:
 
 
 def answer_tapped(store: work_store.Store, item: str, answer: str, coordinator: str = "",
-                  choice: str = "") -> dict:
+                  choice: str = "", note: str = "") -> dict:
     """The user's own answer to an open question, tapped on its card in
     Conduit: kept as theirs with no Bot Chat turn to record it. ``answer``
     is approved or declined, or "answered" with the ``choice`` they picked.
@@ -948,7 +965,8 @@ def answer_tapped(store: work_store.Store, item: str, answer: str, coordinator: 
     it, and ``outbox``, that line's outbox row, written with the answer so a
     restart between the two doesn't lose it. A Bot Chat's no to a question
     it waited on is only kept on its board, as before: nothing was done to
-    undo."""
+    undo. ``note``: what the user added in their own words, when they
+    answered by voice or in another chat, told with the answer."""
     row = store.proposal(item)
     if row is None or row["status"] != "open":
         return {"ok": False, "id": item, "error": "not_now",
@@ -971,12 +989,16 @@ def answer_tapped(store: work_store.Store, item: str, answer: str, coordinator: 
         about = f" (about {_listed(refs)})" if refs else ""
         text = _short(done["text"], PROPOSAL_CHARS)
         if choice:
-            return (ANSWER_SAID if free_answer(row) else ANSWER_PICKED).format(id=item, about=about,
+            said = (ANSWER_SAID if free_answer(row) else ANSWER_PICKED).format(id=item, about=about,
                                                                              choice=choice, text=text)
-        return (ANSWER_LINE if answer == "approved" else ANSWER_DECLINED).format(id=item, about=about, text=text)
+        else:
+            said = (ANSWER_LINE if answer == "approved" else ANSWER_DECLINED).format(id=item, about=about, text=text)
+        return said + (ANSWER_WORDS.format(note=note) if note else "")
 
     told = bool(coordinator) and (answer != "declined" or bool(row.get("chat")) or bool(row.get("going_ahead")))
-    done = store.proposal_answer(item, answer, choice, target=coordinator if told else "",
+    note = _short(note, PROPOSAL_CHARS)
+    kept = (f"{choice}: {note}" if choice else note) if note else choice
+    done = store.proposal_answer(item, answer, kept, target=coordinator if told else "",
                                  line=line if told else None)
     if done is None:
         return {"ok": False, "id": item, "error": "not_now",

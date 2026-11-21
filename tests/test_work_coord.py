@@ -964,6 +964,33 @@ def test_a_clarify_kept_once_isnt_kept_again_and_a_workstreams_isnt_kept(on, her
     assert len(coord.open_questions(on)) == 1
 
 
+def test_a_spoken_note_stays_small_and_a_no_said_elsewhere_to_a_bot_chat_question_stays_on_its_board(
+        on, hermes, home, monkeypatch):
+    """The spoken note rides with the Bot Chat's digest under Hermes'
+    hook-context limit: it lists what fits and says how many more wait, and
+    leaves out the Bot Chat's own in its turns (its board has them). A no
+    said in another chat to a question the Bot Chat asked isn't sent there:
+    it stays on the board, and work_propose says so."""
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 3600.0)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    monkeypatch.setattr(work, "_home", lambda: on.home)
+    monkeypatch.setattr(work, "_chat_title", lambda chat: "")
+    asked(home)
+    own = call("work_propose", {"text": "Ship the beta tonight?"}, session_id=BOT_CHAT)["id"]
+    for n in range(10):
+        call("work_propose", {"text": f"Question {n}: " + "which way should this go " * 10,
+                              "choices": ["this way", "that way"]}, session_id=f"chat-{n}")
+    heard = work.asked_note("voice-call-chat", spoken=True)
+    assert len(heard) <= coord.ASKED_CHARS and "more waiting" in heard and own in heard
+    in_bot_chat = work.asked_note(BOT_CHAT, spoken=True)
+    assert len(in_bot_chat) <= coord.ASKED_BOT_CHAT_CHARS and f"{own}," not in in_bot_chat
+    call_chat = "voice-call-chat"
+    _chat_db(home, [(call_chat, "user", "No, not tonight.", None)])
+    out = call("work_propose", {"id": own, "answer": "declined"}, session_id=call_chat)
+    assert out["ok"] and out["status"] == "declined" and "stays on your Bot Chat's board" in out["note"], out
+    assert not batched()
+
+
 def test_a_chats_turns_list_its_own_questions_and_an_answer_said_elsewhere_reaches_it(on, hermes, home, monkeypatch):
     """A chat that asked the user something sees it in each turn's note, to
     record the answer they give there (typed, or said on a call in it). An
@@ -990,11 +1017,11 @@ def test_a_chats_turns_list_its_own_questions_and_an_answer_said_elsewhere_reach
     # Said on a call, whose turn runs in a chat of its own.
     call_chat = "voice-call-chat"
     _chat_db(home, [(call_chat, "user", "Tell the release chat to use main.", None)])
-    out = call("work_propose", {"id": item, "answer": "main"}, session_id=call_chat)
+    out = call("work_propose", {"id": item, "answer": "main", "note": "but rebase it first"}, session_id=call_chat)
     assert out["ok"] and out["status"] == "answered" and "went to that chat" in out["note"], out
-    assert on.proposal(item)["status"] == "answered" and on.proposal(item)["answer"] == "main"
+    assert on.proposal(item)["status"] == "answered" and on.proposal(item)["answer"] == "main: but rebase it first"
     line, = batched()
-    assert "picked «main»" in line
+    assert "picked «main»" in line and "They added: «but rebase it first»." in line, "their words reach it too"
     assert work.asked_note(OTHER_CHAT) is None, "an answered question leaves the note"
     # One the chat asked itself is still answered by work_propose's own path.
     mine = call("work_propose", {"text": "Tag it now?"}, session_id=OTHER_CHAT)["id"]
