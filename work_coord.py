@@ -119,7 +119,8 @@ RULES = {
 }
 # The user's yes, tapped on a question's card in Conduit: a work update
 # that is theirs, so what it approves isn't held as a turn they didn't start.
-ANSWER_HEAD = ("Work update from Conduit: the user answered what you asked them, with a tap on the question's card. "
+ANSWER_HEAD = ("Work update from Conduit: the user answered what you asked them, with a tap on the question's card "
+               "or in another of your chats (a call's, said aloud). "
                "This is their own answer, already recorded (no work_propose call is needed):\n{lines}\n")
 ANSWER_TAIL = ("Act on it now: do what they said yes to or picked, and undo what you went ahead with that they "
                "didn't pick or said no to. Then tell them in a line what you did, with its link when it has one.")
@@ -572,8 +573,10 @@ SCHEMA = {
                     "question about a workstream is open, a new one about it is refused: wait for their answer, "
                     "or call with replaces to reword the open one when new evidence came. After they decline "
                     "one, a question about the same work within a day needs new: what came up since. When they "
-                    "answer in a message, call it with the id and their answer (approved or declined, or the "
-                    "choice they picked), then act on it. An answer tapped in Conduit is already recorded and "
+                    "answer in a message or on a call, call it with the id and their answer (approved or declined, "
+                    "the choice they picked, or their words for one with neither), then act on it; an answer to "
+                    "a question another of your chats asked goes to that chat. An answer tapped in Conduit is "
+                    "already recorded and "
                     "comes to you as a message. When the question no longer matters (it resolved itself, or "
                     "something replaced it), call with withdraw and its id. Open ones stay on your board until "
                     "they're answered, answered ones for a day."),
@@ -594,7 +597,7 @@ SCHEMA = {
         "new": {"type": "string", "description": "What came up since the user declined a question about this "
                                                  "work, when you ask about it again."},
         "id": {"type": "string", "description": "The question the user answered (P1)."},
-        "answer": {"type": "string", "description": "approved or declined, or the choice they picked."},
+        "answer": {"type": "string", "description": "approved or declined, the choice they picked, or their words."},
         "note": {"type": "string", "description": "What the user said, in their words, if it adds anything."},
         "withdraw": {"type": "string", "description": "An open question (P1) that no longer needs an answer."}},
         "required": []},
@@ -736,6 +739,37 @@ def _answer(row: dict, given: str) -> tuple[str, str]:
     return ("answered", match) if match else ("", "")
 
 
+def answer_given(row: dict, given: str) -> tuple[str, str]:
+    """``_answer`` for what a turn says the user answered: a choice or
+    their own words as they gave them, a yes or no in any case."""
+    exact = work_store.proposal_choices(row) or free_answer(row)
+    return _answer(row, given if exact else given.lower())
+
+
+# A chat's own questions in its turns, so it records an answer the user gives
+# there, typed or said on a call in it (the Bot Chat has its on its board).
+ASKED_HERE_HEAD = "Your questions in this chat that still wait on the user (work_propose), on their Needs you list:"
+ASKED_HERE_RULE = ("When the user answers one here, typed or said on a call, record it with work_propose "
+                   '{"id": "P1", "answer": ...}: one of its choices, approved or declined for a yes or no, or their '
+                   "own words for one with neither. Then act on it. Don't ask one again unless something new came "
+                   "up, and withdraw one that no longer needs an answer.")
+
+
+def asked_here_note(rows: list[dict], ago: Callable[[float], str]) -> str:
+    """The note listing a chat's open questions (``rows``, its own)."""
+    lines = []
+    for row in rows:
+        text = _short(row["text"], PROPOSAL_CHARS)
+        choices = work_store.proposal_choices(row)
+        if choices:
+            text += "» Choices: «" + "», «".join(choices)
+        ahead = (f" You're going ahead with «{row.get('recommended') or 'it'}» meanwhile."
+                 if row.get("going_ahead") else
+                 f" You recommended «{row['recommended']}»." if row.get("recommended") else "")
+        lines.append(f"- {row['id']}, asked {ago(row['created_at'])}: «{text}».{ahead}")
+    return "\n".join([ASKED_HERE_HEAD, *lines, ASKED_HERE_RULE])
+
+
 def propose(home: Path, store: work_store.Store, args: dict, session_id: Any, chat: str = "") -> dict:
     """work_propose, from the Bot Chat or, with ``chat`` (its session),
     from another chat of the bot's, whose question is about no workstream
@@ -767,8 +801,7 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any, ch
         if asked is None or asked["status"] != "open":
             return {"ok": False, "id": wanted, "error": "no_such_proposal",
                     "note": f"There's no open {wanted}. Your note lists the open ones."}
-        exact = work_store.proposal_choices(asked) or free_answer(asked)
-        status, choice = _answer(asked, given if exact else given.lower())
+        status, choice = answer_given(asked, given)
         if not status:
             choices = work_store.proposal_choices(asked)
             return {"ok": False, "id": wanted, "error": "missing",

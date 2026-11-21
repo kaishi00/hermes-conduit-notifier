@@ -962,3 +962,35 @@ def test_a_clarify_kept_once_isnt_kept_again_and_a_workstreams_isnt_kept(on, her
     monkeypatch.setattr(work, "_workstream", lambda session, home=None: (None, object()))
     assert clarify_loop.keep_unanswered(result, session_id="ws-chat", batch=batch, request_id="r3") == result
     assert len(coord.open_questions(on)) == 1
+
+
+def test_a_chats_turns_list_its_own_questions_and_an_answer_said_elsewhere_reaches_it(on, hermes, home, monkeypatch):
+    """A chat that asked the user something sees it in each turn's note, to
+    record the answer they give there (typed, or said on a call in it). An
+    answer given in another chat, a call's say, is theirs too, and goes to
+    the chat that asked, as a tapped answer does."""
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 3600.0)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    monkeypatch.setattr(work, "_home", lambda: on.home)
+    asked(home)
+    item = call("work_propose", {"text": "Which branch should the release go out from?",
+                                 "choices": ["main", "release/2.4"], "recommended": "release/2.4"},
+                session_id=OTHER_CHAT)["id"]
+    note = work.asked_note(OTHER_CHAT)
+    assert note.startswith(coord.ASKED_HERE_HEAD) and item in note and "«main», «release/2.4»" in note
+    assert "You recommended «release/2.4»" in note and coord.ASKED_HERE_RULE in note
+    assert work.asked_note(BOT_CHAT) is None, "the Bot Chat has its questions on its board"
+    assert work.asked_note("another-chat") is None
+    # Said on a call, whose turn runs in a chat of its own.
+    call_chat = "voice-call-chat"
+    _chat_db(home, [(call_chat, "user", "Tell the release chat to use main.", None)])
+    out = call("work_propose", {"id": item, "answer": "main"}, session_id=call_chat)
+    assert out["ok"] and out["status"] == "answered" and "went to that chat" in out["note"], out
+    assert on.proposal(item)["status"] == "answered" and on.proposal(item)["answer"] == "main"
+    line, = batched()
+    assert "picked «main»" in line
+    assert work.asked_note(OTHER_CHAT) is None, "an answered question leaves the note"
+    # One the chat asked itself is still answered by work_propose's own path.
+    mine = call("work_propose", {"text": "Tag it now?"}, session_id=OTHER_CHAT)["id"]
+    _chat_db(home, [(OTHER_CHAT, "user", "Yes, tag it.", None)])
+    assert call("work_propose", {"id": mine, "answer": "approved"}, session_id=OTHER_CHAT)["status"] == "approved"
