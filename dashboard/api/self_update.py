@@ -324,7 +324,7 @@ _FRESH_PULL_MARK = "conduit-self-update-result:"
 # A scan refusal's findings a job keeps for Conduit to show: the worst few, not hundreds.
 SCAN_FINDINGS_KEPT = 5
 SCAN_FORCE_UNSUPPORTED = ("This Hermes can't accept its install scan's verdict from Conduit. Run "
-                          "hermes plugins update conduit_push --force on the host, or update Hermes.")
+                          f"hermes plugins update {core.PLUGIN_NAME} --force on the host, or update Hermes.")
 # A process's start time is only roughly the wall clock (Linux counts it from boot), so a
 # file written as the dashboard started could read as newer than it.
 _HERMES_CHANGED_MARGIN_S = 5.0
@@ -835,7 +835,7 @@ def _scan_held(result: Dict[str, Any]) -> Dict[str, Any]:
     """What a job keeps of Hermes' scan refusal: the verdict, and the first findings, worst
     first, so Conduit can show why the scan held it before the user accepts it."""
     verdict = result.get("scan_verdict")
-    held: Dict[str, Any] = {"scan_verdict": verdict if isinstance(verdict, str) else "dangerous"}
+    held: Dict[str, Any] = {"scan_verdict": verdict.strip().lower() if isinstance(verdict, str) and verdict.strip() else "dangerous"}
     findings = [f for f in result.get("scan_findings") or [] if isinstance(f, dict)]
     rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     findings.sort(key=lambda f: rank.get(str(f.get("severity", "")).lower(), 4))

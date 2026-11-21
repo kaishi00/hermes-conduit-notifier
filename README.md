@@ -5630,12 +5630,17 @@ while it runs:
   lacks its own pull and gateway restart calls; Conduit then runs the steps
   above itself. 429 after three starts in ten minutes. On a host that sets
   `CONDUIT_PUSH_MANAGED` nothing is pulled: 409, or only the restarts its new
-  copy waits on (see the managed paragraph near the top).
+  copy waits on (see the managed paragraph near the top). `force=true`
+  (0.192.0+) accepts a caution verdict of Hermes' install scan for this
+  update: only Hermes' pull reads it, and it still refuses a dangerous one.
 - `GET /api/plugins/conduit_push/self/update` answers `{ok, job, boot_id,
   loaded_version}`. `job.step` is `downloading`, `restarting_gateway`,
   `waiting_for_chats` (with `running_chats`), `restarting_dashboard`, `done`
   or `failed` (with `detail`, `failed_step` naming the step it failed in,
   and `code` for `consent_required`, `scan_blocked` or `restart_needed`).
+  A `scan_blocked` job also has `scan_verdict` (`caution` can be accepted
+  with `force=true`), `scan_findings` (the worst five: `severity`,
+  `category`, `file`, `line`, `description`) and `scan_finding_count`.
   Chats still running after two hours fail the job with `restart_needed`:
   the new plugin is on disk and loads on the next dashboard restart.
 - A gateway restart sent during a turn makes the gateway refuse new work
