@@ -5995,21 +5995,41 @@ def _app_answer_approval(store: work_store.Store, broker: work_broker.Broker, wo
     return answer
 
 
-def asked_note(session_id: Any) -> Optional[str]:
+def asked_note(session_id: Any, spoken: bool = False) -> Optional[str]:
     """The note for a turn of a chat that asked the user something that
     still waits (work_propose, or a clarify kept after it ran out): so it
     records the answer they give there, typed or said on a call in it, and
     doesn't ask again. The Bot Chat has its questions on its board; a
-    workstream and a peer's chat ask none."""
+    workstream and a peer's chat ask none. A ``spoken`` turn (a call's,
+    CarPlay's, the Watch's, a call's job) hears every chat's, so the user
+    can answer them by voice from wherever they are."""
     home = _home()
     chat = str(session_id or "").strip()
     if home is None or not chat or _is_child(chat) or policy(home) == "off" or not work_store.exists(home):
         return None
+    if _workstream(chat, home)[1] is not None or _from_a_peer(chat):
+        return None
     store = work_store.Store(home)
-    rows = [row for row in work_coord.open_questions(store) if (row.get("chat") or "") == chat]
+    every = work_coord.open_questions(store)
+    if spoken and every:
+        titles: dict[str, str] = {}
+        for row in every:
+            if row.get("chat") and row["chat"] not in titles:
+                titles[row["chat"]] = _chat_title(row["chat"])
+        return work_coord.asked_spoken_note(every, _ago, titles)
+    rows = [row for row in every if (row.get("chat") or "") == chat]
     if not rows or is_bot_chat(chat, home):
         return None
     return work_coord.asked_here_note(rows, _ago)
+
+
+def _chat_title(session_id: str) -> str:
+    try:
+        from . import session_titles
+
+        return session_titles.title(session_id) or ""
+    except Exception:  # noqa: BLE001 — the line says untitled
+        return ""
 
 
 def digest(session_id: Any) -> Optional[str]:

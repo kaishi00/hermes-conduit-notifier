@@ -755,8 +755,29 @@ ASKED_HERE_RULE = ("When the user answers one here, typed or said on a call, rec
                    "up, and withdraw one that no longer needs an answer.")
 
 
+# Every open question in a spoken turn's note (a call's, CarPlay's, the
+# Watch's, a call's job), whichever chat asked: the user hears them and
+# answers by voice, and the answer goes to the chat that asked.
+ASKED_SPOKEN_HEAD = "Questions you asked the user that still wait on their answer (work_propose), on their Needs you list:"
+ASKED_SPOKEN_RULE = ("Say them when the user asks what waits on them, or when one bears on what they ask; read the "
+                     "choices out. When they answer one, record it with work_propose "
+                     '{"id": "P1", "answer": ...}: one of its choices, approved or declined for a yes or no, or their '
+                     "own words for one with neither. One another chat asked goes to that chat, which acts on it.")
+
+
+def asked_spoken_note(rows: list[dict], ago: Callable[[float], str], chat_titles: dict[str, str]) -> str:
+    """The note listing every open question (``rows``) for a spoken turn,
+    each with the chat that asked when it isn't the Bot Chat."""
+    return _asked_lines(rows, ago, chat_titles, ASKED_SPOKEN_HEAD, ASKED_SPOKEN_RULE)
+
+
 def asked_here_note(rows: list[dict], ago: Callable[[float], str]) -> str:
     """The note listing a chat's open questions (``rows``, its own)."""
+    return _asked_lines(rows, ago, None, ASKED_HERE_HEAD, ASKED_HERE_RULE)
+
+
+def _asked_lines(rows: list[dict], ago: Callable[[float], str], chat_titles: Optional[dict[str, str]],
+                 head: str, rule: str) -> str:
     lines = []
     for row in rows:
         text = _short(row["text"], PROPOSAL_CHARS)
@@ -766,8 +787,12 @@ def asked_here_note(rows: list[dict], ago: Callable[[float], str]) -> str:
         ahead = (f" You're going ahead with «{row.get('recommended') or 'it'}» meanwhile."
                  if row.get("going_ahead") else
                  f" You recommended «{row['recommended']}»." if row.get("recommended") else "")
-        lines.append(f"- {row['id']}, asked {ago(row['created_at'])}: «{text}».{ahead}")
-    return "\n".join([ASKED_HERE_HEAD, *lines, ASKED_HERE_RULE])
+        where = ""
+        if chat_titles is not None:
+            where = (f" in the chat «{chat_titles.get(row['chat']) or 'untitled'}»" if row.get("chat")
+                     else " in your Bot Chat")
+        lines.append(f"- {row['id']}, asked {ago(row['created_at'])}{where}: «{text}».{ahead}")
+    return "\n".join([head, *lines, rule])
 
 
 def propose(home: Path, store: work_store.Store, args: dict, session_id: Any, chat: str = "") -> dict:

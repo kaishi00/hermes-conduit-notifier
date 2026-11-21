@@ -981,6 +981,12 @@ def test_a_chats_turns_list_its_own_questions_and_an_answer_said_elsewhere_reach
     assert "You recommended «release/2.4»" in note and coord.ASKED_HERE_RULE in note
     assert work.asked_note(BOT_CHAT) is None, "the Bot Chat has its questions on its board"
     assert work.asked_note("another-chat") is None
+    # A spoken turn, wherever it runs (a call's, CarPlay's, the Watch's), hears every chat's.
+    monkeypatch.setattr(work, "_chat_title", lambda chat: "Release" if chat == OTHER_CHAT else "")
+    heard = work.asked_note("voice-call-chat", spoken=True)
+    assert heard.startswith(coord.ASKED_SPOKEN_HEAD) and coord.ASKED_SPOKEN_RULE in heard
+    assert f"{item}, asked " in heard and "in the chat «Release»" in heard
+    assert work.asked_note(BOT_CHAT, spoken=True) == heard
     # Said on a call, whose turn runs in a chat of its own.
     call_chat = "voice-call-chat"
     _chat_db(home, [(call_chat, "user", "Tell the release chat to use main.", None)])
