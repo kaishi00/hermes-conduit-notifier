@@ -222,14 +222,17 @@ def test_a_workstream_left_alone_hears_nothing_the_user_didnt_start(on, hermes, 
     assert left["ok"] and left["work"]["left_alone"] and "coordinate" in left["work"]["manage"]
     assert "(the user kept you out of it)" in work.digest(BOT_CHAT)
     woken(home)
-    assert call("work_send", {"ref": "W1", "text": "Switch to v2."})["error"] == "left_alone"
+    refused = call("work_send", {"ref": "W1", "text": "Switch to v2."})
+    assert refused["error"] == "left_alone" and "kept you out of W1" in str(refused)
     assert call("work_stop", {"ref": "W1"})["error"] == "left_alone"
+    assert "already kept out of W1" in str(work.app_act(home, "W1", "leave_alone"))
     assert on.outbox_rows("W1", "send") == []
     asked(home, "Tell W1 to switch to v2")
     assert call("work_send", {"ref": "W1", "text": "Switch to v2."})["ok"]
     back = work.app_act(home, "W1", "coordinate")
     assert back["ok"] and not back["work"]["left_alone"]
-    assert work.app_act(home, "W1", "coordinate")["error"] == "not_now"
+    again = work.app_act(home, "W1", "coordinate")
+    assert again["error"] == "not_now" and "isn't kept out of W1" in str(again)
 
 
 def test_coordination_off_is_the_bot_chat_as_it_was(on, hermes, home, monkeypatch):

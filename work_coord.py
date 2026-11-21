@@ -10,8 +10,8 @@ with its age. A message the Bot Chat sent is followed until it shows in the
 workstream's saved messages.
 
 The user sets how independently the Bot Chat acts in the turns it starts
-itself (a work update's turn): ``ask`` or ``auto``, and work it leaves
-alone. Those rules are checked here; when the user wrote the turn's message,
+itself (a work update's turn): ``ask`` or ``auto``, and work the user
+keeps it out of. Those rules are checked here; when the user wrote the turn's message,
 the Bot Chat acts on it under any setting. Nothing here changes what Hermes
 lets a workstream's tools do.
 """
