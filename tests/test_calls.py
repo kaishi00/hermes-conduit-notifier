@@ -1429,7 +1429,10 @@ def test_an_approval_follower_reads_the_calls_file_only_when_it_changes(home, fa
     real_load = calls_store.CallStore._load
 
     def counted(self, *args, **kwargs):
-        loads["n"] += 1
+        # Only this home's file: the patch is on the class, and a follower
+        # another test in this worker left running reads its own home's.
+        if pathlib.Path(self.path).parent == pathlib.Path(home):
+            loads["n"] += 1
         return real_load(self, *args, **kwargs)
 
     plugin._pre_approval_request(session_key="sk-1", session_id="rt-1", description="Delete the build",
