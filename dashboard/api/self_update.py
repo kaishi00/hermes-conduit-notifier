@@ -320,6 +320,12 @@ SELF_UPDATE_STALE_S = 3600.0
 SELF_UPDATE_TAKEN_DOWN_S = 300.0
 # The pull in a fresh Hermes process (below): git, the install scan and any dependencies.
 SELF_UPDATE_FRESH_PULL_LIMIT_S = 900.0
+# A pull still on its first step this long after the job began is stuck (an in-process pull has no
+# timeout of its own): the job reads as failed, so Conduit stops showing "Downloading" for good.
+SELF_UPDATE_PULL_STALL_S = SELF_UPDATE_FRESH_PULL_LIMIT_S + 60.0
+SELF_UPDATE_PULL_STALLED = (f"Hermes' download of the plugin hasn't finished after "
+                            f"{int(SELF_UPDATE_FRESH_PULL_LIMIT_S // 60)} minutes. Run hermes plugins update "
+                            f"{core.PLUGIN_NAME} on the host to see why.")
 _FRESH_PULL_MARK = "conduit-self-update-result:"
 # A scan refusal's findings a job keeps for Conduit to show: the worst few, not hundreds.
 SCAN_FINDINGS_KEPT = 5
@@ -1059,6 +1065,7 @@ def start_self_update(profile: Optional[str], schedule: Callable[[float, Callabl
             "id": uuid.uuid4().hex, "step": "downloading", "from_version": capabilities.LOADED_VERSION,
             "boot_id": capabilities.BOOT_ID, "pid": os.getpid(), "profile": profile or "", "started_at": time.time(),
         }
+        job["pull_started_at"] = job["started_at"]
         try:
             _write_self_update(path, job)
             # A Restart now from an earlier update isn't this one's.
@@ -1097,13 +1104,19 @@ def _self_update_status(path: Path, now: Optional[float],
     if job is None or job.get("step") not in SELF_UPDATE_RUNNING:
         return job
     alive = _self_update_thread is not None and _self_update_thread.is_alive()
-    if alive and job.get("boot_id") == capabilities.BOOT_ID:
+    stuck_pull = (job["step"] == "downloading" and job.get("pull_started_at") is not None
+                  and (now or time.time()) - _job_time(job.get("pull_started_at")) > SELF_UPDATE_PULL_STALL_S)
+    if alive and job.get("boot_id") == capabilities.BOOT_ID and not stuck_pull:
         # Its thread is still on it, however long the chats take.
         return job
     if job.get("boot_id") == capabilities.BOOT_ID and job["step"] == "restarting_dashboard" and _self_restart_scheduled:
         # The restart waits for the chats; it finishes the job when it lands.
         return job
-    if job.get("boot_id") == capabilities.BOOT_ID and job["step"] != "restarting_dashboard" and not alive:
+    if alive and job.get("boot_id") == capabilities.BOOT_ID:
+        # Hermes' pull never came back: say so rather than "downloading" for good. The thread
+        # carries on if it ever does, and its next write replaces this one.
+        _self_update_failed(job, SELF_UPDATE_PULL_STALLED, "pull_stalled")
+    elif job.get("boot_id") == capabilities.BOOT_ID and job["step"] != "restarting_dashboard" and not alive:
         _self_update_failed(job, "The update stopped on the host before it finished")
     elif job.get("boot_id") == capabilities.BOOT_ID and job["step"] == "restarting_dashboard" and not _self_restart_scheduled:
         # The re-exec failed (and was logged): the new plugin waits for a restart.
@@ -1237,7 +1250,7 @@ def _resume_gateway_restart(path: Path, job: Dict[str, Any],
         def pull() -> Dict[str, Any]:
             return {"ok": True}
     # From the pull again (a no-op once pulled), so a failure there reads as the pull's.
-    job.update(boot_id=capabilities.BOOT_ID, pid=os.getpid(), step="downloading")
+    job.update(boot_id=capabilities.BOOT_ID, pid=os.getpid(), step="downloading", pull_started_at=time.time())
 
     def schedule(delay: float, fn: Callable[[], None]) -> None:
         timer = threading.Timer(delay, fn)

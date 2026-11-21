@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.192.1 (2026-11-21)
+
+### Fixes
+
+- If Hermes never finishes downloading a plugin update, Conduit now says the update failed and how to see why, instead of showing "Downloading" for good.
+
 ## 0.192.0 (2026-11-21)
 
 ### New and improved
