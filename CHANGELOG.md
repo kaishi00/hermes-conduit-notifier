@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.191.0 (2026-11-21)
+
+### Fixes
+
+- When your bot reworded a question it had already asked, its choices and the one it recommended went away unless it gave them again.
+
+### New and improved
+
+- You can answer your bot's waiting questions by voice: on a call, in CarPlay or on your Watch it knows what's waiting, and your answer reaches the chat that asked.
+
 ## 0.190.1 (2026-11-21)
 
 ### Fixes

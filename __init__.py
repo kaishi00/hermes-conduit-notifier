@@ -1409,6 +1409,8 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         None if child else _link_answers_note(session_id),
         # A coordinator Bot Chat's open work (work_tool).
         None if child else _work_digest(session_id),
+        # Another chat's own questions that still wait on the user (work_tool).
+        None if child else _asked_note(session_id, turn_surface.turn_entry(session_id) == "spoken"),
         # Checklist cards the user ticked in Conduit since (checklist_store), once.
         None if child else _checklist_note(session_id),
         # A card's tap button the user tapped, with their message about it (card_actions), once.
@@ -1470,6 +1472,14 @@ def _work_digest(session_id: str) -> str | None:
         return work_tool.digest(session_id)
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         logger.debug("conduit_push: work digest failed", exc_info=True)
+        return None
+
+
+def _asked_note(session_id: str, spoken: bool) -> str | None:
+    try:
+        return work_tool.asked_note(session_id, spoken)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: asked note failed", exc_info=True)
         return None
 
 

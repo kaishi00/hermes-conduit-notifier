@@ -908,7 +908,8 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
         if room is None and name == "work_propose" and chat and not _is_child(chat) and not _from_a_peer(chat):
             # Any chat of the bot's may ask a question that waits on the user
             # (Eric, 2026-11-21): its answer comes back to that chat.
-            return work_coord.propose(home, work_store.Store(home), args, session_id, chat=chat)
+            return (_answer_for_another_chat(home, args, session_id, chat)
+                    or work_coord.propose(home, work_store.Store(home), args, session_id, chat=chat))
         if room is None:
             return {"ok": False, "error": "not_bot_chat", "note": NOT_BOT_CHAT}
         if name not in room_work.TOOLS:
@@ -917,7 +918,7 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
         return _note(home, args)
     store = work_store.Store(home)
     if name == "work_propose":
-        return work_coord.propose(home, store, args, session_id)
+        return _answer_for_another_chat(home, args, session_id, "") or work_coord.propose(home, store, args, session_id)
     if name == "work_list":
         _sweep(home, store)
         return _list(store, args)
@@ -5709,7 +5710,9 @@ def app_act(home: Path, ref: Any, action: str, body: Optional[dict] = None) -> d
     home = Path(home)
     body = body if isinstance(body, dict) else {}
     if work_coord.is_question(ref):
-        return _app_answer(home, str(ref).strip().upper(), action, body)
+        done = _app_answer(home, str(ref).strip().upper(), action, body)
+        done.pop("told", None)
+        return done
     if action not in APP_ACTIONS:
         return {"ok": False, "error": "unknown_action", "note": f"There's no {action} for work."}
     if action in APP_APPROVAL:
@@ -5754,7 +5757,40 @@ def app_act(home: Path, ref: Any, action: str, body: Optional[dict] = None) -> d
 _app_lock = threading.Lock()
 
 
-def _app_answer(home: Path, item: str, action: str, body: Optional[dict] = None) -> dict:
+def _answer_for_another_chat(home: Path, args: dict, session_id: Any, chat: str) -> Optional[dict]:
+    """work_propose's id and answer for a question another of the bot's
+    chats asked (``chat`` is this one's, "" for the Bot Chat): the user
+    answered it here, typed or said on a call. It's recorded as theirs and
+    the chat that asked is told, as a tapped answer is, so the answer
+    reaches the chat that waits on it. None for a question asked here, or
+    an answer work_propose refuses (it says why)."""
+    wanted = str(args.get("id") or "").strip().upper()
+    if not wanted or args.get("withdraw") or not work_store.exists(home):
+        return None
+    asked = work_store.Store(home).proposal(wanted)
+    if asked is None or asked["status"] != "open" or (asked.get("chat") or "") == chat:
+        return None
+    if not work_coord.user_wrote(home, session_id):
+        return None
+    status, choice = work_coord.answer_given(asked, " ".join(str(args.get("answer") or "").split()))
+    if not status:
+        return None
+    words = " ".join(str(args.get("note") or "").split())
+    if status == "answered":
+        done = _app_answer(home, wanted, work_coord.APP_PICK, {"choice": choice}, note=words)
+    else:
+        done = _app_answer(home, wanted, next(key for key, value in work_coord.APP_ANSWERS.items() if value == status),
+                           note=words)
+    told = done.pop("told", False)
+    if done.get("ok"):
+        done["note"] = (f"Kept: the user's answer to {wanted}, which another chat asked, went to that chat, which "
+                        "acts on it. Tell them in a line that you passed it on." if told else
+                        f"Kept: the user's no to {wanted} stays on your Bot Chat's board, so it isn't asked again. "
+                        "Tell them in a line.")
+    return done
+
+
+def _app_answer(home: Path, item: str, action: str, body: Optional[dict] = None, note: str = "") -> dict:
     """The user's answer on a question the bot asked them (work_propose),
     tapped on its card: Approve or Decline, or ``answer`` with the body's
     ``choice``, recorded as their own. It goes to the chat that asked as a
@@ -5783,10 +5819,12 @@ def _app_answer(home: Path, item: str, action: str, body: Optional[dict] = None)
         work_coord.open_questions(store)
         # One answer: a second tap finds it answered. The answer and its line
         # for the chat are one write (the outbox row).
-        done = work_coord.answer_tapped(store, item, answer, coordinator, choice)
+        done = work_coord.answer_tapped(store, item, answer, coordinator, choice, note)
     line, kept = done.pop("line", ""), done.pop("outbox", "")
     if line:
         _queue_wake(home, coordinator, line, kind="answer", item=kept)
+    # For work_propose's note (_answer_for_another_chat): whether the chat that asked was told.
+    done["told"] = bool(line)
     return done
 
 
@@ -5964,6 +6002,49 @@ def _app_answer_approval(store: work_store.Store, broker: work_broker.Broker, wo
             row["approval"] = None
         answer["work"] = row
     return answer
+
+
+def asked_note(session_id: Any, spoken: bool = False) -> Optional[str]:
+    """The note for a turn of a chat that asked the user something that
+    still waits (work_propose, or a clarify kept after it ran out): so it
+    records the answer they give there, typed or said on a call in it, and
+    doesn't ask again. The Bot Chat has its questions on its board; a
+    workstream and a peer's chat ask none. A ``spoken`` turn (a call's,
+    CarPlay's, the Watch's, a call's job) hears every chat's, so the user
+    can answer them by voice from wherever they are."""
+    home = _home()
+    chat = str(session_id or "").strip()
+    if home is None or not chat or _is_child(chat) or policy(home) == "off" or not work_store.exists(home):
+        return None
+    if _workstream(chat, home)[1] is not None or _from_a_peer(chat):
+        return None
+    store = work_store.Store(home)
+    every = work_coord.open_questions(store)
+    if spoken and every:
+        # The Bot Chat's own are on its board (digest), which shares the room.
+        coordinator = is_bot_chat(chat, home)
+        heard = [row for row in every if row.get("chat")] if coordinator else every
+        if not heard:
+            return None
+        titles: dict[str, str] = {}
+        for row in heard:
+            if row.get("chat") and row["chat"] not in titles:
+                titles[row["chat"]] = _chat_title(row["chat"])
+        return work_coord.asked_spoken_note(
+            heard, _ago, titles, work_coord.ASKED_BOT_CHAT_CHARS if coordinator else work_coord.ASKED_CHARS)
+    rows = [row for row in every if (row.get("chat") or "") == chat]
+    if not rows or is_bot_chat(chat, home):
+        return None
+    return work_coord.asked_here_note(rows, _ago)
+
+
+def _chat_title(session_id: str) -> str:
+    try:
+        from . import session_titles
+
+        return session_titles.title(session_id) or ""
+    except Exception:  # noqa: BLE001 — the line says untitled
+        return ""
 
 
 def digest(session_id: Any) -> Optional[str]:

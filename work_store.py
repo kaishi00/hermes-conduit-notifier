@@ -890,22 +890,22 @@ class Store:
         return f"P{number}"
 
     def proposal_reword(self, item: str, refs: list[str], text: str, new: Optional[str] = None, *,
-                        choices: Optional[list[str]] = None, recommended: str = "",
+                        choices: list[str], recommended: str = "",
                         going_ahead: bool = False) -> Optional[dict]:
         """An open question asked again with new wording (and evidence),
         about ``refs`` (the caller adds them to the ones it had), keeping
         its workstreams when none are given and its ``new`` when that is
         None ("" clears it); None when it isn't open. Its choices,
-        recommended one and going ahead are as asked now (``choices`` None
-        keeps a kept clarify's)."""
+        recommended one and going ahead are as given (the caller passes the
+        ones it had to keep them)."""
         with self._db() as con:
             changed = con.execute("UPDATE proposals SET ref = CASE WHEN ? THEN ? ELSE ref END, "
                                   "also = CASE WHEN ? THEN ? ELSE also END, text = ?, "
                                   "new = CASE WHEN ? THEN ? ELSE new END, "
-                                  "choices = CASE WHEN ? THEN ? ELSE choices END, recommended = ?, going_ahead = ? "
+                                  "choices = ?, recommended = ?, going_ahead = ? "
                                   "WHERE id = ? AND status = 'open'",
                                   (bool(refs), refs[0] if refs else "", bool(refs), " ".join(refs[1:]), text,
-                                   new is not None, new or "", choices is not None,
+                                   new is not None, new or "",
                                    json.dumps(choices or [], ensure_ascii=False), recommended or "",
                                    1 if going_ahead else 0, item)).rowcount
             row = con.execute("SELECT * FROM proposals WHERE id = ?", (item,)).fetchone() if changed else None

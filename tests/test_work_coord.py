@@ -912,6 +912,22 @@ def test_a_reworded_question_takes_its_new_choices_and_a_peers_chat_asks_nothing
     assert work.work_store.proposal_choices(row) == ["Restart now", "Wait for tonight"]
     assert row["recommended"] == "Wait for tonight" and row["going_ahead"]
     assert coord.question_card(row)["actions"] == ["answer"]
+    assert out["going_ahead"] and "«Wait for tonight»" in out["note"]
+    # A reword that only adds evidence keeps its choices, recommended one and going ahead.
+    kept = call("work_propose", {"replaces": item, "text": "How should the watcher come back? It crashed twice."},
+                session_id=OTHER_CHAT)
+    row = on.proposal(item)
+    assert kept["going_ahead"] and work.work_store.proposal_choices(row) == ["Restart now", "Wait for tonight"]
+    assert row["recommended"] == "Wait for tonight" and row["going_ahead"]
+    # Under Ask Me First the reword says to wait.
+    monkeypatch.setattr(coord, "mode", lambda store: "ask")
+    waits = call("work_propose", {"replaces": item, "text": "How should the watcher come back now?"},
+                 session_id=OTHER_CHAT)
+    assert not waits["going_ahead"] and coord.WAIT_UNDER_ASK in waits["note"]
+    # An empty choices makes it a yes or no.
+    assert call("work_propose", {"replaces": item, "text": "Restart the watcher now?", "choices": []},
+                session_id=OTHER_CHAT)["ok"]
+    assert work.work_store.proposal_choices(on.proposal(item)) == []
     # A peer's conversation forwarded over A2A isn't the owner's to ask from.
     monkeypatch.setattr(work, "_from_a_peer", lambda session: session == OTHER_CHAT)
     assert call("work_propose", {"text": "Delete the logs?"}, session_id=OTHER_CHAT)["error"] == "not_bot_chat"
@@ -946,3 +962,68 @@ def test_a_clarify_kept_once_isnt_kept_again_and_a_workstreams_isnt_kept(on, her
     monkeypatch.setattr(work, "_workstream", lambda session, home=None: (None, object()))
     assert clarify_loop.keep_unanswered(result, session_id="ws-chat", batch=batch, request_id="r3") == result
     assert len(coord.open_questions(on)) == 1
+
+
+def test_a_spoken_note_stays_small_and_a_no_said_elsewhere_to_a_bot_chat_question_stays_on_its_board(
+        on, hermes, home, monkeypatch):
+    """The spoken note rides with the Bot Chat's digest under Hermes'
+    hook-context limit: it lists what fits and says how many more wait, and
+    leaves out the Bot Chat's own in its turns (its board has them). A no
+    said in another chat to a question the Bot Chat asked isn't sent there:
+    it stays on the board, and work_propose says so."""
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 3600.0)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    monkeypatch.setattr(work, "_home", lambda: on.home)
+    monkeypatch.setattr(work, "_chat_title", lambda chat: "")
+    asked(home)
+    own = call("work_propose", {"text": "Ship the beta tonight?"}, session_id=BOT_CHAT)["id"]
+    for n in range(10):
+        call("work_propose", {"text": f"Question {n}: " + "which way should this go " * 10,
+                              "choices": ["this way", "that way"]}, session_id=f"chat-{n}")
+    heard = work.asked_note("voice-call-chat", spoken=True)
+    assert len(heard) <= coord.ASKED_CHARS and "more waiting" in heard and own in heard
+    in_bot_chat = work.asked_note(BOT_CHAT, spoken=True)
+    assert len(in_bot_chat) <= coord.ASKED_BOT_CHAT_CHARS and f"{own}," not in in_bot_chat
+    call_chat = "voice-call-chat"
+    _chat_db(home, [(call_chat, "user", "No, not tonight.", None)])
+    out = call("work_propose", {"id": own, "answer": "declined"}, session_id=call_chat)
+    assert out["ok"] and out["status"] == "declined" and "stays on your Bot Chat's board" in out["note"], out
+    assert not batched()
+
+
+def test_a_chats_turns_list_its_own_questions_and_an_answer_said_elsewhere_reaches_it(on, hermes, home, monkeypatch):
+    """A chat that asked the user something sees it in each turn's note, to
+    record the answer they give there (typed, or said on a call in it). An
+    answer given in another chat, a call's say, is theirs too, and goes to
+    the chat that asked, as a tapped answer does."""
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 3600.0)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    monkeypatch.setattr(work, "_home", lambda: on.home)
+    asked(home)
+    item = call("work_propose", {"text": "Which branch should the release go out from?",
+                                 "choices": ["main", "release/2.4"], "recommended": "release/2.4"},
+                session_id=OTHER_CHAT)["id"]
+    note = work.asked_note(OTHER_CHAT)
+    assert note.startswith(coord.ASKED_HERE_HEAD) and item in note and "«main», «release/2.4»" in note
+    assert "You recommended «release/2.4»" in note and coord.ASKED_HERE_RULE in note
+    assert work.asked_note(BOT_CHAT) is None, "the Bot Chat has its questions on its board"
+    assert work.asked_note("another-chat") is None
+    # A spoken turn, wherever it runs (a call's, CarPlay's, the Watch's), hears every chat's.
+    monkeypatch.setattr(work, "_chat_title", lambda chat: "Release" if chat == OTHER_CHAT else "")
+    heard = work.asked_note("voice-call-chat", spoken=True)
+    assert heard.startswith(coord.ASKED_SPOKEN_HEAD) and coord.ASKED_SPOKEN_RULE in heard
+    assert f"{item}, asked " in heard and "in the chat «Release»" in heard
+    assert work.asked_note(BOT_CHAT, spoken=True) == heard
+    # Said on a call, whose turn runs in a chat of its own.
+    call_chat = "voice-call-chat"
+    _chat_db(home, [(call_chat, "user", "Tell the release chat to use main.", None)])
+    out = call("work_propose", {"id": item, "answer": "main", "note": "but rebase it first"}, session_id=call_chat)
+    assert out["ok"] and out["status"] == "answered" and "went to that chat" in out["note"], out
+    assert on.proposal(item)["status"] == "answered" and on.proposal(item)["answer"] == "main: but rebase it first"
+    line, = batched()
+    assert "picked «main»" in line and "They added: «but rebase it first»." in line, "their words reach it too"
+    assert work.asked_note(OTHER_CHAT) is None, "an answered question leaves the note"
+    # One the chat asked itself is still answered by work_propose's own path.
+    mine = call("work_propose", {"text": "Tag it now?"}, session_id=OTHER_CHAT)["id"]
+    _chat_db(home, [(OTHER_CHAT, "user", "Yes, tag it.", None)])
+    assert call("work_propose", {"id": mine, "answer": "approved"}, session_id=OTHER_CHAT)["status"] == "approved"
