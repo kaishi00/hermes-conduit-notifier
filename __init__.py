@@ -15,7 +15,7 @@ from typing import Any
 
 from hermes_constants import get_hermes_home
 
-from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_done_tool, chat_on_screen, clarify_loop, client, compaction_skip, conduit_first, cron_bot_chat, cron_runs,
+from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_done_tool, chat_mute, chat_on_screen, clarify_loop, client, compaction_skip, conduit_first, cron_bot_chat, cron_runs,
                desktop_selected, forks, health_tool, inbox_tool, leaked_calls, link_ask_tool, link_asks, live_activity,
                location_tool, maps_tool, memory_scan, notify_tool, phone_tool, present_tool, profile_copies, pulse,
                reply_sources, review_notices,
@@ -668,9 +668,10 @@ def _post_llm_call(**kwargs: Any) -> None:
     # likely watched it arrive there (#87); so did one in a chat Conduit has
     # on screen, on any device (chat_on_screen.py). A reply to a message sent
     # from a source the user turned off (Desktop, a messaging app…) arrives
-    # there (#115).
+    # there (#115). A chat the user muted in Conduit stays quiet until the
+    # mute ends (chat_mute.py).
     send = (ready is not None and not _desktop_watched(session_id, started) and not _conduit_watched(session_id, started)
-            and _source_notifies(kwargs.get("platform"), session_id))
+            and _source_notifies(kwargs.get("platform"), session_id) and not _chat_muted(session_id))
     # Hermes also runs this hook for a turn that failed with text (its error
     # explanation): on_session_end, right after, says which it was, so the
     # reply waits for it and a failed turn sends only its failure notice.
@@ -922,6 +923,52 @@ def _conduit_watched(session_id: str, started: float | None) -> bool:
         return False
 
 
+def _chat_muted(session_id: str) -> bool:
+    """Whether the user muted this chat in Conduit (chat_mute.py), or a chat
+    it continues through compaction: Hermes compresses a long chat into a new
+    session, which the mute set on the old one still covers."""
+    if not session_id:
+        return False
+    try:
+        store = chat_mute.ChatMuteStore(get_hermes_home())
+        if not store.chats():
+            return False  # nothing muted: no need to read the session store
+        return store.muted([session_id, *_compaction_ancestors(session_id)])
+    except Exception:  # noqa: BLE001 — can't tell, so the push goes out
+        logger.debug("conduit_push: muted chats unreadable", exc_info=True)
+        return False
+
+
+def _compaction_ancestors(session_id: str) -> list[str]:
+    """The sessions ``session_id`` continues through compaction, nearest
+    first, read from Hermes' session store; a branch is a new chat, so the
+    walk stops there. Empty when the store can't be read."""
+    import sqlite3
+
+    path = Path(get_hermes_home()) / "state.db"
+    if not path.exists():
+        return []
+    db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
+    try:
+        found: list[str] = []
+        current = session_id
+        for _ in range(_LINEAGE_HOPS):
+            row = db.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (current,)).fetchone()
+            parent = row[0] if row else None
+            if not parent or parent in found:
+                break
+            ended = db.execute("SELECT end_reason FROM sessions WHERE id = ?", (parent,)).fetchone()
+            if ended and ended[0] == "branched":
+                break
+            found.append(parent)
+            current = parent
+        return found
+    except sqlite3.Error:
+        return []
+    finally:
+        db.close()
+
+
 def _turn_source(platform: Any, session_id: str = "") -> str | None:
     """Where this turn's message was sent (reply_sources.turn_source), with
     two of the plugin's own answers first: its own work update was sent by
@@ -1034,8 +1081,8 @@ def _on_session_end(**kwargs: Any) -> None:
         calls.turn_ended(session_id, "failed", profile=_profile, fallback=None)
         return
     if (cron_runs.quiet(session_id, kwargs.get("task_id")) or _member_room_turn(session_id) or routing
-            or automation):
-        # A muted cron job's failed run, an agent's in a room someone else
+            or automation or _chat_muted(session_id)):
+        # A muted cron job's failed run or a muted chat's, an agent's in a room someone else
         # hosts (where it shows), a room lead's routing pick (the lead
         # then takes the message itself), or a script's or Kanban worker's
         # run (_automation_turn): no push and no automatic alert call. A call
@@ -1279,7 +1326,8 @@ def _subagent_stop(**kwargs: Any) -> None:
     # turn that started the task.
     slot, job = _started_slot(parent, kwargs.get("parent_turn_id"))
     if (_inside_parent_turn(parent, kwargs.get("parent_turn_id")) or _is_child_session(parent)
-            or cron_runs.quiet(parent, None) or (job and cron_runs.muted(job)) or _automation_session(parent)):
+            or cron_runs.quiet(parent, None) or (job and cron_runs.muted(job)) or _automation_session(parent)
+            or _chat_muted(parent)):
         return
     status = _text(kwargs.get("child_status")) or "finished"
     # Hermes reports "completed" (else "failed", "timeout", "error"). Only a

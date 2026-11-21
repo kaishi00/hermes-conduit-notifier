@@ -239,6 +239,58 @@ async def put_chat_on_screen(request: Request, response: Response, profile: Opti
         raise core._unexpected("on-screen", exc, feature="Reply notifications")
 
 
+# --- Muted chats (chat_mute.py) ---------------------------------------------
+#
+# The user mutes one chat in Conduit (its menu, or a reply's notification) for
+# 15 minutes, an hour, a day or until unmuted. The muted chats live in the
+# profile's conduit-muted-chats.json, read by the plugin's turn-end hooks
+# (agent process), which skip that chat's reply and failure pushes.
+
+CHAT_MUTE_MAX_BODY_BYTES = 8 * 1024
+_chat_mute_module: Any = None
+_chat_mute_lock = threading.Lock()
+
+
+def _chat_mute() -> Any:
+    """chat_mute.py in the plugin's folder, loaded once."""
+    global _chat_mute_module
+    with _chat_mute_lock:
+        if _chat_mute_module is None:
+            path = os.path.join(core._plugin_root(), "chat_mute.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_chat_mute", path)
+            if spec is None or spec.loader is None or not os.path.isfile(path):
+                raise core.TokenError(501, "This plugin install is missing chat_mute.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _chat_mute_module = module
+        return _chat_mute_module
+
+
+def muted_chats() -> Dict[str, Any]:
+    return {"chats": _chat_mute().ChatMuteStore(_cron_home()).chats()}
+
+
+def update_muted_chat(body: Any) -> Dict[str, Any]:
+    module = _chat_mute()
+    try:
+        session_ids, seconds = module.parse(body)
+        chats = module.ChatMuteStore(_cron_home()).set_mute(session_ids, seconds)
+    except ValueError as exc:
+        raise core.TokenError(400, str(exc))
+    return {"chats": chats}
+
+
+@router.get("/notifications/muted-chats")
+async def get_muted_chats(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    return await _cron_route(profile, response, muted_chats, "status", feature="Muted chats")
+
+
+@router.put("/notifications/muted-chats")
+async def put_muted_chat(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    body = await core._read_json_body(request, CHAT_MUTE_MAX_BODY_BYTES)
+    return await _cron_route(profile, response, lambda: update_muted_chat(body), "settings", feature="Muted chats")
+
+
 # --- Confirm prompts Hermes shows on the phone ---------------------------------
 #
 # Before an action the user should OK, conduit_present keeps a confirm prompt

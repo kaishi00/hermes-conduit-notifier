@@ -205,6 +205,9 @@ ROUTE_CAPABILITIES = (
     "cron-bot-chat-reports",
     "reply-sources",
     "chat-on-screen",
+    # GET/PUT /notifications/muted-chats: a chat muted for a while or until
+    # unmuted sends no reply or failure push (chat_mute.py).
+    "chat-mute",
     # POST /predict, GET /predict: Conduit's Predictive features, answered
     # by a no-tools fork of the chat for the asking device only.
     "predict",

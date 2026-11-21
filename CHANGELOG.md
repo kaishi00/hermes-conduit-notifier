@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.193.0 (2026-11-21)
+
+### New and improved
+
+- Mute a chat's notifications in Conduit for 15 minutes, an hour, a day or until you unmute it. Its replies and failures stay quiet on every device; approvals and questions still come through.
+
 ## 0.192.0 (2026-11-21)
 
 ### New and improved

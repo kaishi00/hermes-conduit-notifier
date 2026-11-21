@@ -693,6 +693,8 @@ routes:
   - POST /location/wipe
   - GET /memory/context
   - POST /memory/recall
+  - GET /notifications/muted-chats
+  - PUT /notifications/muted-chats
   - PUT /notifications/on-screen
   - GET /notifications/reply-sources
   - PUT /notifications/reply-sources

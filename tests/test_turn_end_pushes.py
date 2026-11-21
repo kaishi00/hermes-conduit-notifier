@@ -1044,3 +1044,41 @@ def test_the_routing_words_outside_a_room_are_an_ordinary_turn(pushed, monkeypat
     plugin._post_llm_call(session_id="c", turn_id="t", assistant_response='{"assign": ["linus"]}')
     plugin._on_session_end(session_id="c", turn_id="t", completed=True, failed=False, interrupted=False)
     assert _types(pushed) == ["response.ready"]
+
+
+def test_a_muted_chat_sends_no_reply_or_failure_until_unmuted(pushed, tmp_path, monkeypatch):
+    alerts = []
+    monkeypatch.setattr(plugin.calls, "failed_turn", lambda *args, **kwargs: alerts.append(args) or False)
+    store = plugin.chat_mute.ChatMuteStore(tmp_path)
+    store.set_mute(["stored-s", "s"], 3600)
+    plugin._post_llm_call(session_id="s", turn_id="t1", assistant_response="Done.")
+    plugin._on_session_end(session_id="s", turn_id="t1", completed=True, failed=False, interrupted=False)
+    plugin._post_llm_call(session_id="s", turn_id="t2", assistant_response="The provider returned an error.")
+    plugin._on_session_end(session_id="s", turn_id="t2", completed=False, failed=True, interrupted=False)
+    assert pushed == [] and alerts == [], "nor an alert call"
+    plugin._post_llm_call(session_id="other", turn_id="t3", assistant_response="Done.")
+    plugin._on_session_end(session_id="other", turn_id="t3", completed=True, failed=False, interrupted=False)
+    assert _types(pushed) == ["response.ready"], "another chat still notifies"
+    store.set_mute(["s"], 0)
+    plugin._post_llm_call(session_id="s", turn_id="t4", assistant_response="Done.")
+    plugin._on_session_end(session_id="s", turn_id="t4", completed=True, failed=False, interrupted=False)
+    assert _types(pushed) == ["response.ready", "response.ready"]
+
+
+def test_a_muted_chat_stays_muted_after_compaction_but_not_in_a_branch(pushed, tmp_path):
+    import sqlite3
+
+    db = sqlite3.connect(tmp_path / "state.db")
+    db.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, end_reason TEXT)")
+    db.executemany("INSERT INTO sessions VALUES (?, ?, ?)", [
+        ("root", None, "compression"), ("next", "root", None),
+        ("trunk", None, "branched"), ("branch", "trunk", None),
+    ])
+    db.commit()
+    db.close()
+    store = plugin.chat_mute.ChatMuteStore(tmp_path)
+    store.set_mute(["root"], None)
+    store.set_mute(["trunk"], None)
+    assert plugin._chat_muted("next")
+    assert not plugin._chat_muted("branch"), "a branch is a new chat"
+    assert not plugin._chat_muted("unrelated")
