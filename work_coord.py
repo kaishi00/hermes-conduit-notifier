@@ -129,7 +129,7 @@ ANSWER_PICKED = "- {id}{about}: the user picked «{choice}» just now. You asked
 ANSWER_SAID = "- {id}{about}: the user answered «{choice}» just now. You asked: «{text}»"
 ANSWER_DECLINED = "- {id}{about}, declined by the user just now: «{text}»"
 # What the user added with an answer given by voice or in another chat.
-ANSWER_WORDS = " They added: «{note}»."
+ANSWER_WORDS = ". They added: «{note}»."
 # After a work update's lines, in place of "tell the user what came back".
 WAKE_TAIL = ("First see whether what came back matters to your other open work (the board in your note): act on "
              "it as your coordination setting says. Then the user: tell them in a line or two when a result is "
@@ -771,6 +771,8 @@ ASKED_SPOKEN_RULE = ("Say them when the user asks what waits on them, or when on
 # under Hermes' 10,000-character hook context, past which it keeps a preview.
 ASKED_CHARS = 2400
 ASKED_BOT_CHAT_CHARS = 1200
+# A chat's title in those notes.
+CHAT_TITLE_CHARS = 80
 ASKED_MORE = "- And {count} more waiting: say so when the user asks."
 
 
@@ -801,10 +803,13 @@ def _asked_lines(rows: list[dict], ago: Callable[[float], str], chat_titles: Opt
                  f" You recommended «{row['recommended']}»." if row.get("recommended") else "")
         where = ""
         if chat_titles is not None:
-            where = (f" in the chat «{chat_titles.get(row['chat']) or 'untitled'}»" if row.get("chat")
+            where = (f" in the chat «{_short(chat_titles.get(row['chat']), CHAT_TITLE_CHARS) or 'untitled'}»"
+                     if row.get("chat")
                      else " in your Bot Chat")
         line = f"- {row['id']}, asked {ago(row['created_at'])}{where}: «{text}».{ahead}"
-        if lines and len(line) + 1 > room:
+        if not lines and len(line) + 1 > room:
+            line = _short(line, max(room - 1, 1))  # the first is heard, cut to the room
+        if len(line) + 1 > room:
             lines.append(ASKED_MORE.format(count=len(rows) - index))
             break
         room -= len(line) + 1

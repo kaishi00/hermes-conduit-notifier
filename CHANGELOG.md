@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.191.1 (2026-11-21)
+
+### Fixes
+
+- On a call in your Bot Chat, your bot could miss some of its own waiting questions when its work list was long.
+- A very long chat title or question could make a call's list of waiting questions too long for your bot to read.
+
 ## 0.191.0 (2026-11-21)
 
 ### Fixes
