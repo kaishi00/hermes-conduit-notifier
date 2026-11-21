@@ -2342,6 +2342,14 @@ release helper use client-only cleanup too.
   "hidden"`) and `ask_again_in_seconds` is held to 30 s–15 min (`null`: not
   until the user writes). An answer that isn't the JSON asked for comes back
   with `"parsed": false` and nothing to suggest. Capability `predict`.
+- From plugin 0.190, any kind can add `"custom_instructions": "<the user's
+  guidance>"` (at most 1,000 characters, counted in Unicode code points;
+  blank or left out changes nothing). It goes into that kind's question as a
+  marked section of the user's preferences, after the task and before the
+  JSON it asks for, which it never changes: the limits, the refused tools and
+  the hidden turn a `turn` answer leads to stay as they are. Conduit sends
+  each kind only its own instructions. It isn't logged or saved. Capability
+  `predict-custom-instructions`; older plugins ignore the field.
 - One prediction at a time per chat (429), at most 4 running on the host
   (503), 40 a minute for the whole host. One that outlasts `wait_s` answers 504 and
   is left to finish; its chat is free again when it does. `GET …/predict`

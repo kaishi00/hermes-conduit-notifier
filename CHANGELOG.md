@@ -13,11 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.189.1 (2026-11-21)
+## 0.190.1 (2026-11-21)
 
 ### Fixes
 
 - When your bot reworded a question it had already asked, its choices and the one it recommended went away unless it gave them again.
+
+## 0.190.0 (2026-11-21)
+
+### New and improved
+
+- Conduit's Predictive features can carry your own instructions for each one: suggested replies, guesses while you pause, and when Hermes follows up. They guide those guesses only, not your bot's usual replies.
 
 ## 0.189.0 (2026-11-21)
 
