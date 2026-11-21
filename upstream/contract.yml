@@ -282,8 +282,11 @@ notes:
     getattr. Without them the restart is reported failed, as before (notifier #605).
   plugin install scan: >-
     Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
-    every shipped file before an install or update; one high finding makes it caution, which the
-    update can't confirm, so hosts stay on the old version (hermes-conduit#1500).
+    every shipped file before an install or update; one high finding makes it caution, which holds
+    the update until the user confirms it (hermes-conduit#1500). Conduit's Update Anyway then runs
+    hermes_cli.plugins_cmd's dashboard_update_user_plugin with force=True (notifier #981); a dangerous
+    verdict Hermes refuses even so, and a pull that takes no force gets self_update's
+    SCAN_FORCE_UNSUPPORTED explanation instead.
   desktop half lint: >-
     The boards Hermes Desktop draws (feature map: "Cards Hermes shows"). Hermes lints a package's
     Desktop half (desktop/plugin.js) with hermes_cli.plugin_validate_desktop; a construct it flags
