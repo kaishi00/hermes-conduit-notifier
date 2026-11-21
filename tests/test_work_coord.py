@@ -898,3 +898,51 @@ def test_a_clarify_that_ran_out_is_kept_and_answered_in_words_or_with_a_choice(o
     kept_here = [row for row in coord.open_questions(on) if row["source_id"] == "r2"]
     assert len(kept_here) == 2 and all(row["chat"] == "" for row in kept_here)
     assert call("work_propose", {"withdraw": kept_here[0]["id"]})["status"] == "withdrawn"
+
+
+def test_a_reworded_question_takes_its_new_choices_and_a_peers_chat_asks_nothing(on, hermes, home, monkeypatch):
+    asked(home)
+    item = call("work_propose", {"text": "Restart the watcher?"}, session_id=OTHER_CHAT)["id"]
+    monkeypatch.setattr(coord, "mode", lambda store: "auto")
+    out = call("work_propose", {"replaces": item, "text": "How should the watcher come back?",
+                                "choices": ["Restart now", "Wait for tonight"], "recommended": "Wait for tonight",
+                                "going_ahead": True}, session_id=OTHER_CHAT)
+    assert out["ok"], out
+    row = on.proposal(item)
+    assert work.work_store.proposal_choices(row) == ["Restart now", "Wait for tonight"]
+    assert row["recommended"] == "Wait for tonight" and row["going_ahead"]
+    assert coord.question_card(row)["actions"] == ["answer"]
+    # A peer's conversation forwarded over A2A isn't the owner's to ask from.
+    monkeypatch.setattr(work, "_from_a_peer", lambda session: session == OTHER_CHAT)
+    assert call("work_propose", {"text": "Delete the logs?"}, session_id=OTHER_CHAT)["error"] == "not_bot_chat"
+
+
+def test_the_bot_chats_board_keeps_its_own_questions_past_other_chats(on, hermes, home, monkeypatch):
+    asked(home)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    mine = call("work_propose", {"text": "Pause the nightly sync?"})["id"]
+    for n in range(coord.PROPOSALS_SHOWN):
+        assert call("work_propose", {"text": f"Question {n} about something else entirely {'x' * n}?"},
+                    session_id=OTHER_CHAT)["ok"]
+    lines = "\n".join(coord.proposals_lines(on, lambda at: "now"))
+    assert mine in lines and "Pause the nightly sync" in lines
+
+
+def test_a_clarify_kept_once_isnt_kept_again_and_a_workstreams_isnt_kept(on, hermes, home, monkeypatch):
+    import json as _json
+
+    from test_turn_end_pushes import ROOT, _load
+
+    clarify_loop = sys.modules.get("conduit_push.clarify_loop") or _load("conduit_push.clarify_loop",
+                                                                        ROOT / "clarify_loop.py")
+    monkeypatch.setattr(clarify_loop, "_card_asks_instead", lambda session: True)
+    monkeypatch.setattr(work, "_home", lambda: on.home)
+    batch = [{"qid": "q1", "question": "Which branch?", "choices": [], "multi_select": False}]
+    result = _json.dumps({"responses": [{"status": "unanswered"}], "outcome": "timed_out"})
+    assert "notice" in _json.loads(clarify_loop.keep_unanswered(result, session_id=OTHER_CHAT, batch=batch,
+                                                                request_id="r1"))
+    assert clarify_loop.keep_unanswered(result, session_id=OTHER_CHAT, batch=batch, request_id="r2") == result
+    assert len(coord.open_questions(on)) == 1
+    monkeypatch.setattr(work, "_workstream", lambda session, home=None: (None, object()))
+    assert clarify_loop.keep_unanswered(result, session_id="ws-chat", batch=batch, request_id="r3") == result
+    assert len(coord.open_questions(on)) == 1

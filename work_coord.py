@@ -526,8 +526,9 @@ def proposals_lines(store: work_store.Store, ago: Callable[[float], str]) -> lis
     they answered lately, so a later turn doesn't ask the same again."""
     try:
         open_questions(store)  # one about resolved work is off the list
-        rows = [row for row in store.proposals(since=time.time() - PROPOSAL_CLOSED_AGE_S, limit=PROPOSALS_SHOWN)
-                if not row.get("chat")]  # another chat's are that chat's
+        # Only the Bot Chat's own (another chat's are that chat's), read
+        # before the limit so other chats' never take their places.
+        rows = store.proposals(since=time.time() - PROPOSAL_CLOSED_AGE_S, limit=PROPOSALS_SHOWN, chat="")
     except sqlite3.Error:
         return []
     lines = []
@@ -825,8 +826,13 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any, ch
         # "New since the last no" only on a question about work the user said no
         # to: kept, or replaced when there's more, and cleared otherwise.
         declined = store.proposal_about(had + added, status="declined", since=time.time() - PROPOSAL_CLOSED_AGE_S)
+        # It's asked anew: its choices, recommended one and going ahead are
+        # as this call gives them, under the same rules as a new question's.
+        wants_ahead = bool(args.get("going_ahead")) and (bool(recommended) or not choices)
         done = store.proposal_reword(replaces, had + added if added else [], text,
-                                     (new or None) if declined is not None else "")
+                                     (new or None) if declined is not None else "",
+                                     choices=choices, recommended=recommended,
+                                     going_ahead=wants_ahead and mode(store) == "auto")
         if done is None:
             return {"ok": False, "id": replaces, "error": "no_such_proposal",
                     "note": f"There's no open {replaces}. Your note lists the open ones."}

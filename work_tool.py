@@ -905,7 +905,7 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
         except room_work.Unreadable:
             return {"ok": False, "error": "unavailable", "note": room_work.UNREADABLE}
         chat = str(session_id or "").strip()
-        if room is None and name == "work_propose" and chat and not _is_child(chat):
+        if room is None and name == "work_propose" and chat and not _is_child(chat) and not _from_a_peer(chat):
             # Any chat of the bot's may ask a question that waits on the user
             # (Eric, 2026-11-21): its answer comes back to that chat.
             return work_coord.propose(home, work_store.Store(home), args, session_id, chat=chat)
@@ -7881,3 +7881,15 @@ def forward_review(session_id: Any, ref: str, text: str) -> dict:
     """The user's marks on a review, sent from the Bot Chat to the workstream
     that made it, as work_send sends them; its answer."""
     return _handle("work_send", {"ref": ref, "text": text, "how": "after"}, session_id)
+
+
+def _from_a_peer(session_id: str) -> bool:
+    """Whether the chat is a peer's conversation forwarded over A2A: its
+    author is another person, so its questions aren't the owner's to answer
+    (as clarify_loop's card, which isn't offered there either)."""
+    try:
+        from . import clarify_loop
+
+        return clarify_loop._session_source(session_id) == clarify_loop.A2A_SOURCE
+    except Exception:  # noqa: BLE001 — unreadable: a chat's, as before
+        return False

@@ -242,22 +242,36 @@ def keep_unanswered(result: Any, *, session_id: str, batch: list[dict[str, Any]]
         home = work_tool._home()
         if home is None or work_tool.policy(home) == "off":
             return result
+        # A workstream asks the user through its Bot Chat, and couldn't
+        # withdraw a question of its own: its clarify isn't kept.
+        if work_tool._workstream(session_id, home)[1] is not None:
+            return result
         store = work_store.Store(home)
         # The Bot Chat's own questions are stored with no chat, as its
         # work_propose stores them, so they're on its board and it can
         # withdraw or reword them.
         chat = "" if session_id == work_tool._bot_chat_of(home) else session_id
         ids = []
+        waiting = [row for row in work_coord.open_questions(store) if (row.get("chat") or "") == chat]
         for entry in unanswered:
+            text = work_coord._short(entry["question"], work_coord.PROPOSAL_CHARS)
+            # Asked again after an earlier one ran out, or past the chat's cap:
+            # the question already waiting stands for it.
+            if len(waiting) >= work_coord.PROPOSALS_SHOWN or any(
+                    work_coord._same_words(row["text"], text) for row in waiting):
+                continue
             choices = [str(choice) for choice in entry.get("choices") or []]
             pick = (not entry.get("multi_select")
                     and work_coord.CHOICES_MIN <= len(choices) <= work_coord.CHOICES_MAX)
             ids.append(store.proposal_add(
-                [], work_coord._short(entry["question"], work_coord.PROPOSAL_CHARS), chat=chat,
+                [], text, chat=chat,
                 choices=[work_coord._short(choice, work_coord.CHOICE_CHARS) for choice in choices] if pick else [],
                 source="clarify", source_id=request_id))
+            waiting.append({"text": text})
     except Exception:  # noqa: BLE001 — the timed-out result still stands
         logger.warning("conduit_push: couldn't keep an unanswered question", exc_info=True)
+        return result
+    if not ids:
         return result
     what = "it stays" if len(ids) == 1 else "they stay"
     note = KEPT_NOTICE.format(what=what, ids=", ".join(ids))
