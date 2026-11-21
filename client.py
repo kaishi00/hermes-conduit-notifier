@@ -352,6 +352,45 @@ def default_gateway_name(profile: str | None = None) -> str:
     return (name if main else f"{name} ({scoped})")[:80]
 
 
+# A Docker host's name is its container's id: 12 hex characters, or 64.
+_CONTAINER_ID = re.compile(r"[0-9a-f]{12}(?:[0-9a-f]{52})?")
+_instance_name_cache: tuple[float, str] | None = None
+
+
+def instance_name() -> str:
+    """What Conduit names this Hermes' saved dashboard when the person hasn't
+    and its address names nothing (an IP address or localhost): the main
+    bot's name, else the host's (its first label), "" when neither says more
+    than Hermes or a container's id. The main bot's, whatever profile asks,
+    so every profile's answer is the same. Read at most every 30 s."""
+    global _instance_name_cache
+    now = time.monotonic()
+    cached = _instance_name_cache
+    if cached is not None and now - cached[0] < 30:
+        return cached[1]
+    bot = ""
+    try:
+        from . import session_titles
+
+        home = session_titles._home()
+        if home is not None and home.parent.name == "profiles":
+            home = home.parent.parent
+        bot = session_titles._given_name(home) if home is not None else ""
+    except Exception:  # noqa: BLE001 - a name is never worth the answer
+        logger.debug("No main bot name for the dashboard's name", exc_info=True)
+    if bot.lower() in ("default", "hermes"):
+        bot = ""
+    name = bot
+    if not name:
+        host = "".join(c for c in socket.gethostname() if c.isprintable()).strip()
+        first = host.split(".")[0] if not host.replace(".", "").isdigit() else ""
+        if first.lower() not in ("", "localhost") and not _CONTAINER_ID.fullmatch(first.lower()):
+            name = first
+    name = name[:80]
+    _instance_name_cache = (now, name)
+    return name
+
+
 def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: str = "") -> dict[str, Any]:
     """Claim a pairing code and save the pairing (rules in relay_urls.py).
 

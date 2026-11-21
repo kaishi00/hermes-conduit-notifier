@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import Response
 
-from . import core
+from . import core, self_update
 
 router = core.router
 
@@ -409,12 +409,25 @@ async def get_capabilities(response: Response) -> Dict[str, Any]:
         body["managed"] = True
         if managed:
             body["managed_by"] = managed
+    name = instance_name()
+    if name:
+        body["name"] = name
     if _room_chats_kept():
         body["room_chats_kept"] = True
     degraded = _degraded()
     if degraded:
         body["degraded"] = degraded
     return body
+
+
+def instance_name() -> str:
+    """Conduit's default name for this Hermes' saved dashboard
+    (client.instance_name), "" when it has none."""
+    try:
+        return self_update._plugin_client().instance_name()
+    except Exception:  # noqa: BLE001 - a name is never worth the capabilities
+        core.logger.debug("Conduit plugin: no name for this Hermes", exc_info=True)
+        return ""
 
 
 def _degraded() -> list:

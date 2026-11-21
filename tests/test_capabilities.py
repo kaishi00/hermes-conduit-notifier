@@ -33,6 +33,7 @@ def test_capabilities_report_the_manifest_version_and_route_features():
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     body = response.json()
+    body.pop("name", None)  # this machine's name: test_pairing.test_capabilities_name_this_hermes
     manifest = re.search(r"^version:\s*(\S+)", (ROOT / "plugin.yaml").read_text(), re.M).group(1)
     assert body == {"ok": True, "version": manifest, "loaded_version": manifest, "restart_needed": False,
                     "boot_id": api.capabilities.BOOT_ID, "capabilities": list(api.capabilities.ROUTE_CAPABILITIES)}

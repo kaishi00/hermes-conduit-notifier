@@ -359,3 +359,30 @@ def test_a_relay_naming_plain_http_is_not_saved(tmp_path):
                          claim=_recording_claim([], _claimed(relay_url="http://192.168.1.10:8787")))
     assert raised.value.status == 502 and "PUBLIC_URL" in str(raised.value)
     assert not path2.exists()
+
+
+def test_capabilities_name_this_hermes(monkeypatch, tmp_path):
+    # Conduit's default name for a dashboard reached by an IP address.
+    client = api.self_update._plugin_client()
+    titles = importlib.import_module(f"{client.__package__}.session_titles")
+    main = tmp_path / ".hermes"
+    (main / "profiles" / "coder").mkdir(parents=True)
+    monkeypatch.setattr(titles, "_home", lambda: main / "profiles" / "coder")
+    monkeypatch.setattr(client.socket, "gethostname", lambda: "studio.lan")
+
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+
+    def name():
+        client._instance_name_cache = None
+        return TestClient(app).get(f"{BASE}/capabilities").json().get("name")
+
+    assert name() == "studio", "no bot name: the host's first label"
+    (main / "profile.yaml").write_text("display_name: Furina\n")
+    assert name() == "Furina", "the main bot's name, whatever profile asks"
+    (main / "profile.yaml").write_text("display_name: Hermes\n")
+    assert name() == "studio", "Hermes names no Hermes apart"
+    for host in ("3f2a9c81b0de", "localhost", "192.168.1.5", ""):
+        monkeypatch.setattr(client.socket, "gethostname", lambda host=host: host)
+        assert name() is None, f"{host!r} names nothing"
+    client._instance_name_cache = None
