@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.188.0 (2026-11-21)
+
+### New and improved
+
+- Conduit names a dashboard you reach by an IP address after your main bot, or the host's name when the bot has none, instead of the address, so each dashboard's badge has its own letter. You can still rename it in Conduit.
+
 ## 0.187.10 (2026-11-20)
 
 ### Fixes

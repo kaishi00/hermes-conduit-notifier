@@ -5488,6 +5488,12 @@ itself is (a plugin older than 0.4), Settings asks you to run
 `hermes plugins update conduit_push` and restart the gateway. Every new route
 family adds its name here.
 
+From 0.188, `name` is what Conduit calls this Hermes' saved dashboard when
+you haven't named it and its address is an IP address or localhost: the main
+bot's name, else the host's name (its first label). It's left out when
+neither says more than "Hermes" or a Docker container's id. Conduit and
+Conduit for desktop let you rename a dashboard in their Settings.
+
 ## Pairing from Conduit (plugin 0.24+)
 
 `POST /api/plugins/conduit_push/pair?profile=` with
