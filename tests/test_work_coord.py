@@ -967,8 +967,8 @@ def test_a_clarify_kept_once_isnt_kept_again_and_a_workstreams_isnt_kept(on, her
 def test_a_spoken_note_stays_small_and_a_no_said_elsewhere_to_a_bot_chat_question_stays_on_its_board(
         on, hermes, home, monkeypatch):
     """The spoken note rides with the Bot Chat's digest under Hermes'
-    hook-context limit: it lists what fits and says how many more wait, and
-    leaves out the Bot Chat's own in its turns (its board has them). A no
+    hook-context limit: it lists what fits and says how many more wait, in
+    less room in the Bot Chat's own turns. A no
     said in another chat to a question the Bot Chat asked isn't sent there:
     it stays on the board, and work_propose says so."""
     monkeypatch.setattr(work, "WAKE_BATCH_S", 3600.0)
@@ -983,7 +983,13 @@ def test_a_spoken_note_stays_small_and_a_no_said_elsewhere_to_a_bot_chat_questio
     heard = work.asked_note("voice-call-chat", spoken=True)
     assert len(heard) <= coord.ASKED_CHARS and "more waiting" in heard and own in heard
     in_bot_chat = work.asked_note(BOT_CHAT, spoken=True)
-    assert len(in_bot_chat) <= coord.ASKED_BOT_CHAT_CHARS and f"{own}," not in in_bot_chat
+    assert len(in_bot_chat) <= coord.ASKED_BOT_CHAT_CHARS and f"{own}, asked " in in_bot_chat, \
+        "the Bot Chat's own stay: its digest may have left them out"
+    # A long chat title and a long first question still keep to the room.
+    monkeypatch.setattr(work, "_chat_title", lambda chat: "T" * 500)
+    tight = coord.asked_spoken_note([{"id": "P1", "text": "x" * 300, "created_at": 0, "chat": "c1",
+                                      "choices": json.dumps(["a" * 60] * 4)}], lambda at: "now", {"c1": "T" * 500}, 900)
+    assert len(tight) <= 900 and "- P1, asked now in the chat «TTT" in tight
     call_chat = "voice-call-chat"
     _chat_db(home, [(call_chat, "user", "No, not tonight.", None)])
     out = call("work_propose", {"id": own, "answer": "declined"}, session_id=call_chat)

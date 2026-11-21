@@ -6021,11 +6021,10 @@ def asked_note(session_id: Any, spoken: bool = False) -> Optional[str]:
     store = work_store.Store(home)
     every = work_coord.open_questions(store)
     if spoken and every:
-        # The Bot Chat's own are on its board (digest), which shares the room.
+        # In the Bot Chat it shares the room with the digest, which may have
+        # left some of the Bot Chat's own out: all of them stay, in less room.
         coordinator = is_bot_chat(chat, home)
-        heard = [row for row in every if row.get("chat")] if coordinator else every
-        if not heard:
-            return None
+        heard = every
         titles: dict[str, str] = {}
         for row in heard:
             if row.get("chat") and row["chat"] not in titles:
