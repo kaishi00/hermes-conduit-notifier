@@ -924,6 +924,10 @@ def test_a_reworded_question_takes_its_new_choices_and_a_peers_chat_asks_nothing
     waits = call("work_propose", {"replaces": item, "text": "How should the watcher come back now?"},
                  session_id=OTHER_CHAT)
     assert not waits["going_ahead"] and coord.WAIT_UNDER_ASK in waits["note"]
+    # An empty choices makes it a yes or no.
+    assert call("work_propose", {"replaces": item, "text": "Restart the watcher now?", "choices": []},
+                session_id=OTHER_CHAT)["ok"]
+    assert work.work_store.proposal_choices(on.proposal(item)) == []
     # A peer's conversation forwarded over A2A isn't the owner's to ask from.
     monkeypatch.setattr(work, "_from_a_peer", lambda session: session == OTHER_CHAT)
     assert call("work_propose", {"text": "Delete the logs?"}, session_id=OTHER_CHAT)["error"] == "not_bot_chat"

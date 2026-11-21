@@ -1814,7 +1814,8 @@ question or a small task doesn't start a workstream. Change it in Conduit
   clarify question nobody answers in time (one asked as a question batch,
   outside a workstream) is kept the same way instead of expiring, unless one
   with the same words already waits (plugin 0.189.0+). Rewording one with
-  `replaces` sets its choices, recommended one and going ahead anew. A
+  `replaces` keeps its choices, recommended one and going ahead unless the
+  call gives them (an empty `choices` makes it a yes or no). A
   workstream you keep her out of (Keep her out of this, on its card in
   Conduit) gets nothing from her and isn't stopped by her in a turn you
   didn't start. Past eight

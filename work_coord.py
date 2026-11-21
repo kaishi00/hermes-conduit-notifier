@@ -589,7 +589,8 @@ SCHEMA = {
         "ref": {"type": "string", "description": "The workstream it's about (W1), if one."},
         "refs": {"type": "array", "items": {"type": "string"},
                  "description": "Every workstream one decision covers (W1, W3), when it's more than one."},
-        "replaces": {"type": "string", "description": "An open question (P1) this rewords, with new evidence."},
+        "replaces": {"type": "string", "description": "An open question (P1) this rewords, with new evidence; "
+                     "it keeps its choices, recommended one and going ahead unless you give them."},
         "new": {"type": "string", "description": "What came up since the user declined a question about this "
                                                  "work, when you ask about it again."},
         "id": {"type": "string", "description": "The question the user answered (P1)."},
@@ -829,7 +830,7 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any, ch
         # Its choices, recommended one and going ahead are as this call gives
         # them, under the same rules as a new question's; left out, they stay
         # as they were (a reword that only adds evidence keeps its choices).
-        if args.get("choices") in (None, "", []) and not args.get("recommended"):
+        if args.get("choices") is None and not args.get("recommended"):
             choices, recommended = work_store.proposal_choices(asked), asked.get("recommended") or ""
         wants_ahead = (bool(args.get("going_ahead")) if "going_ahead" in args else bool(asked.get("going_ahead"))
                        ) and (bool(recommended) or not choices)
