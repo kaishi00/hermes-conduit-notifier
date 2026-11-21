@@ -912,6 +912,18 @@ def test_a_reworded_question_takes_its_new_choices_and_a_peers_chat_asks_nothing
     assert work.work_store.proposal_choices(row) == ["Restart now", "Wait for tonight"]
     assert row["recommended"] == "Wait for tonight" and row["going_ahead"]
     assert coord.question_card(row)["actions"] == ["answer"]
+    assert out["going_ahead"] and "«Wait for tonight»" in out["note"]
+    # A reword that only adds evidence keeps its choices, recommended one and going ahead.
+    kept = call("work_propose", {"replaces": item, "text": "How should the watcher come back? It crashed twice."},
+                session_id=OTHER_CHAT)
+    row = on.proposal(item)
+    assert kept["going_ahead"] and work.work_store.proposal_choices(row) == ["Restart now", "Wait for tonight"]
+    assert row["recommended"] == "Wait for tonight" and row["going_ahead"]
+    # Under Ask Me First the reword says to wait.
+    monkeypatch.setattr(coord, "mode", lambda store: "ask")
+    waits = call("work_propose", {"replaces": item, "text": "How should the watcher come back now?"},
+                 session_id=OTHER_CHAT)
+    assert not waits["going_ahead"] and coord.WAIT_UNDER_ASK in waits["note"]
     # A peer's conversation forwarded over A2A isn't the owner's to ask from.
     monkeypatch.setattr(work, "_from_a_peer", lambda session: session == OTHER_CHAT)
     assert call("work_propose", {"text": "Delete the logs?"}, session_id=OTHER_CHAT)["error"] == "not_bot_chat"

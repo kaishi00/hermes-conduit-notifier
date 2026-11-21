@@ -826,18 +826,26 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any, ch
         # "New since the last no" only on a question about work the user said no
         # to: kept, or replaced when there's more, and cleared otherwise.
         declined = store.proposal_about(had + added, status="declined", since=time.time() - PROPOSAL_CLOSED_AGE_S)
-        # It's asked anew: its choices, recommended one and going ahead are
-        # as this call gives them, under the same rules as a new question's.
-        wants_ahead = bool(args.get("going_ahead")) and (bool(recommended) or not choices)
+        # Its choices, recommended one and going ahead are as this call gives
+        # them, under the same rules as a new question's; left out, they stay
+        # as they were (a reword that only adds evidence keeps its choices).
+        if args.get("choices") in (None, "", []) and not args.get("recommended"):
+            choices, recommended = work_store.proposal_choices(asked), asked.get("recommended") or ""
+        wants_ahead = (bool(args.get("going_ahead")) if "going_ahead" in args else bool(asked.get("going_ahead"))
+                       ) and (bool(recommended) or not choices)
+        going_ahead = wants_ahead and mode(store) == "auto"
         done = store.proposal_reword(replaces, had + added if added else [], text,
                                      (new or None) if declined is not None else "",
-                                     choices=choices, recommended=recommended,
-                                     going_ahead=wants_ahead and mode(store) == "auto")
+                                     choices=choices, recommended=recommended, going_ahead=going_ahead)
         if done is None:
             return {"ok": False, "id": replaces, "error": "no_such_proposal",
                     "note": f"There's no open {replaces}. Your note lists the open ones."}
-        return {"ok": True, "id": replaces, "note": f"{replaces} now reads as you wrote it. Tell the user what "
-                                                    "changed in your reply; it's still one question."}
+        ahead = (f" You may carry on with «{recommended}» until they answer." if going_ahead and recommended
+                 else " You may carry on with it until they answer." if going_ahead
+                 else WAIT_UNDER_ASK if wants_ahead and mode(store) == "ask" else "")
+        return {"ok": True, "id": replaces, "going_ahead": going_ahead,
+                "note": f"{replaces} now reads as you wrote it. Tell the user what changed in your reply; it's "
+                        f"still one question.{ahead}"}
     refusal = _asked_before(store, refs, new, text=text, chat=chat)
     if refusal is not None:
         return refusal
