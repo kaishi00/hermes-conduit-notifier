@@ -4,11 +4,12 @@ message arrived, and how independently the Bot Chat acts in a turn the user
 didn't start (Coordination: Off, Ask or Automatic, and Keep {bot} out of this)."""
 import json
 import sqlite3
+import sys
 import time
 
 import pytest
 
-from test_work import (BOT_CHAT, WORKER, _brief_text, _chat_db, batched, call, home, hermes, on, start,  # noqa: F401
+from test_work import (BOT_CHAT, OTHER_CHAT, WORKER, _brief_text, _chat_db, batched, call, home, hermes, on, start,  # noqa: F401
                        store_mod, submitted_to, work)
 
 coord = work.work_coord
@@ -584,7 +585,7 @@ def test_a_question_is_answered_with_a_tap_and_a_yes_is_the_users_turn(on, herme
     work._send_wake(on.home, BOT_CHAT)
     sent = on.outbox_rows("", "wake")[-1]["text"]
     assert sent.startswith("Work update from Conduit: the user answered what you asked them")
-    assert sent.index(line) < sent.index("Do what they said yes to now") < sent.index("- W1 reported: done")
+    assert sent.index(line) < sent.index("Act on it now: do what they said yes to") < sent.index("- W1 reported: done")
     _chat_db(home, [(BOT_CHAT, "user", sent, "hidden")])
     assert call("work_stop", {"ref": "W1"})["ok"]
     # Their tap answered that question only: another stays theirs to answer.
@@ -764,3 +765,184 @@ def test_two_refused_updates_give_back_only_their_own_marks(on):
     coord.ask_wake_unsent(on, "a", first)
     coord.ask_wake_unsent(on, "b", second)
     assert json.loads(on.get_meta(coord._ASK_WAKES)) == ["real"]
+
+
+# Questions that don't pause the turn (Eric, 2026-11-21) -------------------------
+
+def test_another_chat_asks_with_choices_and_the_tapped_answer_goes_back_there(on, hermes, home, monkeypatch):
+    """Any chat of the bot's may ask a question that waits on the user: its
+    options and the recommended one are kept, it's on the Needs you list as
+    its card, and a tap answers it with one choice and wakes that chat."""
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 3600.0)
+    on.set_coordination("ask")
+    asked(home)
+    _chat_db(home, [(OTHER_CHAT, "user", "Keep an eye on the deploy.", None)])
+    assert call("work_propose", {"text": "Roll back?", "ref": "W1"}, session_id=OTHER_CHAT)["error"] == "bot_chat_only"
+    assert call("work_propose", {"text": "Roll back?", "choices": ["Roll back"]},
+                session_id=OTHER_CHAT)["error"] == "missing"
+    assert call("work_propose", {"text": "Roll back?", "choices": ["Roll back", "Wait"], "recommended": "Fix"},
+                session_id=OTHER_CHAT)["error"] == "missing"
+    out = call("work_propose", {"text": "The site's been down 2 hours. Roll back the deploy?",
+                                "choices": ["Roll back", "Keep diagnosing"], "recommended": "roll back",
+                                "going_ahead": True}, session_id=OTHER_CHAT)
+    # Under Ask Me First the bot waits, whatever it asked for.
+    assert out["ok"] and out["going_ahead"] is False and coord.WAIT_UNDER_ASK.strip() in out["note"]
+    item = out["id"]
+    row = on.proposal(item)
+    assert row["chat"] == OTHER_CHAT and row["recommended"] == "Roll back" and not row["going_ahead"]
+    # Asked again in the same words in that chat, it's the same question.
+    again = call("work_propose", {"text": "The site's been down 2 hours. Roll back the deploy?",
+                                  "choices": ["Roll back", "Keep diagnosing"]}, session_id=OTHER_CHAT)
+    assert again["error"] == "already_asked"
+    card = coord.question_card(row)
+    assert card["chat"] == OTHER_CHAT and card["actions"] == ["answer"]
+    assert card["choices"] == ["Roll back", "Keep diagnosing"] and card["recommended"] == "Roll back"
+    shown = next(entry for entry in work.app_list(on.home)["coordination"]["items"] if entry["id"] == item)
+    assert shown["chat"] == OTHER_CHAT
+    # Another chat's question stays off the Bot Chat's board.
+    assert f"- {item}" not in work.digest(BOT_CHAT)
+    assert work.app_act(on.home, item, "approve")["error"] == "unknown_choice"
+    assert work.app_act(on.home, item, "answer", {"choice": "Restart it"})["error"] == "unknown_choice"
+    done = work.app_act(on.home, item, "answer", {"choice": "keep diagnosing"})
+    assert done == {"ok": True, "id": item, "status": "answered", "answer": "Keep diagnosing"}
+    line, = batched()
+    assert line == (f"- {item}: the user picked «Keep diagnosing» just now. You asked: «The site's been down 2 hours. "
+                    "Roll back the deploy?»")
+    kept, = on.outbox_rows("", "line_answer")
+    assert kept["target"] == OTHER_CHAT
+    assert on.proposal(item)["status"] == "answered" and on.proposal(item)["answer"] == "Keep diagnosing"
+
+
+def test_going_ahead_under_auto_and_a_no_to_it_is_told(on, hermes, home, monkeypatch):
+    """Under Auto the bot carries on with its recommendation while the user
+    hasn't answered, so even a no reaches it: it has something to undo."""
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 3600.0)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    on.set_coordination("auto")
+    start()
+    woken(home)
+    out = call("work_propose", {"text": "Move W1 to the v2 API.", "ref": "W1", "going_ahead": True})
+    assert out["going_ahead"] is True and "carry on with it" in out["note"]
+    assert "going ahead" in work.digest(BOT_CHAT)
+    assert work.app_act(on.home, out["id"], "decline")["status"] == "declined"
+    line, = batched()
+    assert line == f"- {out['id']} (about W1), declined by the user just now: «Move W1 to the v2 API.»"
+
+
+def test_a_question_is_withdrawn_only_where_it_was_asked_and_never_counts_as_an_answer(on, hermes, home):
+    asked(home)
+    item = call("work_propose", {"text": "Restart the watcher?"}, session_id=OTHER_CHAT)["id"]
+    assert call("work_propose", {"withdraw": item})["error"] == "no_such_proposal"  # the Bot Chat didn't ask it
+    out = call("work_propose", {"withdraw": item}, session_id=OTHER_CHAT)
+    assert out["ok"] and out["status"] == "withdrawn"
+    assert on.proposal(item)["status"] == "withdrawn" and on.proposal(item)["answer"] == ""
+    assert work.app_act(on.home, item, "approve")["error"] == "not_now"
+    assert coord.open_questions(on) == []
+
+
+def test_a_question_in_a_deleted_chat_is_withdrawn_and_a_filed_one_stays(on, hermes, home, monkeypatch):
+    asked(home)
+    item = call("work_propose", {"text": "Restart the watcher?"}, session_id=OTHER_CHAT)["id"]
+    monkeypatch.setattr(coord, "_chat_gone", lambda home, chat: False)
+    assert [row["id"] for row in coord.open_questions(on)] == [item]
+    monkeypatch.setattr(coord, "_chat_gone", lambda home, chat: chat == OTHER_CHAT)
+    assert coord.open_questions(on) == [] and on.proposal(item)["status"] == "withdrawn"
+
+
+def test_a_subagent_or_an_unknown_session_asks_nothing(on, hermes, home, monkeypatch):
+    monkeypatch.setattr(work, "_is_child", lambda session: session == OTHER_CHAT)
+    assert call("work_propose", {"text": "Restart?"}, session_id=OTHER_CHAT)["error"] == "not_bot_chat"
+    assert call("work_propose", {"text": "Restart?"}, session_id="")["error"] == "not_bot_chat"
+
+
+def test_a_clarify_that_ran_out_is_kept_and_answered_in_words_or_with_a_choice(on, hermes, home, monkeypatch):
+    """A clarify question nobody answered in time stays on the user's list:
+    one with two to four options as a choice to tap, one without as an
+    answer in words. The model is told in the result's notice."""
+    import json as _json
+
+    from test_turn_end_pushes import ROOT, _load
+
+    clarify_loop = sys.modules.get("conduit_push.clarify_loop") or _load("conduit_push.clarify_loop",
+                                                                        ROOT / "clarify_loop.py")
+
+    monkeypatch.setattr(clarify_loop, "_card_asks_instead", lambda session: True)
+    monkeypatch.setattr(work, "_home", lambda: on.home)
+    batch = [{"qid": "q1", "question": "Which branch?", "choices": ["main", "release"], "multi_select": False},
+             {"qid": "q2", "question": "What should the note say?", "choices": [], "multi_select": False}]
+    result = _json.dumps({"responses": [{"question": "Which branch?", "status": "unanswered", "user_response": None},
+                                        {"question": "What should the note say?", "status": "unanswered",
+                                         "user_response": None}], "outcome": "timed_out"})
+    kept = _json.loads(clarify_loop.keep_unanswered(result, session_id=OTHER_CHAT, batch=batch,
+                                                    request_id="conduit-push-abc"))
+    assert "P1, P2" in kept["notice"] and "Needs you" in kept["notice"]
+    first, second = on.proposal("P1"), on.proposal("P2")
+    assert first["source"] == "clarify" and first["source_id"] == "conduit-push-abc" and first["chat"] == OTHER_CHAT
+    assert coord.question_card(first)["actions"] == ["answer"] and coord.question_card(second)["actions"] == ["answer"]
+    assert work.app_act(on.home, "P2", "answer", {"choice": "Ship it Friday"})["answer"] == "Ship it Friday"
+    batched()
+    # Answered, submitted or a refused unsealed answer: nothing is kept.
+    answered = _json.dumps({"responses": [{"status": "answered", "user_response": "main"},
+                                          {"status": "answered", "user_response": "x"}], "outcome": "submitted"})
+    assert clarify_loop.keep_unanswered(answered, session_id=OTHER_CHAT, batch=batch, request_id="r") == answered
+    refused = _json.dumps({"responses": [{"status": "unanswered"}, {"status": "unanswered"}], "outcome": "timed_out",
+                           "notice": clarify_loop.REJECTED_ANSWER_NOTICE})
+    assert clarify_loop.keep_unanswered(refused, session_id=OTHER_CHAT, batch=batch, request_id="r") == refused
+    monkeypatch.setattr(clarify_loop, "_card_asks_instead", lambda session: False)  # a group room
+    assert clarify_loop.keep_unanswered(result, session_id=OTHER_CHAT, batch=batch, request_id="r") == result
+    assert len(coord.open_questions(on)) == 1
+    # Kept from the Bot Chat: stored as its own, so it's on its board and it can withdraw it.
+    monkeypatch.setattr(clarify_loop, "_card_asks_instead", lambda session: True)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    _json.loads(clarify_loop.keep_unanswered(result, session_id=BOT_CHAT, batch=batch, request_id="r2"))
+    kept_here = [row for row in coord.open_questions(on) if row["source_id"] == "r2"]
+    assert len(kept_here) == 2 and all(row["chat"] == "" for row in kept_here)
+    assert call("work_propose", {"withdraw": kept_here[0]["id"]})["status"] == "withdrawn"
+
+
+def test_a_reworded_question_takes_its_new_choices_and_a_peers_chat_asks_nothing(on, hermes, home, monkeypatch):
+    asked(home)
+    item = call("work_propose", {"text": "Restart the watcher?"}, session_id=OTHER_CHAT)["id"]
+    monkeypatch.setattr(coord, "mode", lambda store: "auto")
+    out = call("work_propose", {"replaces": item, "text": "How should the watcher come back?",
+                                "choices": ["Restart now", "Wait for tonight"], "recommended": "Wait for tonight",
+                                "going_ahead": True}, session_id=OTHER_CHAT)
+    assert out["ok"], out
+    row = on.proposal(item)
+    assert work.work_store.proposal_choices(row) == ["Restart now", "Wait for tonight"]
+    assert row["recommended"] == "Wait for tonight" and row["going_ahead"]
+    assert coord.question_card(row)["actions"] == ["answer"]
+    # A peer's conversation forwarded over A2A isn't the owner's to ask from.
+    monkeypatch.setattr(work, "_from_a_peer", lambda session: session == OTHER_CHAT)
+    assert call("work_propose", {"text": "Delete the logs?"}, session_id=OTHER_CHAT)["error"] == "not_bot_chat"
+
+
+def test_the_bot_chats_board_keeps_its_own_questions_past_other_chats(on, hermes, home, monkeypatch):
+    asked(home)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    mine = call("work_propose", {"text": "Pause the nightly sync?"})["id"]
+    for n in range(coord.PROPOSALS_SHOWN):
+        assert call("work_propose", {"text": f"Question {n} about something else entirely {'x' * n}?"},
+                    session_id=OTHER_CHAT)["ok"]
+    lines = "\n".join(coord.proposals_lines(on, lambda at: "now"))
+    assert mine in lines and "Pause the nightly sync" in lines
+
+
+def test_a_clarify_kept_once_isnt_kept_again_and_a_workstreams_isnt_kept(on, hermes, home, monkeypatch):
+    import json as _json
+
+    from test_turn_end_pushes import ROOT, _load
+
+    clarify_loop = sys.modules.get("conduit_push.clarify_loop") or _load("conduit_push.clarify_loop",
+                                                                        ROOT / "clarify_loop.py")
+    monkeypatch.setattr(clarify_loop, "_card_asks_instead", lambda session: True)
+    monkeypatch.setattr(work, "_home", lambda: on.home)
+    batch = [{"qid": "q1", "question": "Which branch?", "choices": [], "multi_select": False}]
+    result = _json.dumps({"responses": [{"status": "unanswered"}], "outcome": "timed_out"})
+    assert "notice" in _json.loads(clarify_loop.keep_unanswered(result, session_id=OTHER_CHAT, batch=batch,
+                                                                request_id="r1"))
+    assert clarify_loop.keep_unanswered(result, session_id=OTHER_CHAT, batch=batch, request_id="r2") == result
+    assert len(coord.open_questions(on)) == 1
+    monkeypatch.setattr(work, "_workstream", lambda session, home=None: (None, object()))
+    assert clarify_loop.keep_unanswered(result, session_id="ws-chat", batch=batch, request_id="r3") == result
+    assert len(coord.open_questions(on)) == 1
