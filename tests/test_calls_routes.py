@@ -393,6 +393,27 @@ def test_the_waiting_list_reads_an_unreadable_registry_as_no_workstreams(paired,
     assert api.waiting._workstream_sessions(paired) == []
 
 
+def test_the_waiting_list_names_the_questions_that_wait_past_their_turn(paired, monkeypatch):
+    """work_propose's open questions, from any chat, and a clarify kept after
+    it ran out, each as its card (Eric, 2026-11-21)."""
+    work_store = api.core._plugin_package_module("work_store")
+    store = work_store.Store(paired)
+    asked = store.proposal_add([], "Roll back the deploy?", chat="chat-1", choices=["Roll back", "Wait"],
+                               recommended="Roll back")
+    store.proposal_add([], "Stop W1?")
+    answered = store.proposal_add([], "Restart it?", chat="chat-2")
+    store.proposal_answer(answered, "approved")
+    monkeypatch.setattr(api.core._plugin_package_module("work_coord"), "_chat_gone", lambda home, chat: False)
+    questions = _http().get(f"{BASE}/waiting").json()["questions"]
+    assert [(item["id"], item["chat"], item["actions"]) for item in questions] == [
+        (asked, "chat-1", ["answer"]), ("P2", "", ["approve", "decline"])]
+    assert questions[0]["choices"] == ["Roll back", "Wait"] and questions[0]["recommended"] == "Roll back"
+    # Its row opens the chat that asked; the Bot Chat's opens the Bot Chat when there is one.
+    assert questions[0]["session_ids"] == ["chat-1"] and questions[1]["session_ids"] == []
+    monkeypatch.setattr(api.core._plugin_package_module("work_tool"), "_bot_chat_of", lambda home: "bot-chat")
+    assert _http().get(f"{BASE}/waiting").json()["questions"][1]["session_ids"] == ["bot-chat"]
+
+
 def test_the_waiting_list_reads_from_a_bucket_of_its_own(paired):
     http = _http()
     for _ in range(api.hermes_calls.CALLS_LIMIT + 5):

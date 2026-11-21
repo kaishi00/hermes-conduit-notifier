@@ -1802,7 +1802,19 @@ question or a small task doesn't start a workstream. Change it in Conduit
   resolved goes away by itself (plugin 0.168.0+). A question about no
   workstream (one she would start) that says nearly the same as an open one
   is refused like one about the same workstream, and with a dozen open she
-  rewords one or waits (plugin 0.168.1+). A
+  rewords one or waits (plugin 0.168.1+). Questions that can wait don't
+  pause her: any chat of the bot's (not a workstream, nor a peer's chat
+  forwarded over A2A) can ask one with `work_propose`, with two
+  to four choices and the one she recommends, and it stays on your Needs you
+  list past the turn and restarts until you answer it, she withdraws it, or
+  you delete its chat (filing the chat keeps it). Your tap goes back to the
+  chat that asked as a message she acts on. Under `auto` she may carry on
+  with her recommendation meanwhile and undo it if you pick otherwise; under
+  `ask` she waits, and she always waits on a step that can't be undone. A
+  clarify question nobody answers in time (one asked as a question batch,
+  outside a workstream) is kept the same way instead of expiring, unless one
+  with the same words already waits (plugin 0.189.0+). Rewording one with
+  `replaces` sets its choices, recommended one and going ahead anew. A
   workstream you keep her out of (Keep her out of this, on its card in
   Conduit) gets nothing from her and isn't stopped by her in a turn you
   didn't start. Past eight
@@ -1943,7 +1955,8 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/stop`, `/continue` or `/check` | `{ok, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/pin`, `/unpin`, `/resolve` or `/reopen` | `{ok, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/approve` or `/deny` with `{request_id}` | `{ok, work}` |
-| POST | `/api/plugins/conduit_push/workstreams/<question>/approve` or `/decline` (`<question>`: an open question's id, P1, from `coordination`'s items) | `{ok, id, status}`; `not_now` (409) once it's answered |
+| POST | `/api/plugins/conduit_push/workstreams/<question>/approve` or `/decline` (`<question>`: an open question's id, P1, from `coordination`'s items or `/waiting`'s `questions`) | `{ok, id, status}`; `not_now` (409) once it's answered |
+| POST | `/api/plugins/conduit_push/workstreams/<question>/answer` with `{choice}` (0.189.0+; a question whose card's `actions` is `["answer"]`) | `{ok, id, status: "answered"}`; `unknown_choice` (400) for a choice it doesn't offer, `not_now` (409) once it's answered |
 | GET | `/api/plugins/conduit_push/workstreams/settings` | `{ok, policy, policies, quick_steps, quick_steps_choices, coordination, coordinations, max_running, max_running_limit, after_restart, workstream_approvals, chat_approvals, workstream_model, unavailable}` (`policy`: off, strict, lookups or open; `policies`: the ones this plugin takes; `quick_steps`: the steps a lookups turn does in the Bot Chat) |
 | POST | `/api/plugins/conduit_push/workstreams/settings` with any of `{policy, quick_steps, coordination, max_running, after_restart, workstream_approvals, workstream_model}` | the settings as they are now |
 | POST | `/api/plugins/conduit_push/workstreams/adopt` with `{session_id, title, via, goal?, chat?, result?}` (`via`: `phone` or `watch`; `result`: the reply of a turn that ended before the phone kept it, which settles the row; `chat`: the chat the call is kept with, so the Bot Chat's makes it the coordinator's workstream, `call` on its row; `call`: the call's own id) | `{ok, ref, adopted, work}`; the same call's session again answers with its row, `adopted` false; `taken` (409) for one of the bot's own workstreams' sessions; `invalid` (400) when `session_id`, `title`, `goal`, `chat` or `result` isn't text; `off` (409) when the bot's workstreams are off |
@@ -2328,7 +2341,7 @@ release helper use client-only cleanup too.
   "hidden"`) and `ask_again_in_seconds` is held to 30 s–15 min (`null`: not
   until the user writes). An answer that isn't the JSON asked for comes back
   with `"parsed": false` and nothing to suggest. Capability `predict`.
-- From plugin 0.189, any kind can add `"custom_instructions": "<the user's
+- From plugin 0.190, any kind can add `"custom_instructions": "<the user's
   guidance>"` (at most 1,000 characters, counted in Unicode code points;
   blank or left out changes nothing). It goes into that kind's question as a
   marked section of the user's preferences, after the task and before the
@@ -2698,7 +2711,7 @@ and the dashboard routes under one file lock, so they survive restarts:
 | GET | `/api/plugins/conduit_push/calls/rings?after=&profile=` (0.180+) | | `{ok, rings: [{id, kind, title, reason, session_ids, name, heading, body, at, state, changed}], now, paired}`: the calls the iPhone rang in the last two minutes, for Conduit on a computer to ring too (with no iPhone paired, 0.186+, the calls that ring the computer alone, while it keeps asking; `paired` false then tells it to report a miss itself), and those settled since `after` (the `now` of its last answer): `state` is `ringing`, `answered` (a call started on any device), `declined` or `missed`. Polled, so it has a bucket of its own |
 | GET | `/api/plugins/conduit_push/calls/waiting?session_id=&profile=` (0.70+) | | `{ok, waiting}`: null, `{kind: "question", questions: [{number, question, choices, multi_select, answered, may_leave_blank}]}` (`may_leave_blank` 0.82+) or `{kind: "approval", description, command, command_cut, answered}` |
 | POST | `/api/plugins/conduit_push/calls/waiting/answer?profile=` (0.70+) | `{session_id, answer?, question?, choice?, reason?}` | `{ok, status: "answered", ...}`, `{ok, status: "not_waiting"}`, `{ok, status: "refused", message}`, or for an approval Hermes didn't take (0.70.1+) `{ok, status: "too_late" or "failed" or "unconfirmed", message}` |
-| GET | `/api/plugins/conduit_push/waiting?profile=` (0.131+) | | `{ok, waiting: [{id, kind: "approval" or "question", session_ids, title, summary, questions, at, room?, decision?}], gateway_id?}`, newest first (`room` 0.150.1+, `decision` 0.177.17+); `gateway_id` (0.177.31+) is the relay gateway the profile pairs through, for sealing a `decision` card's answer |
+| GET | `/api/plugins/conduit_push/waiting?profile=` (0.131+) | | `{ok, waiting: [{id, kind: "approval" or "question", session_ids, title, summary, questions, at, room?, decision?}], questions?, gateway_id?}`, newest first (`room` 0.150.1+, `decision` 0.177.17+); `questions` (0.189.0+, only when there are any) are the bot's open questions that wait past their turn, each its card (`id`, `refs`, `title`, `text`, `at`, `actions`, `choices`, `recommended`, `going_ahead`, `chat`, `source`) with the chat its row opens (`session_ids`, `chat_title`); `gateway_id` (0.177.31+) is the relay gateway the profile pairs through, for sealing a `decision` card's answer |
 
 - Every chat Hermes waits on the user in is listed by `/waiting` (0.131+),
   one profile at a time, for Conduit's Needs you list, the counts on its
