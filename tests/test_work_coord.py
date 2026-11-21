@@ -891,3 +891,10 @@ def test_a_clarify_that_ran_out_is_kept_and_answered_in_words_or_with_a_choice(o
     monkeypatch.setattr(clarify_loop, "_card_asks_instead", lambda session: False)  # a group room
     assert clarify_loop.keep_unanswered(result, session_id=OTHER_CHAT, batch=batch, request_id="r") == result
     assert len(coord.open_questions(on)) == 1
+    # Kept from the Bot Chat: stored as its own, so it's on its board and it can withdraw it.
+    monkeypatch.setattr(clarify_loop, "_card_asks_instead", lambda session: True)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    _json.loads(clarify_loop.keep_unanswered(result, session_id=BOT_CHAT, batch=batch, request_id="r2"))
+    kept_here = [row for row in coord.open_questions(on) if row["source_id"] == "r2"]
+    assert len(kept_here) == 2 and all(row["chat"] == "" for row in kept_here)
+    assert call("work_propose", {"withdraw": kept_here[0]["id"]})["status"] == "withdrawn"

@@ -853,7 +853,7 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any, ch
                  "doesn't fit." if recommended else
                  "You may carry on with it until they answer; if they say no, undo what you did.")
     else:
-        until = "Until they answer, don't do what you asked about." + (WAIT_UNDER_ASK if wants_ahead else "")
+        until = "Until they answer, don't do what you asked about." + (WAIT_UNDER_ASK if wants_ahead and mode(store) == "ask" else "")
     return {"ok": True, "id": made, "going_ahead": going_ahead,
             "note": f"Kept as {made}.{covers} Ask the user in your reply, with the evidence: it stays on their "
                     f"Needs you list until they answer. {until} A tapped answer comes to this chat as a message, "

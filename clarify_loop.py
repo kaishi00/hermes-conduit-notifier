@@ -243,13 +243,17 @@ def keep_unanswered(result: Any, *, session_id: str, batch: list[dict[str, Any]]
         if home is None or work_tool.policy(home) == "off":
             return result
         store = work_store.Store(home)
+        # The Bot Chat's own questions are stored with no chat, as its
+        # work_propose stores them, so they're on its board and it can
+        # withdraw or reword them.
+        chat = "" if session_id == work_tool._bot_chat_of(home) else session_id
         ids = []
         for entry in unanswered:
             choices = [str(choice) for choice in entry.get("choices") or []]
             pick = (not entry.get("multi_select")
                     and work_coord.CHOICES_MIN <= len(choices) <= work_coord.CHOICES_MAX)
             ids.append(store.proposal_add(
-                [], work_coord._short(entry["question"], work_coord.PROPOSAL_CHARS), chat=session_id,
+                [], work_coord._short(entry["question"], work_coord.PROPOSAL_CHARS), chat=chat,
                 choices=[work_coord._short(choice, work_coord.CHOICE_CHARS) for choice in choices] if pick else [],
                 source="clarify", source_id=request_id))
     except Exception:  # noqa: BLE001 — the timed-out result still stands

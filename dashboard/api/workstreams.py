@@ -27,7 +27,8 @@ WORKSTREAMS_WINDOW_S = 60.0
 # A refusal's code -> its HTTP status. The body has the code, so Conduit
 # words it, and the note.
 REFUSAL_STATUS = {"no_such_work": 404, "missing": 400, "unknown_action": 404, "off": 409, "busy": 409,
-                  "not_now": 409, "starting": 409, "still_running": 409, "too_long": 413, "open_elsewhere": 409, "mid_turn": 409, "maybe_sent": 409, "unavailable": 503, "hermes": 502, "invalid": 400, "taken": 409}
+                  "not_now": 409, "starting": 409, "still_running": 409, "too_long": 413, "open_elsewhere": 409, "mid_turn": 409, "maybe_sent": 409, "unavailable": 503, "hermes": 502, "invalid": 400, "taken": 409,
+                  "unknown_choice": 400}
 
 # The panel's reads and the user's actions count apart, so reading often
 # never holds up a Stop.
