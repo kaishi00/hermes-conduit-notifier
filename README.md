@@ -1802,7 +1802,16 @@ question or a small task doesn't start a workstream. Change it in Conduit
   resolved goes away by itself (plugin 0.168.0+). A question about no
   workstream (one she would start) that says nearly the same as an open one
   is refused like one about the same workstream, and with a dozen open she
-  rewords one or waits (plugin 0.168.1+). A
+  rewords one or waits (plugin 0.168.1+). Questions that can wait don't
+  pause her: any chat of the bot's can ask one with `work_propose`, with two
+  to four choices and the one she recommends, and it stays on your Needs you
+  list past the turn and restarts until you answer it, she withdraws it, or
+  you delete its chat (filing the chat keeps it). Your tap goes back to the
+  chat that asked as a message she acts on. Under `auto` she may carry on
+  with her recommendation meanwhile and undo it if you pick otherwise; under
+  `ask` she waits, and she always waits on a step that can't be undone. A
+  clarify question nobody answers in time is kept the same way instead of
+  expiring (plugin 0.189.0+). A
   workstream you keep her out of (Keep her out of this, on its card in
   Conduit) gets nothing from her and isn't stopped by her in a turn you
   didn't start. Past eight

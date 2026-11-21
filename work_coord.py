@@ -121,9 +121,12 @@ RULES = {
 # that is theirs, so what it approves isn't held as a turn they didn't start.
 ANSWER_HEAD = ("Work update from Conduit: the user answered what you asked them, with a tap on the question's card. "
                "This is their own answer, already recorded (no work_propose call is needed):\n{lines}\n")
-ANSWER_TAIL = ("Do what they said yes to now, then tell them in a line what you did, with its link when it has "
-               "one.")
+ANSWER_TAIL = ("Act on it now: do what they said yes to or picked, and undo what you went ahead with that they "
+               "didn't pick or said no to. Then tell them in a line what you did, with its link when it has one.")
 ANSWER_LINE = "- {id}{about}, approved by the user just now: «{text}»"
+ANSWER_PICKED = "- {id}{about}: the user picked «{choice}» just now. You asked: «{text}»"
+ANSWER_SAID = "- {id}{about}: the user answered «{choice}» just now. You asked: «{text}»"
+ANSWER_DECLINED = "- {id}{about}, declined by the user just now: «{text}»"
 # After a work update's lines, in place of "tell the user what came back".
 WAKE_TAIL = ("First see whether what came back matters to your other open work (the board in your note): act on "
              "it as your coordination setting says. Then the user: tell them in a line or two when a result is "
@@ -495,11 +498,17 @@ def _event_line(event: dict, ago: Callable[[float], str], states: dict, work: wo
 def open_questions(store: work_store.Store) -> list[dict]:
     """The questions still waiting on the user, oldest first. One whose
     workstreams have all been resolved since is withdrawn first: nothing is
-    left to decide, and it would wait on the user for good."""
+    left to decide, and it would wait on the user for good. So is one asked
+    in a chat the user deleted since; a chat they filed keeps its questions
+    (Eric, 2026-11-21)."""
     try:
         rows = store.proposals_open()
         gone = []
         for row in rows:
+            if row.get("chat"):
+                if _chat_gone(store.home, row["chat"]):
+                    gone.append(row["id"])
+                continue
             works = [store.get(ref) for ref in work_store.proposal_refs(row)]
             # Resolved since it was asked: one about work that was already
             # closed then ("Start W1 over") still has its decision to make.
@@ -517,7 +526,8 @@ def proposals_lines(store: work_store.Store, ago: Callable[[float], str]) -> lis
     they answered lately, so a later turn doesn't ask the same again."""
     try:
         open_questions(store)  # one about resolved work is off the list
-        rows = store.proposals(since=time.time() - PROPOSAL_CLOSED_AGE_S, limit=PROPOSALS_SHOWN)
+        rows = [row for row in store.proposals(since=time.time() - PROPOSAL_CLOSED_AGE_S, limit=PROPOSALS_SHOWN)
+                if not row.get("chat")]  # another chat's are that chat's
     except sqlite3.Error:
         return []
     lines = []
@@ -527,11 +537,16 @@ def proposals_lines(store: work_store.Store, ago: Callable[[float], str]) -> lis
         text = _short(row["text"], PROPOSAL_CHARS)
         if row.get("new"):
             text += f"» New since the last no: «{_short(row['new'], PROPOSAL_CHARS)}"
+        choices = work_store.proposal_choices(row)
+        if choices:
+            text += "» Choices: «" + "», «".join(choices)
         if row["status"] == "open":
-            lines.append(f"- {row['id']}{about}, asked {ago(row['created_at'])}, no answer yet: «{text}»")
+            ahead = (f" You're going ahead with «{row['recommended'] or 'it'}» meanwhile."
+                     if row.get("going_ahead") else "")
+            lines.append(f"- {row['id']}{about}, asked {ago(row['created_at'])}, no answer yet: «{text}».{ahead}")
             continue
         answer = f" They said: «{_short(row['answer'], 160)}»" if row["answer"] else ""
-        tail = ("Act on it if you haven't." if row["status"] == "approved"
+        tail = ("Act on it if you haven't." if row["status"] in ("approved", "answered")
                 else "Don't ask again unless something new came up.")
         lines.append(f"- {row['id']}{about}, {row['status']} by the user {ago(row['answered_at'])}: "
                      f"«{text}».{answer} {tail}")
@@ -542,28 +557,44 @@ def proposals_lines(store: work_store.Store, ago: Callable[[float], str]) -> lis
 
 SCHEMA = {
     "name": "work_propose",
-    "description": ("Keep what you asked the user about their workstreams, and what they answered. When you ask "
-                    "them before changing, starting or stopping work, call it with text (what you propose and "
-                    "why) and the workstreams it's about: you get an id (P1), and ask them in your reply. One "
-                    "decision that covers several workstreams is one question naming them all (refs), and their "
-                    "answer covers each. While a question about a workstream is open, a new one about it is "
-                    "refused: wait for their answer, or call with replaces to reword the open one when new "
-                    "evidence came. After they decline one, a question about the same work within a day needs "
-                    "new: what came up since. When they answer, call it with the id and answer approved or "
-                    "declined, then act on a yes. The user can also answer with a tap in Conduit: "
-                    "you're told then, and it's already recorded. Open ones stay on your board until "
+    "description": ("Ask the user something whose answer can wait, and keep what they answered. Use clarify "
+                    "when you can't go on without the answer right now; use this when the work can go on, or "
+                    "the answer can come later: the question stays on the user's Needs you list until they "
+                    "answer it or you withdraw it, past this turn and restarts, and their answer comes back to "
+                    "this chat as a new message. Call it with text (the question, with what you found and what "
+                    "you recommend) and, for options, choices (two to four) with the one you recommend; you get "
+                    "an id (P1), and ask them in your reply. going_ahead says you carry on with your "
+                    "recommendation until they answer; only when the coordination setting is Auto, and never "
+                    "for a step that can't be undone (sending outside, deleting, paying, merging, changing "
+                    "production): for those, wait for their answer. In the Bot Chat, a question about "
+                    "workstreams names them (refs), and one decision covering several is one question. While a "
+                    "question about a workstream is open, a new one about it is refused: wait for their answer, "
+                    "or call with replaces to reword the open one when new evidence came. After they decline "
+                    "one, a question about the same work within a day needs new: what came up since. When they "
+                    "answer in a message, call it with the id and their answer (approved or declined, or the "
+                    "choice they picked), then act on it. An answer tapped in Conduit is already recorded and "
+                    "comes to you as a message. When the question no longer matters (it resolved itself, or "
+                    "something replaced it), call with withdraw and its id. Open ones stay on your board until "
                     "they're answered, answered ones for a day."),
     "parameters": {"type": "object", "properties": {
-        "text": {"type": "string", "description": "What you propose, with the evidence, in a line or two."},
+        "text": {"type": "string", "description": "The question or what you propose, with the evidence, in a line "
+                                                  "or two."},
+        "choices": {"type": "array", "items": {"type": "string"},
+                    "description": "Two to four short options, when it isn't a yes or no."},
+        "recommended": {"type": "string", "description": "The choice you recommend, one of choices."},
+        "going_ahead": {"type": "boolean",
+                        "description": "You carry on with your recommendation until they answer (Auto only, "
+                                       "never for a step that can't be undone)."},
         "ref": {"type": "string", "description": "The workstream it's about (W1), if one."},
         "refs": {"type": "array", "items": {"type": "string"},
                  "description": "Every workstream one decision covers (W1, W3), when it's more than one."},
         "replaces": {"type": "string", "description": "An open question (P1) this rewords, with new evidence."},
         "new": {"type": "string", "description": "What came up since the user declined a question about this "
                                                  "work, when you ask about it again."},
-        "id": {"type": "string", "description": "The proposal the user answered (P1)."},
-        "answer": {"type": "string", "enum": ["approved", "declined"]},
-        "note": {"type": "string", "description": "What the user said, in their words, if it adds anything."}},
+        "id": {"type": "string", "description": "The question the user answered (P1)."},
+        "answer": {"type": "string", "description": "approved or declined, or the choice they picked."},
+        "note": {"type": "string", "description": "What the user said, in their words, if it adds anything."},
+        "withdraw": {"type": "string", "description": "An open question (P1) that no longer needs an answer."}},
         "required": []},
 }
 _PROPOSAL = re.compile(r"P[1-9][0-9]{0,5}")
@@ -606,18 +637,19 @@ def _same_words(one: str, other: str) -> bool:
 
 
 def _asked_before(store: work_store.Store, refs: list[str], new: str, *, besides: str = "",
-                  text: str = "") -> Optional[dict]:
+                  text: str = "", chat: str = "") -> Optional[dict]:
     """Why a question about ``refs`` isn't asked now, or None: another open
     question covers some of that work (or, about no workstream, asks nearly
-    the same as ``text``), or the user said no to it in the last day and
-    nothing new came up."""
+    the same as ``text`` in the same chat), or the user said no to it in the
+    last day and nothing new came up."""
     # One open question per workstream: a second would ask the user twice.
     pending = store.proposal_about(refs, status="open", besides=besides)
     if pending is None and not refs:
-        # About no workstream (a start it would make): the same words again
-        # are the same question.
+        # About no workstream (a start it would make, or another chat's
+        # question): the same words again in that chat are the same question.
         pending = next((row for row in store.proposals_open() if row["id"] != besides
-                        and not work_store.proposal_refs(row) and _same_words(row["text"], text)), None)
+                        and not work_store.proposal_refs(row) and (row.get("chat") or "") == chat
+                        and _same_words(row["text"], text)), None)
         if pending is not None:
             return {"ok": False, "id": pending["id"], "error": "already_asked",
                     "note": f"{pending['id']} asks the user nearly the same and is still open. Wait for their "
@@ -636,35 +668,138 @@ def _asked_before(store: work_store.Store, refs: list[str], new: str, *, besides
     return None
 
 
-def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) -> dict:
+CHOICES_MIN, CHOICES_MAX, CHOICE_CHARS = 2, 4, 60
+# Under Ask Me First the bot waits for every answer; only Auto lets it carry
+# on with its recommendation meanwhile (Eric, 2026-11-21).
+WAIT_UNDER_ASK = (" The coordination setting is Ask Me First, so you don't go ahead: wait for their answer "
+                  "before doing what it decides.")
+
+
+def _choices(args: dict) -> tuple[Optional[list[str]], str, Optional[dict]]:
+    """The question's options and the recommended one, or why they're refused."""
+    raw = args.get("choices")
+    if raw in (None, "", []):
+        recommended = _short(args.get("recommended"), CHOICE_CHARS)
+        if recommended:
+            return None, "", {"ok": False, "error": "missing",
+                              "note": "recommended names one of choices; give the choices too, or leave it out "
+                                      "for a yes or no."}
+        return [], "", None
+    if not isinstance(raw, list):
+        return None, "", {"ok": False, "error": "missing", "note": "choices is a list of two to four options."}
+    choices: list[str] = []
+    for value in raw:
+        choice = _short(value, CHOICE_CHARS)
+        if choice and choice.casefold() not in (known.casefold() for known in choices):
+            choices.append(choice)
+    if not CHOICES_MIN <= len(choices) <= CHOICES_MAX:
+        return None, "", {"ok": False, "error": "missing",
+                          "note": "Give two to four different choices, or none for a yes or no."}
+    recommended = _short(args.get("recommended"), CHOICE_CHARS)
+    if recommended:
+        match = next((choice for choice in choices if choice.casefold() == recommended.casefold()), None)
+        if match is None:
+            return None, "", {"ok": False, "error": "missing", "note": "recommended is one of choices, as written."}
+        recommended = match
+    return choices, recommended, None
+
+
+def _chat_gone(home: Path, chat: str) -> bool:
+    """Whether the profile no longer has the chat a question was asked in
+    (the user deleted it); False when its sessions can't be read."""
+    try:
+        from . import room_chats
+
+        return not room_chats._chat_exists(home, chat)
+    except Exception:  # noqa: BLE001 — kept rather than withdrawn on a doubt
+        return False
+
+
+def free_answer(row: dict) -> bool:
+    """Whether a question is answered in the user's own words: a clarify
+    question with no choices to tap, kept after it ran out."""
+    return row.get("source") == "clarify" and not work_store.proposal_choices(row)
+
+
+def _answer(row: dict, given: str) -> tuple[str, str]:
+    """A question's status and answer from what the user said: approved or
+    declined for a yes or no, else the choice they picked; ("", "") when
+    it's neither."""
+    choices = work_store.proposal_choices(row)
+    if not choices and free_answer(row):
+        return ("answered", _short(given, PROPOSAL_CHARS)) if given.strip() else ("", "")
+    if not choices:
+        return (given, "") if given in ("approved", "declined") else ("", "")
+    match = next((choice for choice in choices if choice.casefold() == given.casefold()), None)
+    return ("answered", match) if match else ("", "")
+
+
+def propose(home: Path, store: work_store.Store, args: dict, session_id: Any, chat: str = "") -> dict:
+    """work_propose, from the Bot Chat or, with ``chat`` (its session),
+    from another chat of the bot's, whose question is about no workstream
+    and whose answer goes back to that chat."""
+    withdraw = str(args.get("withdraw") or "").strip().upper()
+    if withdraw:
+        if not _PROPOSAL.fullmatch(withdraw):
+            return {"ok": False, "error": "missing", "note": "withdraw is the open question's id (P1)."}
+        asked = store.proposal(withdraw)
+        if asked is None or asked["status"] != "open" or (asked.get("chat") or "") != chat:
+            return {"ok": False, "id": withdraw, "error": "no_such_proposal",
+                    "note": f"There's no open {withdraw} asked here."}
+        store.proposals_withdraw([withdraw])
+        return {"ok": True, "id": withdraw, "status": "withdrawn",
+                "note": f"{withdraw} is off the user's list; it isn't their yes or no. Tell them in a line why "
+                        "it no longer needs an answer."}
     wanted = str(args.get("id") or "").strip().upper()
-    answer = str(args.get("answer") or "").strip().lower()
-    if wanted or answer:
+    given = " ".join(str(args.get("answer") or "").split())
+    if wanted or given:
         if not _PROPOSAL.fullmatch(wanted):
-            return {"ok": False, "error": "missing", "note": "Give the proposal's id (P1) with the answer."}
-        if answer not in ("approved", "declined"):
-            return {"ok": False, "error": "missing", "note": "answer is approved or declined."}
+            return {"ok": False, "error": "missing", "note": "Give the question's id (P1) with the answer."}
         if not user_wrote(home, session_id):
             # Only the user's own message answers one: a work update's turn
             # can't approve for them, nor can one that carries another bot's ask.
             return {"ok": False, "id": wanted, "error": "not_the_user",
                     "note": f"The user didn't write this turn's message, so {wanted} stays open. Record their "
                             "answer when they give it."}
-        done = store.proposal_answer(wanted, answer, _short(args.get("note"), PROPOSAL_CHARS))
+        asked = store.proposal(wanted)
+        if asked is None or asked["status"] != "open":
+            return {"ok": False, "id": wanted, "error": "no_such_proposal",
+                    "note": f"There's no open {wanted}. Your note lists the open ones."}
+        exact = work_store.proposal_choices(asked) or free_answer(asked)
+        status, choice = _answer(asked, given if exact else given.lower())
+        if not status:
+            choices = work_store.proposal_choices(asked)
+            return {"ok": False, "id": wanted, "error": "missing",
+                    "note": ("answer is the choice they picked, one of: " + "; ".join(choices) + ".") if choices
+                    else "answer is what they said." if free_answer(asked) else "answer is approved or declined."}
+        note = _short(args.get("note"), PROPOSAL_CHARS)
+        done = store.proposal_answer(wanted, status, choice if status == "answered" and not note
+                                     else (f"{choice}: {note}" if choice else note))
         if done is None:
             return {"ok": False, "id": wanted, "error": "no_such_proposal",
                     "note": f"There's no open {wanted}. Your note lists the open ones."}
-        said = ("Act on it now." if answer == "approved"
+        said = ("Act on it now." if status in ("approved", "answered")
                 else "It stays on your board for a day, so you don't ask again unless something new came up.")
-        return {"ok": True, "id": wanted, "status": answer, "note": f"Kept: the user {answer} {wanted}. {said}"}
+        if asked.get("going_ahead") and choice and choice != asked.get("recommended"):
+            said = "You went ahead with your recommendation: undo what doesn't fit their pick, then act on it."
+        elif asked.get("going_ahead") and status == "declined":
+            said = "You went ahead with it: undo what you did, and tell them."
+        return {"ok": True, "id": wanted, "status": status,
+                "note": f"Kept: the user {('answered «' if free_answer(asked) else 'picked «') + choice + '» for' if choice else status} {wanted}. {said}"}
     text = _short(args.get("text"), PROPOSAL_CHARS)
     if not text:
-        return {"ok": False, "error": "missing", "note": "Say what you propose in text, or give id and answer."}
-    given = args.get("refs") if isinstance(args.get("refs"), list) else []
+        return {"ok": False, "error": "missing", "note": "Say what you ask in text, or give id and answer."}
+    choices, recommended, refused = _choices(args)
+    if refused is not None:
+        return refused
+    listed = args.get("refs") if isinstance(args.get("refs"), list) else []
     refs: list[str] = []
-    for raw in [args.get("ref"), *given]:
+    for raw in [args.get("ref"), *listed]:
         if raw in (None, ""):
             continue
+        if chat:
+            return {"ok": False, "error": "bot_chat_only",
+                    "note": "Only the Bot Chat asks about workstreams. Ask without ref here."}
         ref = work_store.normalize_ref(raw)
         if not ref or store.get(ref) is None:
             return {"ok": False, "error": "no_such_work", "note": f"There's no {raw} in this bot's work."}
@@ -676,7 +811,7 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
         if not _PROPOSAL.fullmatch(replaces):
             return {"ok": False, "error": "missing", "note": "replaces is the open question's id (P1)."}
         asked = store.proposal(replaces)
-        if asked is None or asked["status"] != "open":
+        if asked is None or asked["status"] != "open" or (asked.get("chat") or "") != chat:
             return {"ok": False, "id": replaces, "error": "no_such_proposal",
                     "note": f"There's no open {replaces}. Your note lists the open ones."}
         # A reworded question keeps the work it covered; work it adds is held
@@ -684,7 +819,7 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
         had = work_store.proposal_refs(asked)
         added = [ref for ref in refs if ref not in had]
         # One about no workstream is held against the other open ones' words.
-        refusal = _asked_before(store, added, new, besides=replaces, text="" if had else text)
+        refusal = _asked_before(store, added, new, besides=replaces, text="" if had else text, chat=chat)
         if refusal is not None:
             return refusal
         # "New since the last no" only on a question about work the user said no
@@ -697,22 +832,32 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
                     "note": f"There's no open {replaces}. Your note lists the open ones."}
         return {"ok": True, "id": replaces, "note": f"{replaces} now reads as you wrote it. Tell the user what "
                                                     "changed in your reply; it's still one question."}
-    refusal = _asked_before(store, refs, new, text=text)
+    refusal = _asked_before(store, refs, new, text=text, chat=chat)
     if refusal is not None:
         return refusal
-    waiting = open_questions(store)
+    waiting = [row for row in open_questions(store) if (row.get("chat") or "") == chat]
     if len(waiting) >= PROPOSALS_SHOWN:
         # Each open question is a card the user answers: a pile of them is
         # no question at all, and one that loops would fill their Work panel.
         return {"ok": False, "error": "too_many_open",
                 "note": f"The user already has {len(waiting)} of your questions waiting, so this one wasn't kept. "
                         "Reword one that covers it (replaces), or wait for their answers."}
+    wants_ahead = bool(args.get("going_ahead")) and (bool(recommended) or not choices)
+    going_ahead = wants_ahead and mode(store) == "auto"
     declined = store.proposal_about(refs, status="declined", since=time.time() - PROPOSAL_CLOSED_AGE_S)
-    made = store.proposal_add(refs, text, new if declined is not None else "")
+    made = store.proposal_add(refs, text, new if declined is not None else "", chat=chat, choices=choices,
+                              recommended=recommended, going_ahead=going_ahead)
     covers = f" It covers {_listed(refs)}; their answer is for each." if len(refs) > 1 else ""
-    return {"ok": True, "id": made, "note": f"Kept as {made}.{covers} Ask the user in your reply, with the "
-                                            "evidence; until they answer, don't do what you asked about. When "
-                                            f"they answer, call work_propose with id {made} and their answer."}
+    if going_ahead:
+        until = (f"You may carry on with «{recommended}» until they answer; if they pick otherwise, undo what "
+                 "doesn't fit." if recommended else
+                 "You may carry on with it until they answer; if they say no, undo what you did.")
+    else:
+        until = "Until they answer, don't do what you asked about." + (WAIT_UNDER_ASK if wants_ahead else "")
+    return {"ok": True, "id": made, "going_ahead": going_ahead,
+            "note": f"Kept as {made}.{covers} Ask the user in your reply, with the evidence: it stays on their "
+                    f"Needs you list until they answer. {until} A tapped answer comes to this chat as a message, "
+                    f"already recorded; one they write, record with work_propose id {made} and their answer."}
 
 
 def is_question(ref: Any) -> bool:
@@ -720,24 +865,52 @@ def is_question(ref: Any) -> bool:
     return bool(_PROPOSAL.fullmatch(str(ref or "").strip().upper()))
 
 
-def answer_tapped(store: work_store.Store, item: str, answer: str, coordinator: str = "") -> dict:
+def answer_tapped(store: work_store.Store, item: str, answer: str, coordinator: str = "",
+                  choice: str = "") -> dict:
     """The user's own answer to an open question, tapped on its card in
-    Conduit: kept as theirs with no Bot Chat turn to record it. A yes
-    returns ``line``, what it tells the Bot Chat (``coordinator``), which
-    then acts on it, and ``outbox``, that line's outbox row, written with the
-    answer so a restart between the two doesn't lose it."""
+    Conduit: kept as theirs with no Bot Chat turn to record it. ``answer``
+    is approved or declined, or "answered" with the ``choice`` they picked.
+    It returns ``line``, what it tells the chat that asked (``coordinator``:
+    the Bot Chat, or the chat the question was asked in), which then acts on
+    it, and ``outbox``, that line's outbox row, written with the answer so a
+    restart between the two doesn't lose it. A Bot Chat's no to a question
+    it waited on is only kept on its board, as before: nothing was done to
+    undo."""
+    row = store.proposal(item)
+    if row is None or row["status"] != "open":
+        return {"ok": False, "id": item, "error": "not_now",
+                "note": f"{item} isn't waiting on an answer any more."}
+    choices = work_store.proposal_choices(row)
+    if choices:
+        choice = next((known for known in choices if known.casefold() == choice.strip().casefold()), "")
+        if answer != "answered" or not choice:
+            return {"ok": False, "id": item, "error": "unknown_choice",
+                    "note": f"{item} is answered with one of its choices."}
+    elif free_answer(row):
+        choice = _short(choice, PROPOSAL_CHARS)
+        if answer != "answered" or not choice:
+            return {"ok": False, "id": item, "error": "unknown_choice", "note": f"{item} is answered in words."}
+    elif answer not in ("approved", "declined"):
+        return {"ok": False, "id": item, "error": "unknown_action", "note": f"{item} is a yes or no."}
 
-    def line(row: dict) -> str:
-        refs = work_store.proposal_refs(row)
-        return ANSWER_LINE.format(id=item, about=f" (about {_listed(refs)})" if refs else "",
-                                  text=_short(row["text"], PROPOSAL_CHARS))
+    def line(done: dict) -> str:
+        refs = work_store.proposal_refs(done)
+        about = f" (about {_listed(refs)})" if refs else ""
+        text = _short(done["text"], PROPOSAL_CHARS)
+        if choice:
+            return (ANSWER_SAID if free_answer(row) else ANSWER_PICKED).format(id=item, about=about,
+                                                                             choice=choice, text=text)
+        return (ANSWER_LINE if answer == "approved" else ANSWER_DECLINED).format(id=item, about=about, text=text)
 
-    told = answer == "approved" and bool(coordinator)
-    done = store.proposal_answer(item, answer, target=coordinator if told else "", line=line if told else None)
+    told = bool(coordinator) and (answer != "declined" or bool(row.get("chat")) or bool(row.get("going_ahead")))
+    done = store.proposal_answer(item, answer, choice, target=coordinator if told else "",
+                                 line=line if told else None)
     if done is None:
         return {"ok": False, "id": item, "error": "not_now",
                 "note": f"{item} isn't waiting on an answer any more."}
     out = {"ok": True, "id": item, "status": answer}
+    if choice:
+        out["answer"] = choice
     if done.get("outbox"):
         out.update({"line": done["line"], "outbox": done["outbox"]})
     return out
@@ -748,9 +921,31 @@ def answer_tapped(store: work_store.Store, item: str, answer: str, coordinator: 
 APP_ITEMS = 30
 # How the user answers an open question from its card: the action, and what it records.
 APP_ANSWERS = {"approve": "approved", "decline": "declined"}
+# A question with choices is answered with one of them (the body's ``choice``).
+APP_PICK = "answer"
 APP_WHY_ITEMS = 5
 APP_WHY_BEFORE_S = 1800.0
 _FAILED = ("lost", "refused", "expired", "dropped")
+
+
+def question_card(row: dict, titles: Optional[dict[str, str]] = None) -> dict:
+    """A question as Conduit draws its card, on the Work panel and in the
+    Needs you list: ``actions`` are how the user answers an open one
+    (Approve and Decline, or ``answer`` with one of its ``choices``), and
+    ``chat`` the chat that asked when it isn't the Bot Chat."""
+    refs = work_store.proposal_refs(row)
+    titles = titles or {}
+    choices = work_store.proposal_choices(row)
+    actions = (([APP_PICK] if choices or free_answer(row) else list(APP_ANSWERS))
+               if row["status"] == "open" else [])
+    # Older apps read ref and title: the first workstream, and every title.
+    return {"id": row["id"], "kind": "proposal", "ref": row["ref"], "refs": refs,
+            "title": " · ".join(title for title in (titles.get(ref, "") for ref in refs) if title),
+            "at": row["created_at"], "text": row["text"], "status": row["status"],
+            "answer": row["answer"], "answered_at": row["answered_at"], "why": [], "actions": actions,
+            "choices": choices, "recommended": row.get("recommended") or "",
+            "going_ahead": bool(row.get("going_ahead")), "chat": row.get("chat") or "",
+            "source": row.get("source") or ""}
 
 
 def app_items(store: work_store.Store, titles: Optional[dict[str, str]] = None,
@@ -814,14 +1009,7 @@ def app_items(store: work_store.Store, titles: Optional[dict[str, str]] = None,
         items.append(item)
     cards = []
     for row in asked + answered:
-        refs = work_store.proposal_refs(row)
-        # Older apps read ref and title: the first workstream, and every title.
-        # ``actions``: how the user answers an open one from its card.
-        cards.append({"id": row["id"], "kind": "proposal", "ref": row["ref"], "refs": refs,
-                      "title": " · ".join(title for title in (titles.get(ref, "") for ref in refs) if title),
-                      "at": row["created_at"], "text": row["text"], "status": row["status"],
-                      "answer": row["answer"], "answered_at": row["answered_at"], "why": [],
-                      "actions": list(APP_ANSWERS) if row["status"] == "open" else []})
+        cards.append(question_card(row, titles))
     # The questions keep their places whatever else the day brought: one the
     # user just answered is older than the flags and sends since it was asked.
     items = sorted(items, key=lambda item: -item["at"])[:max(PROPOSALS_SHOWN, APP_ITEMS - len(cards))]

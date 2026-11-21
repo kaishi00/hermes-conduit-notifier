@@ -193,7 +193,16 @@ _ADDED_OUTBOX_COLUMNS = (("delivered_at", "REAL NOT NULL DEFAULT 0"), ("own", "I
 # A question about several workstreams names the rest in ``also`` (space
 # apart), ``ref`` keeping the first for older apps; ``new`` is what a
 # question asked again after a decline says came up since (Eric 2026-11-10).
-_ADDED_PROPOSAL_COLUMNS = (("also", "TEXT NOT NULL DEFAULT ''"), ("new", "TEXT NOT NULL DEFAULT ''"))
+_ADDED_PROPOSAL_COLUMNS = (("also", "TEXT NOT NULL DEFAULT ''"), ("new", "TEXT NOT NULL DEFAULT ''"),
+                           # The chat it was asked in, when not the Bot Chat (its answer goes there).
+                           ("chat", "TEXT NOT NULL DEFAULT ''"),
+                           # Its options (a JSON list), and which one the bot recommends.
+                           ("choices", "TEXT NOT NULL DEFAULT '[]'"), ("recommended", "TEXT NOT NULL DEFAULT ''"),
+                           # The bot goes ahead on its recommendation until the user answers.
+                           ("going_ahead", "INTEGER NOT NULL DEFAULT 0"),
+                           # "clarify": a clarify question that ran out unanswered, kept;
+                           # ``source_id`` is its card's request id.
+                           ("source", "TEXT NOT NULL DEFAULT ''"), ("source_id", "TEXT NOT NULL DEFAULT ''"))
 # Who can start a job of their own that's kept here too (M5): a call's
 # job runs as the call says, never under the coordinator's limit.
 CALL_VIA = ("phone", "watch")
@@ -860,17 +869,24 @@ class Store:
 
     # What the Bot Chat asked the user (work_propose)
 
-    def proposal_add(self, refs: Any, text: str, new: str = "") -> str:
+    def proposal_add(self, refs: Any, text: str, new: str = "", *, chat: str = "",
+                     choices: Optional[list[str]] = None, recommended: str = "", going_ahead: bool = False,
+                     source: str = "", source_id: str = "") -> str:
         """A question the Bot Chat asked the user, about the workstreams in
-        ``refs`` (one ref, or a list; the first is ``ref``)."""
+        ``refs`` (one ref, or a list; the first is ``ref``), or one another
+        chat asked (``chat``, its session). ``choices`` are its options
+        (none: a yes or no), ``recommended`` the one the bot would pick,
+        and ``going_ahead`` that it does so until the user answers."""
         refs = [refs] if isinstance(refs, str) else list(refs or ())
         with self._db() as con:
             row = con.execute("SELECT value FROM meta WHERE key = 'next_P'").fetchone()
             number = int(row["value"]) if row else 1
             con.execute("INSERT INTO meta (key, value) VALUES ('next_P', ?) ON CONFLICT(key) DO UPDATE SET value = ?",
                         (str(number + 1), str(number + 1)))
-            con.execute("INSERT INTO proposals (id, ref, also, text, new, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                        (f"P{number}", refs[0] if refs else "", " ".join(refs[1:]), text, new, time.time()))
+            con.execute("INSERT INTO proposals (id, ref, also, text, new, created_at, chat, choices, recommended, "
+                        "going_ahead, source, source_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (f"P{number}", refs[0] if refs else "", " ".join(refs[1:]), text, new, time.time(), chat,
+                         json.dumps(list(choices or [])), recommended, int(bool(going_ahead)), source, source_id))
         return f"P{number}"
 
     def proposal_reword(self, item: str, refs: list[str], text: str, new: Optional[str] = None) -> Optional[dict]:
@@ -913,7 +929,7 @@ class Store:
         next work update), the line is in the outbox in the same write, as
         ``outbox`` on the row: an answer a restart catches before its update
         is queued still goes out (``line_answer``)."""
-        if status not in ("approved", "declined"):
+        if status not in ("approved", "declined", "answered"):
             raise ValueError(f"unknown answer {status}")
         with self._db() as con:
             changed = con.execute("UPDATE proposals SET status = ?, answer = ?, answered_at = ? WHERE id = ? AND "
@@ -1006,6 +1022,15 @@ def _add_columns(con: sqlite3.Connection) -> None:
         for name, definition in added:
             if name not in have:
                 con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
+def proposal_choices(row: dict) -> list[str]:
+    """A question's options, as it was asked; none for a yes or no."""
+    try:
+        choices = json.loads(row.get("choices") or "[]")
+    except (TypeError, ValueError):
+        return []
+    return [str(choice) for choice in choices if isinstance(choice, str) and choice] if isinstance(choices, list) else []
 
 
 def proposal_refs(row: dict) -> list[str]:

@@ -904,6 +904,11 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
             return {"ok": False, "error": "not_a_member", "note": room_work.NOT_A_MEMBER}
         except room_work.Unreadable:
             return {"ok": False, "error": "unavailable", "note": room_work.UNREADABLE}
+        chat = str(session_id or "").strip()
+        if room is None and name == "work_propose" and chat and not _is_child(chat):
+            # Any chat of the bot's may ask a question that waits on the user
+            # (Eric, 2026-11-21): its answer comes back to that chat.
+            return work_coord.propose(home, work_store.Store(home), args, session_id, chat=chat)
         if room is None:
             return {"ok": False, "error": "not_bot_chat", "note": NOT_BOT_CHAT}
         if name not in room_work.TOOLS:
@@ -5704,7 +5709,7 @@ def app_act(home: Path, ref: Any, action: str, body: Optional[dict] = None) -> d
     home = Path(home)
     body = body if isinstance(body, dict) else {}
     if work_coord.is_question(ref):
-        return _app_answer(home, str(ref).strip().upper(), action)
+        return _app_answer(home, str(ref).strip().upper(), action, body)
     if action not in APP_ACTIONS:
         return {"ok": False, "error": "unknown_action", "note": f"There's no {action} for work."}
     if action in APP_APPROVAL:
@@ -5749,29 +5754,36 @@ def app_act(home: Path, ref: Any, action: str, body: Optional[dict] = None) -> d
 _app_lock = threading.Lock()
 
 
-def _app_answer(home: Path, item: str, action: str) -> dict:
-    """The user's Approve or Decline on a question the Bot Chat asked them
-    (work_propose), tapped on its card: recorded as their own answer. A yes
-    goes to the Bot Chat as a work update that is theirs, so it acts on it
-    under Ask Me First too; a no only stays on its board."""
-    answer = work_coord.APP_ANSWERS.get(action)
+def _app_answer(home: Path, item: str, action: str, body: Optional[dict] = None) -> dict:
+    """The user's answer on a question the bot asked them (work_propose),
+    tapped on its card: Approve or Decline, or ``answer`` with the body's
+    ``choice``, recorded as their own. It goes to the chat that asked as a
+    work update that is theirs, so it acts on it under Ask Me First too: the
+    Bot Chat, or the other chat the question was asked in. A Bot Chat's no
+    to a question it waited on only stays on its board."""
+    body = body if isinstance(body, dict) else {}
+    if action == work_coord.APP_PICK:
+        answer, choice = "answered", " ".join(str(body.get("choice") or "").split())
+    else:
+        answer, choice = work_coord.APP_ANSWERS.get(action), ""
     if answer is None:
         return {"ok": False, "error": "unknown_action", "note": f"There's no {action} for a question."}
-    if policy(home) == "off":
-        return {"ok": False, "error": "off", "note": "Bot workstreams are off for this bot."}
     if not work_store.exists(home):
         return {"ok": False, "error": "no_such_work", "note": "That isn't one of this bot's questions."}
     store = work_store.Store(home)
+    asked = store.proposal(item)
+    if asked is None:
+        return {"ok": False, "error": "no_such_work", "note": "That isn't one of this bot's questions."}
+    if not asked.get("chat") and policy(home) == "off":
+        return {"ok": False, "error": "off", "note": "Bot workstreams are off for this bot."}
     # Asked before the lock: _bot_chat_of may read the bot's settings.
-    coordinator = _bot_chat_of(home) if answer == "approved" else ""
+    coordinator = asked.get("chat") or _bot_chat_of(home)
     with _app_lock:
         # One about work resolved since the card was drawn has nothing left to decide.
         work_coord.open_questions(store)
-        # One answer: a second tap finds it answered.
-        if store.proposal(item) is None:
-            return {"ok": False, "error": "no_such_work", "note": "That isn't one of this bot's questions."}
-        # A yes and its line for the Bot Chat are one write (the outbox row).
-        done = work_coord.answer_tapped(store, item, answer, coordinator)
+        # One answer: a second tap finds it answered. The answer and its line
+        # for the chat are one write (the outbox row).
+        done = work_coord.answer_tapped(store, item, answer, coordinator, choice)
     line, kept = done.pop("line", ""), done.pop("outbox", "")
     if line:
         _queue_wake(home, coordinator, line, kind="answer", item=kept)

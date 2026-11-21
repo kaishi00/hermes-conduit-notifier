@@ -201,10 +201,13 @@ async def post_workstream_action(ref: str, action: str, request: Request, respon
     too. The answer has the row as it is now
     (``work``); a refusal is a 4xx with ``code`` and ``detail``.
 
-    With a question's id for ``ref`` (P1, from ``coordination``'s items, whose
-    ``actions`` name these while it's open): ``approve`` or ``decline``, the
-    user's own answer to what the Bot Chat asked them. A yes goes to the Bot
-    Chat as a work update it acts on; the answer has ``id`` and ``status``."""
+    With a question's id for ``ref`` (P1, from ``coordination``'s items or
+    ``/waiting``'s ``questions``, whose ``actions`` name these while it's
+    open): ``approve`` or ``decline``, or ``answer`` ({"choice"}: one of its
+    ``choices``, or the user's words for a kept clarify question), the user's
+    own answer to what the bot asked them. It goes to the chat that asked
+    (the Bot Chat, or the question's ``chat``) as a work update it acts on;
+    the answer has ``id`` and ``status``."""
     response.headers["Cache-Control"] = "no-store"
     profile = await core._conduit_route_profile_no_store(request, profile)
     body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)

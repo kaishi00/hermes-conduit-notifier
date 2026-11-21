@@ -191,7 +191,7 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
                        title=chat_title(session_id))
     calls.alert(session_id, "question", reason, profile=profile)
     try:
-        return _first_answer_wins(
+        result = _first_answer_wins(
             request_id=request_id,
             session_id=session_id,
             next_call=kwargs["next_call"],
@@ -202,6 +202,63 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
         )
     finally:
         calls.cancel_alerts(session_id, "question")
+    return keep_unanswered(result, session_id=session_id, batch=batch, request_id=request_id)
+
+
+# A question that ran out unanswered is kept as one that waits on the user
+# (work_propose's), so it stays on their Needs you list and their answer
+# comes to the chat later (Eric, 2026-11-21). The model is told in the
+# result's notice.
+KEPT_NOTICE = ("[the user didn't answer in time, so {what} on their Needs you list as {ids}: carry on with what "
+               "doesn't depend on it. Their answer will come to this chat as a message. If it stops mattering, "
+               "withdraw it with work_propose withdraw.]")
+
+
+def keep_unanswered(result: Any, *, session_id: str, batch: list[dict[str, Any]], request_id: str) -> Any:
+    """``result`` with each question it left unanswered kept as a question
+    that waits on the user, when the clarify ran out (``timed_out``) in a
+    chat whose owner's card is the way to ask, and the bot's work tools are
+    on. Anything else is returned as it came."""
+    if not session_id or not isinstance(result, str):
+        return result
+    try:
+        parsed = json.loads(result)
+    except ValueError:
+        return result
+    if not isinstance(parsed, dict) or parsed.get("outcome") != "timed_out":
+        return result
+    if parsed.get("notice") in (REJECTED_ANSWER_NOTICE, REJECTED_SOME_ANSWERED_NOTICE):
+        return result  # an unsealed answer was refused: the model asks again itself
+    responses = parsed.get("responses")
+    if not isinstance(responses, list) or len(responses) != len(batch):
+        return result
+    unanswered = [entry for entry, row in zip(batch, responses)
+                  if isinstance(row, dict) and row.get("status") != "answered"]
+    if not unanswered or not _card_asks_instead(session_id):
+        return result
+    try:
+        from . import work_coord, work_store, work_tool
+
+        home = work_tool._home()
+        if home is None or work_tool.policy(home) == "off":
+            return result
+        store = work_store.Store(home)
+        ids = []
+        for entry in unanswered:
+            choices = [str(choice) for choice in entry.get("choices") or []]
+            pick = (not entry.get("multi_select")
+                    and work_coord.CHOICES_MIN <= len(choices) <= work_coord.CHOICES_MAX)
+            ids.append(store.proposal_add(
+                [], work_coord._short(entry["question"], work_coord.PROPOSAL_CHARS), chat=session_id,
+                choices=[work_coord._short(choice, work_coord.CHOICE_CHARS) for choice in choices] if pick else [],
+                source="clarify", source_id=request_id))
+    except Exception:  # noqa: BLE001 — the timed-out result still stands
+        logger.warning("conduit_push: couldn't keep an unanswered question", exc_info=True)
+        return result
+    what = "it stays" if len(ids) == 1 else "they stay"
+    note = KEPT_NOTICE.format(what=what, ids=", ".join(ids))
+    parsed["notice"] = f"{parsed['notice']} {note}" if parsed.get("notice") else note
+    return json.dumps(parsed, ensure_ascii=False)
 
 
 def _first_answer_wins(
