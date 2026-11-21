@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.190.0 (2026-11-21)
+
+### New and improved
+
+- Conduit's Predictive features can carry your own instructions for each one: suggested replies, guesses while you pause, and when Hermes follows up. They guide those guesses only, not your bot's usual replies.
+
 ## 0.189.0 (2026-11-21)
 
 ### New and improved

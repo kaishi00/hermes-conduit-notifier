@@ -144,6 +144,7 @@ def test_every_capability_names_a_served_route_family():
         "reply-sources": "/notifications/reply-sources",
         "chat-on-screen": "/notifications/on-screen",
         "predict": "/predict",
+        "predict-custom-instructions": "/predict",
         "side-question": "/side-question",
         "room-files": "/room-files",
         "room-file-pictures": "/room-files/data-url",

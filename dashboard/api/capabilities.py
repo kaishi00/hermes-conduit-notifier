@@ -208,6 +208,10 @@ ROUTE_CAPABILITIES = (
     # POST /predict, GET /predict: Conduit's Predictive features, answered
     # by a no-tools fork of the chat for the asking device only.
     "predict",
+    # POST /predict's "custom_instructions": the user's own guidance for
+    # one kind of guess, in the question as a marked preference section
+    # (hermes-conduit#2970). Older plugins ignore the field.
+    "predict-custom-instructions",
     # POST /side-question: Conduit's step summaries, answered as Hermes' /btw
     # answers but only to the asking device (no "[btw …]" note in Desktop).
     "side-question",
