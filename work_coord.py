@@ -10,8 +10,8 @@ with its age. A message the Bot Chat sent is followed until it shows in the
 workstream's saved messages.
 
 The user sets how independently the Bot Chat acts in the turns it starts
-itself (a work update's turn): ``ask`` or ``auto``, and work it leaves
-alone. Those rules are checked here; when the user wrote the turn's message,
+itself (a work update's turn): ``ask`` or ``auto``, and work the user
+keeps it out of. Those rules are checked here; when the user wrote the turn's message,
 the Bot Chat acts on it under any setting. Nothing here changes what Hermes
 lets a workstream's tools do.
 """
@@ -86,7 +86,7 @@ ASK_FIRST_START = ("The user asked to be asked first (Edit Bot > Work > Coordina
 ASK_FIRST_STOP = ("The user asked to be asked first (Edit Bot > Work > Coordination: Ask), and they didn't start "
                   "this turn, so {ref} wasn't stopped. Tell them why you'd stop it, record it with work_propose, "
                   "and stop it once they say yes.")
-LEFT_ALONE = ("The user set {ref} to Leave alone, and they didn't start this turn, so nothing was done to it. "
+LEFT_ALONE = ("The user kept you out of {ref}, and they didn't start this turn, so nothing was done to it. "
               "Tell them what you noticed and what you'd do; they decide.")
 TOO_MANY = ("You've sent {ref} {count} messages in the last hour from turns the user didn't start, the most this "
             "allows, so this one wasn't sent. Tell the user what's going back and forth and let them decide.")
@@ -103,8 +103,8 @@ RULES = {
             "with work_propose too and act on a yes. Check a finding that could be wrong (a 401 isn't a removed "
             "API) before you recommend anything. What the user told a workstream themselves (“the user said”) "
             "wins over a finding: when the two conflict, explain and ask. While a question you asked them is "
-            "open, don't act on it yourself: wait for their answer. Work marked Leave alone is the "
-            "user's: tell them what you noticed, and send it nothing on your own. Don't ask again what they "
+            "open, don't act on it yourself: wait for their answer. Work the user kept you out of is "
+            "theirs: tell them what you noticed, and send it nothing on your own. Don't ask again what they "
             "declined unless something new came up."),
     "auto": ("You also keep this bot's workstreams working together, on your own. On every turn, read the board "
              "below: when what one workstream found or changed breaks what another relies on or is doing, act "
@@ -113,8 +113,8 @@ RULES = {
              "when you did. Check a finding that could be wrong (a 401 isn't a removed API) before you redirect "
              "anything. What the user told a workstream themselves (“the user said”) wins over a finding: "
              "when the two conflict, explain and ask, and record what you asked with work_propose. While a "
-             "question you asked them is open, don't act on it yourself: wait for their answer. Work marked "
-             "Leave alone is the user's: tell them what you noticed, and send it nothing on your own. If what "
+             "question you asked them is open, don't act on it yourself: wait for their answer. Work the "
+             "user kept you out of is theirs: tell them what you noticed, and send it nothing on your own. If what "
              "you sent turns out wrong, correct it with another message."),
 }
 # The user's yes, tapped on a question's card in Conduit: a work update

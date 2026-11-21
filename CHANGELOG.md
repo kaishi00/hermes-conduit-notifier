@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.188.1 (2026-11-21)
+
+### New and improved
+
+- Leave Alone on a workstream's card is now “Keep … out of this”, with your bot's name, and the bot reads it that way too: it won't message or stop that workstream on its own, and you still can.
+
 ## 0.188.0 (2026-11-21)
 
 ### New and improved
