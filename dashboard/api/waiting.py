@@ -79,9 +79,17 @@ def _open_questions(home: Any) -> list:
             bot_chat = core._plugin_package_module("work_tool")._bot_chat_of(Path(home))
         except Exception:  # noqa: BLE001 — the row then names no chat to open
             bot_chat = ""
+    try:
+        titles = core._plugin_package_module("session_titles").title
+    except Exception:  # noqa: BLE001 — rows without a title still list
+        titles = None
     for card in cards:
         # The chat its row opens: the one that asked, or the Bot Chat.
         card["session_ids"] = [chat for chat in (card["chat"] or bot_chat,) if chat]
+        try:
+            card["chat_title"] = titles(card["session_ids"][0]) if titles and card["session_ids"] else ""
+        except Exception:  # noqa: BLE001
+            card["chat_title"] = ""
     return cards
 
 
