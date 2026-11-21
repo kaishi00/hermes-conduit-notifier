@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.190.1 (2026-11-21)
+
+### Fixes
+
+- A prediction with a long draft full of emoji and long instructions is no longer refused as too large when the app that asks escapes every emoji.
+
 ## 0.190.0 (2026-11-21)
 
 ### New and improved
