@@ -356,16 +356,18 @@ def test_instructions_reach_the_fork_with_either_model(gateway, client):
     assert gateway.asked[1][3] == {"provider": "local", "model": "glm-flash"}
 
 
-def test_the_largest_request_fits_the_body_limit(gateway, client):
-    """A 2000-character draft of escaped control characters and 1000
-    characters of instructions likewise, the most JSON either can be."""
+@pytest.mark.parametrize("filler", ["\x01", "\U0001F600"])
+def test_the_largest_request_fits_the_body_limit(gateway, client, filler):
+    """A 2000-character draft and 1000 characters of instructions, each of
+    the characters that escape longest: a control character (six bytes) and
+    an emoji, a surrogate pair when the client escapes non-ASCII (twelve)."""
     import json
     gateway._sessions["s1"] = {"agent": FakeAgent([])}
     gateway.reply = '{"next":[],"replies":[]}'
-    body = {"session_id": "s1", "kind": "draft", "draft": "a" + "\x01" * (predict.MAX_DRAFT_CHARS - 1),
-            "custom_instructions": "\x01" * predict.MAX_INSTRUCTIONS_CHARS, "count": 5, "language": "x" * 40,
+    body = {"session_id": "s1", "kind": "draft", "draft": "a" + filler * (predict.MAX_DRAFT_CHARS - 1),
+            "custom_instructions": filler * predict.MAX_INSTRUCTIONS_CHARS, "count": 5, "language": "x" * 40,
             "model": "fast", "wait_s": 20}
-    raw = json.dumps(body).encode()
+    raw = json.dumps(body, ensure_ascii=True).encode()
     assert len(raw) <= api.chats.PREDICT_MAX_BODY_BYTES
     response = client.post(f"{BASE}/predict", content=raw, headers={"Content-Type": "application/json"})
     assert response.status_code == 200

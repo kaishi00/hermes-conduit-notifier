@@ -17,7 +17,7 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### Fixes
 
-- When your bot reworded a question it had already asked, its choices and the one it recommended went away unless it gave them again.
+- A prediction with a long draft full of emoji and long instructions is no longer refused as too large when the app that asks escapes every emoji.
 
 ## 0.190.0 (2026-11-21)
 
