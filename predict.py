@@ -96,8 +96,9 @@ def _quoted_draft(draft: str) -> str:
 
 def _instructions(text: str) -> Optional[str]:
     """The user's instructions as they go into the question: line breaks
-    and tabs kept (a list reads as one), other control characters dropped,
-    blank lines collapsed; blank is none."""
+    kept (a list reads as one), runs of spaces and tabs within a line made
+    one space, other control characters dropped, blank lines collapsed;
+    blank is none."""
     text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f\u2028\u2029]", " ", text.replace("\r\n", "\n").replace("\r", "\n"))
     lines = [" ".join(line.split()) for line in text.split("\n")]
     kept = "\n".join(line for line in lines if line)
