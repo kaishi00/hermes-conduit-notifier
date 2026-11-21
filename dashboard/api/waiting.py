@@ -70,9 +70,19 @@ def _open_questions(home: Any) -> list:
         if not work_store.exists(Path(home)):
             return []
         work_coord = core._plugin_package_module("work_coord")
-        return [work_coord.question_card(row) for row in work_coord.open_questions(work_store.Store(Path(home)))]
+        cards = [work_coord.question_card(row) for row in work_coord.open_questions(work_store.Store(Path(home)))]
     except Exception:  # noqa: BLE001 — the waits still list
         return []
+    bot_chat = ""
+    if any(not card["chat"] for card in cards):
+        try:
+            bot_chat = core._plugin_package_module("work_tool")._bot_chat_of(Path(home))
+        except Exception:  # noqa: BLE001 — the row then names no chat to open
+            bot_chat = ""
+    for card in cards:
+        # The chat its row opens: the one that asked, or the Bot Chat.
+        card["session_ids"] = [chat for chat in (card["chat"] or bot_chat,) if chat]
+    return cards
 
 
 def waiting_list() -> Dict[str, Any]:
