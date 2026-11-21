@@ -3413,7 +3413,10 @@ workouts, body, vitals, fitness), with how far back to start.
   they turn sharing on.
 
 Limits: 4 devices per profile, 6,000 items and 4 MiB per batch, 120 uploads
-a minute per profile.
+a minute per profile. An upload past that is refused with `429` and a
+`Retry-After` saying in whole seconds when the next one is taken (plugin
+0.192.1+), so a long history sync waits and carries on instead of failing
+(issue 975). Every per-profile limit's `429` carries it.
 
 ### Voice reads (plugin 0.25+)
 

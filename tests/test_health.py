@@ -399,6 +399,39 @@ def test_the_tool_answers_from_the_store(home):
     assert _call({"action": "daily", "metrics": ["cholesterol"]})["error"] == "unknown_metric"
 
 
+def test_full_ingest_window_says_when_to_try_again(client, monkeypatch):
+    # A backfill that fills the window is told when a slot frees, so the
+    # phone waits and carries on instead of failing (notifier issue 975).
+    clock = [100.0]
+    limiter = api.core._MintLimiter(2, 60, clock=lambda: clock[0], message="Too many health uploads; try again shortly")
+    monkeypatch.setattr(api.phone_data, "_health_ingest_limiter", limiter)
+    for _ in range(2):
+        client.post(f"{BASE}/health/ingest", json={})
+        clock[0] += 10
+    response = client.post(f"{BASE}/health/ingest", json={})
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "40"
+    assert response.headers["cache-control"] == "no-store"
+    clock[0] += 40
+    assert client.post(f"{BASE}/health/ingest", json={}).status_code != 429
+
+
+def test_retry_after_counts_from_the_slot_that_frees_first():
+    clock = [0.0]
+    limiter = api.core._MintLimiter(2, 60, clock=lambda: clock[0])
+    assert limiter.retry_after("p") == 1
+    for t in (0.0, 30.5, 31.0):
+        clock[0] = t
+        try:
+            limiter.acquire("p")
+        except api.core.TokenError:
+            pass
+    clock[0] = 31.0
+    assert limiter.retry_after("p") == 29  # the mint at 0 ages out at 60
+    clock[0] = 59.9
+    assert limiter.retry_after("p") == 1
+
+
 def test_subagents_cannot_read_health(home):
     answer = _call({"action": "overview"}, session_id="child", is_child=lambda sid: sid == "child")
     assert answer["error"] == "subagent"

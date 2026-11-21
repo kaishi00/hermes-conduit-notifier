@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.192.1 (2026-11-21)
+
+### Fixes
+
+- A long Apple Health history sync showed "Too many health uploads; try again shortly" while it was still working. The plugin now says when to send the next upload, so Conduit waits and carries on without the error.
+
 ## 0.192.0 (2026-11-21)
 
 ### New and improved

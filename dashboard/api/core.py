@@ -8,6 +8,7 @@ import asyncio
 import importlib
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -113,6 +114,20 @@ class _MintLimiter:
                 raise TokenError(429, self.message)
             mints.append(now)
             return now
+
+    def retry_after(self, key: str, limit: Optional[int] = None) -> int:
+        """Whole seconds until ``key`` has a free slot again (at least 1), for
+        a refusal's ``Retry-After``: a client that waits this long isn't
+        turned away again (notifier issue 975)."""
+        limit = self.limit if limit is None else limit
+        now = self.clock()
+        with self._lock:
+            mints = self._mints.get(key)
+            if limit <= 0 or not mints or len(mints) < limit:
+                return 1
+            # The slot frees when the mint `limit` places from the newest ages out.
+            freed = mints[len(mints) - limit] + self.window_s
+        return max(1, math.ceil(freed - now))
 
     def release(self, key: str, mint: float) -> None:
         """Gives back the slot ``acquire`` returned, for a request that failed
@@ -266,7 +281,11 @@ async def _scoped_acquire(limiter: "_MintLimiter", profile: Optional[str], key: 
     try:
         await _run_scoped(profile, lambda: limiter.acquire(bucket))
     except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+        headers = {"Cache-Control": "no-store"}
+        if exc.status == 429:
+            # When to try again, so a client paces itself instead of failing.
+            headers["Retry-After"] = str(limiter.retry_after(bucket))
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=headers)
     except HTTPException as exc:
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
