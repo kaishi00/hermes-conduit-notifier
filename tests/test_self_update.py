@@ -689,6 +689,13 @@ def test_the_corrected_push_isnt_a_duplicate_of_the_failed_one(monkeypatch):
     api.self_update._notify_self_update({"id": "j1", "step": "done", "loaded_version": "0.69.1"})
     assert len(sent) == 2 and sent[0]["identifier"] != sent[1]["identifier"]
     assert sent[1]["title"] == "Conduit plugin updated"
+    # A held scan Conduit can accept asks for the OK; a dangerous one keeps Hermes' words.
+    api.self_update._notify_self_update({"id": "j2", "step": "failed", "code": "scan_blocked", "scan_verdict": "caution",
+                                         "detail": "BLOCKED"})
+    api.self_update._notify_self_update({"id": "j3", "step": "failed", "code": "scan_blocked", "scan_verdict": "dangerous",
+                                         "detail": "BLOCKED"})
+    assert sent[2]["title"] == "Conduit plugin update needs your OK" and "update anyway" in sent[2]["body"]
+    assert sent[3]["body"] == "BLOCKED"
 
 
 def test_an_update_points_every_profile_at_it_before_the_gateway_restarts(monkeypatch, tmp_path):
@@ -757,13 +764,13 @@ def test_a_changed_hermes_pulls_in_a_fresh_process(monkeypatch):
     def run(argv, **kwargs):
         runs.append((argv, kwargs))
         return types.SimpleNamespace(returncode=0, stderr="", stdout="Updating abc..def\n"
-                                     + api.self_update._FRESH_PULL_MARK + json.dumps({"ok": True, "name": argv[-1]}) + "\n")
+                                     + api.self_update._FRESH_PULL_MARK + json.dumps({"ok": True, "name": argv[-2]}) + "\n")
 
     monkeypatch.setattr(api.self_update.subprocess, "run", run)
     pull, _ = api.self_update._hermes_update_steps()
     assert pull() == {"ok": True, "name": "conduit_push"}
     (argv, kwargs), = runs
-    assert argv[0] == sys.executable and argv[-1] == "conduit_push" and kwargs["stdin"] is api.self_update.subprocess.DEVNULL
+    assert argv[0] == sys.executable and argv[-2:] == ["conduit_push", "0"] and kwargs["stdin"] is api.self_update.subprocess.DEVNULL
 
 
 def test_a_fresh_pull_runs_the_hermes_on_disk_for_this_home(monkeypatch, tmp_path):
@@ -1279,3 +1286,88 @@ def test_a_managed_host_runs_only_the_restarts_its_new_copy_waits_on(monkeypatch
     api.self_update._self_update_thread.join(5)
     assert restarts == [1]
     assert json.loads(path.read_text())["version"] == "9.9.9"
+
+
+def test_a_held_scan_keeps_its_verdict_and_worst_findings_for_conduit(monkeypatch, tmp_path):
+    findings = [{"severity": "medium", "category": "network", "file": f"m{i}.py", "line": i, "description": "d",
+                 "pattern_id": "p"} for i in range(8)]
+    findings.insert(3, {"severity": "high", "category": "exec", "file": "x.py", "line": 7, "description": "subprocess"})
+    refusal = {"ok": False, "scan_blocked": True, "scan_verdict": "caution", "scan_findings": findings,
+               "error": "BLOCKED: community source + caution verdict"}
+    job, scheduled, notified, _ = _run(tmp_path, monkeypatch=monkeypatch, pull=lambda: refusal)
+    assert job["step"] == "failed" and job["code"] == "scan_blocked" and job["failed_step"] == "downloading"
+    assert job["scan_verdict"] == "caution" and job["scan_finding_count"] == 9
+    assert len(job["scan_findings"]) == api.self_update.SCAN_FINDINGS_KEPT
+    # Worst first, and only the fields Conduit shows.
+    assert job["scan_findings"][0] == {"severity": "high", "category": "exec", "file": "x.py", "line": 7,
+                                       "description": "subprocess"}
+    assert job["detail"].startswith("BLOCKED") and scheduled == [] and len(notified) == 1
+
+
+def test_a_held_scan_without_a_verdict_reads_as_dangerous(monkeypatch, tmp_path):
+    job, *_ = _run(tmp_path, monkeypatch=monkeypatch, pull=lambda: {"ok": False, "scan_blocked": True, "error": "x"})
+    assert job["scan_verdict"] == "dangerous" and job["scan_findings"] == [] and job["scan_finding_count"] == 0
+
+
+def test_an_accepted_scan_reaches_hermes_pull_as_force(monkeypatch):
+    calls = []
+
+    def update(name, *, accept_capabilities=False, force=False, unattended=False):
+        calls.append(force)
+        return {"ok": True, "name": name}
+
+    _fake_hermes(monkeypatch, lambda profile=None: (types.SimpleNamespace(wait=lambda timeout: 0), False))
+    sys.modules["hermes_cli.plugins_cmd"].dashboard_update_user_plugin = update
+    monkeypatch.setattr(api.self_update, "_hermes_changed_on_disk", lambda *a, **k: False)
+    api.self_update._hermes_update_steps()[0]()
+    api.self_update._hermes_update_steps(force=True)[0]()
+    assert calls == [False, True]
+
+
+def test_a_hermes_whose_pull_takes_no_force_says_so(monkeypatch):
+    _fake_hermes(monkeypatch, lambda profile=None: (types.SimpleNamespace(wait=lambda timeout: 0), False))
+    monkeypatch.setattr(api.self_update, "_hermes_changed_on_disk", lambda *a, **k: False)
+    result = api.self_update._hermes_update_steps(force=True)[0]()
+    assert result == {"ok": False, "error": api.self_update.SCAN_FORCE_UNSUPPORTED}
+
+
+def test_the_update_route_passes_force_on(monkeypatch):
+    seen = []
+
+    def start(profile, schedule, *, force=False):
+        seen.append((profile, force))
+        return {"id": "j", "step": "downloading"}
+
+    monkeypatch.setattr(api.self_update, "start_self_update", start)
+    asyncio.run(api.self_update.post_self_update(types.SimpleNamespace(headers={}),
+                                                 profile="coder", force=True))
+    asyncio.run(api.self_update.post_self_update(types.SimpleNamespace(headers={})))
+    assert seen == [("coder", True), (None, False)]
+
+
+@pytest.mark.parametrize("takes_force", [True, False])
+def test_a_fresh_pull_passes_force_to_the_hermes_on_disk(tmp_path, takes_force):
+    # The script itself, run against a stand-in Hermes on disk.
+    package = tmp_path / "hermes_cli"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    signature = "name, *, force=False" if takes_force else "name"
+    body = "{'ok': True, 'force': force}" if takes_force else "{'ok': True}"
+    (package / "plugins_cmd.py").write_text(f"def dashboard_update_user_plugin({signature}):\n    return {body}\n")
+    script_runs = []
+    real_run = api.self_update.subprocess.run
+
+    def run(argv, **kwargs):
+        kwargs["cwd"] = str(tmp_path)
+        script_runs.append(argv)
+        return real_run(argv, **kwargs)
+
+    import unittest.mock
+    with unittest.mock.patch.object(api.self_update.subprocess, "run", run):
+        forced = api.self_update._pull_in_fresh_process(True)
+        plain = api.self_update._pull_in_fresh_process()
+    if takes_force:
+        assert forced == {"ok": True, "force": True} and plain == {"ok": True, "force": False}
+    else:
+        assert forced == {"ok": False, "error": api.self_update.SCAN_FORCE_UNSUPPORTED} and plain == {"ok": True}
+    assert [argv[-1] for argv in script_runs] == ["1", "0"]

@@ -321,6 +321,10 @@ SELF_UPDATE_TAKEN_DOWN_S = 300.0
 # The pull in a fresh Hermes process (below): git, the install scan and any dependencies.
 SELF_UPDATE_FRESH_PULL_LIMIT_S = 900.0
 _FRESH_PULL_MARK = "conduit-self-update-result:"
+# A scan refusal's findings a job keeps for Conduit to show: the worst few, not hundreds.
+SCAN_FINDINGS_KEPT = 5
+SCAN_FORCE_UNSUPPORTED = ("This Hermes can't accept its install scan's verdict from Conduit. Run "
+                          "hermes plugins update conduit_push --force on the host, or update Hermes.")
 # A process's start time is only roughly the wall clock (Linux counts it from boot), so a
 # file written as the dashboard started could read as newer than it.
 _HERMES_CHANGED_MARGIN_S = 5.0
@@ -709,8 +713,10 @@ def _gateway_draining() -> bool:
     return False
 
 
-def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[..., int]]:
-    """Hermes' own plugin pull and gateway restart, or 501 when this Hermes lacks them."""
+def _hermes_update_steps(force: bool = False) -> Tuple[Callable[[], Dict[str, Any]], Callable[..., int]]:
+    """Hermes' own plugin pull and gateway restart, or 501 when this Hermes lacks them.
+    force: the user accepted a caution verdict of Hermes' install scan (a dangerous one
+    Hermes refuses even so)."""
     try:
         plugins_cmd = importlib.import_module("hermes_cli.plugins_cmd")
         web_server = importlib.import_module("hermes_cli.web_server")
@@ -740,8 +746,12 @@ def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[..., 
         # updated to 0.22.4). A fresh process runs the Hermes on disk, whole; the dashboard
         # restart at the end of the update then loads it here too.
         if _hermes_changed_on_disk(sys.modules.get("hermes_cli")):
-            return _pull_in_fresh_process()
-        return dashboard_update_user_plugin(core.PLUGIN_NAME)
+            return _pull_in_fresh_process(force)
+        if not force:
+            return dashboard_update_user_plugin(core.PLUGIN_NAME)
+        if not _takes_force(dashboard_update_user_plugin):
+            return {"ok": False, "error": SCAN_FORCE_UNSUPPORTED}
+        return dashboard_update_user_plugin(core.PLUGIN_NAME, force=True)
 
     def restart_gateway(draining: Callable[[], None] = lambda: None) -> int:
         proc, _reused = _spawn_gateway_restart(None, **restart_kwargs)
@@ -813,20 +823,52 @@ def _hermes_changed_on_disk(hermes_cli: Any, started: Optional[float] = None) ->
     return False
 
 
-def _pull_in_fresh_process() -> Dict[str, Any]:
+def _takes_force(update: Callable[..., Any]) -> bool:
+    try:
+        inspect.signature(update).bind("name", force=True)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _scan_held(result: Dict[str, Any]) -> Dict[str, Any]:
+    """What a job keeps of Hermes' scan refusal: the verdict, and the first findings, worst
+    first, so Conduit can show why the scan held it before the user accepts it."""
+    verdict = result.get("scan_verdict")
+    held: Dict[str, Any] = {"scan_verdict": verdict if isinstance(verdict, str) else "dangerous"}
+    findings = [f for f in result.get("scan_findings") or [] if isinstance(f, dict)]
+    rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    findings.sort(key=lambda f: rank.get(str(f.get("severity", "")).lower(), 4))
+    held["scan_findings"] = [
+        {key: f[key] for key in ("severity", "category", "file", "line", "description")
+         if isinstance(f.get(key), (str, int)) and not isinstance(f.get(key), bool)}
+        for f in findings[:SCAN_FINDINGS_KEPT]]
+    held["scan_finding_count"] = len(findings)
+    return held
+
+
+def _pull_in_fresh_process(force: bool = False) -> Dict[str, Any]:
     """Hermes' plugin pull in a new process of the Hermes on disk, for this dashboard's home."""
     env = dict(os.environ)
     with contextlib.suppress(Exception):
         from hermes_constants import get_hermes_home
         env["HERMES_HOME"] = str(get_hermes_home())
-    script = ("import json, sys\n"
-              "from hermes_cli.plugins_cmd import dashboard_update_user_plugin\n"
-              "result = dashboard_update_user_plugin(sys.argv[1])\n"
+    script = ("import inspect, json, sys\n"
+              "from hermes_cli.plugins_cmd import dashboard_update_user_plugin as update\n"
+              "if sys.argv[2] != '1':\n"
+              "    result = update(sys.argv[1])\n"
+              "else:\n"
+              "    try:\n"
+              "        inspect.signature(update).bind(sys.argv[1], force=True)\n"
+              "    except (TypeError, ValueError):\n"
+              f"        result = {{'ok': False, 'error': {SCAN_FORCE_UNSUPPORTED!r}}}\n"
+              "    else:\n"
+              "        result = update(sys.argv[1], force=True)\n"
               f"print({_FRESH_PULL_MARK!r} + json.dumps(result, default=str), flush=True)\n")
     restart = ("Hermes was updated on this host after the dashboard started. Restart the Hermes "
                "dashboard, then update the plugin again.")
     try:
-        done = subprocess.run([sys.executable, "-c", script, core.PLUGIN_NAME], env=env,
+        done = subprocess.run([sys.executable, "-c", script, core.PLUGIN_NAME, "1" if force else "0"], env=env,
                               cwd=_hermes_root(sys.modules.get("hermes_cli")) or None,
                               stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
                               timeout=SELF_UPDATE_FRESH_PULL_LIMIT_S,
@@ -874,6 +916,8 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
             # Not found, no owned checkout, a re-pin needing consent, a blocked
             # scan: Hermes' own words, which Conduit acts on.
             code = next((flag for flag in ("consent_required", "scan_blocked") if result.get(flag)), None)
+            if code == "scan_blocked":
+                job.update(_scan_held(result))
             _self_update_failed(job, str(result.get("error") or "Hermes didn't apply the update"), code)
             return
         job.update(step="restarting_gateway", version=capabilities._plugin_version())
@@ -979,6 +1023,7 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
 
 
 def start_self_update(profile: Optional[str], schedule: Callable[[float, Callable[[], None]], Any], *,
+                      force: bool = False,
                       path: Optional[Path] = None,
                       steps: Optional[Tuple[Callable[[], Dict[str, Any]], Callable[..., int]]] = None,
                       homes: Optional[Callable[[], List[Path]]] = None,
@@ -995,7 +1040,8 @@ def start_self_update(profile: Optional[str], schedule: Callable[[float, Callabl
     refusal = _self_restart_refusal()
     if refusal is not None:
         raise core.TokenError(*refusal)
-    pull, restart_gateway = steps or _hermes_update_steps()
+    # force only ever reaches Hermes' pull, which refuses a dangerous verdict even so.
+    pull, restart_gateway = steps or (_hermes_update_steps(force=True) if force else _hermes_update_steps())
     if managed:
         def pull() -> Dict[str, Any]:
             return {"ok": True}
@@ -1237,6 +1283,10 @@ def _notify_self_update(job: Dict[str, Any]) -> None:
     if job.get("step") == "done":
         title = "Conduit plugin updated"
         body = f"Version {job.get('loaded_version') or job.get('version')} is running."
+    elif job.get("code") == "scan_blocked" and job.get("scan_verdict") == "caution":
+        # Conduit offers Update Anyway for this one: Hermes' words would read as a dead end.
+        title = "Conduit plugin update needs your OK"
+        body = "Hermes' install scan held it for confirmation. Open Conduit to see what it found and update anyway."
     else:
         title = "Conduit plugin update didn't finish"
         body = str(job.get("detail") or "Open Conduit to see what happened.")
@@ -1266,7 +1316,7 @@ def _bot_name(client: Any) -> str:
 
 
 @router.post("/self/update")
-async def post_self_update(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+async def post_self_update(response: Response, profile: Optional[str] = None, force: bool = False) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     loop = asyncio.get_running_loop()
 
@@ -1275,7 +1325,7 @@ async def post_self_update(response: Response, profile: Optional[str] = None) ->
         loop.call_soon_threadsafe(loop.call_later, delay, fn)
 
     try:
-        return {"ok": True, "job": await asyncio.to_thread(start_self_update, profile, schedule)}
+        return {"ok": True, "job": await asyncio.to_thread(start_self_update, profile, schedule, force=force)}
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException:

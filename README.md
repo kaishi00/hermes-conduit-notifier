@@ -25,6 +25,11 @@ date-numbered releases, v2026.9.24 and older) has an older scan that reads
 the plugin's test fixtures as live code, and it refuses the install as
 dangerous or asks you to confirm it. Run `hermes update` first, then install.
 
+An update from Conduit that the scan holds for confirmation (a caution
+verdict) shows the scan's top findings and an Update Anyway button, which
+accepts that verdict for this update only. A dangerous verdict can't be
+accepted: update Hermes on the host, then update the plugin again.
+
 In Hermes Conduit, open **Settings > Notifications**, enable notifications, and create a pairing code. Claim it from the matching Hermes profile:
 
 ```bash
