@@ -7972,7 +7972,8 @@ def test_only_the_shows_own_answer_counts_as_cards(on, hermes):
     assert work.shown_board(BOT_CHAT, "W1")[0]["cards"] == [MAP]
 
 
-def test_a_failed_turns_update_names_its_cards(on, hermes):
+def test_a_failed_turns_update_names_its_cards(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # only flush_wakes sends: the 10 ms timer raced it
     start()
     hermes.live(BOT_CHAT, transport=object())
     work.turn_started("20261031_work_1")
@@ -7985,7 +7986,8 @@ def test_a_failed_turns_update_names_its_cards(on, hermes):
     assert "failed" in params["text"] and '"from_work": "W1"' in params["text"]
 
 
-def test_an_interrupted_turns_cards_are_named_by_the_next_update(on, hermes):
+def test_an_interrupted_turns_cards_are_named_by_the_next_update(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # only flush_wakes sends: the 10 ms timer raced it
     start()
     hermes.live(BOT_CHAT, transport=object())
     work.turn_started("20261031_work_1")
