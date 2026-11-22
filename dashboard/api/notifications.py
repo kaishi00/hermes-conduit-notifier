@@ -266,47 +266,63 @@ def _chat_mute() -> Any:
         return _chat_mute_module
 
 
-def _same_chat(session_ids: list) -> list:
-    """``session_ids`` and every session of the chat they name through
-    compression, back to its first and on to its newest (session_usage._chain):
-    a client names a chat by the ids it has, and a compaction since gives it
-    new ones. A branch, a reset or a subagent's run is a chat of its own, so
-    it never joins. Just ``session_ids`` when the store can't be read."""
+def _same_chats(id_lists: list) -> list:
+    """Each list of ``id_lists`` with every session of the chat it names
+    through compression (session_usage._chain), over one read of state.db: a
+    client names a chat by the ids it has, and a compaction since gives it new
+    ones. The chat's first session comes first, so a mute and its unmute share
+    an id however many compactions apart they are and however the plugin's
+    bound on ids cuts them; then the ids asked about, then the rest newest
+    first. A branch, a reset or a subagent's run is a chat of its own, so it
+    never joins. The lists as they are when the store can't be read."""
     import sqlite3
 
-    found = list(session_ids)
+    lists = [list(ids) for ids in id_lists]
     path = _cron_home() / "state.db"
-    if not path.exists():
-        return found
+    if not lists or not path.exists():
+        return lists
     try:
         conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
         try:
             conn.row_factory = sqlite3.Row
-            for session_id in session_ids:
-                start = session_usage._row(conn, session_id)
-                if start is None:
-                    continue
-                # Newest first: the ids a client has now come before the old ones.
-                for row in reversed(session_usage._chain(conn, start)):
-                    if row["id"] not in found:
-                        found.append(row["id"])
+            return [_same_chat(conn, ids) for ids in lists]
         finally:
             conn.close()
     except sqlite3.Error:
-        return list(session_ids)
+        return lists
+
+
+def _same_chat(conn: Any, session_ids: list) -> list:
+    firsts: list = []
+    rest: list = []
+    for session_id in session_ids:
+        start = session_usage._row(conn, session_id)
+        if start is None:
+            continue
+        chain = session_usage._chain(conn, start)
+        if chain:
+            firsts.append(chain[0]["id"])
+            rest.extend(row["id"] for row in reversed(chain))
+    found: list = []
+    seen: set = set()
+    for session_id in firsts + list(session_ids) + rest:
+        if session_id not in seen:
+            seen.add(session_id)
+            found.append(session_id)
     return found
 
 
 def muted_chats() -> Dict[str, Any]:
     chats = _chat_mute().ChatMuteStore(_cron_home()).chats()
-    return {"chats": [{**chat, "session_ids": _same_chat(chat["session_ids"])} for chat in chats]}
+    expanded = _same_chats([chat["session_ids"] for chat in chats])
+    return {"chats": [{**chat, "session_ids": ids} for chat, ids in zip(chats, expanded)]}
 
 
 def update_muted_chat(body: Any) -> Dict[str, Any]:
     module = _chat_mute()
     try:
         session_ids, seconds = module.parse(body)
-        module.ChatMuteStore(_cron_home()).set_mute(_same_chat(session_ids), seconds)
+        module.ChatMuteStore(_cron_home()).set_mute(_same_chats([session_ids])[0], seconds)
     except ValueError as exc:
         raise core.TokenError(400, str(exc))
     return muted_chats()

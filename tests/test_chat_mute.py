@@ -199,5 +199,28 @@ def test_a_mute_names_the_whole_chat_through_compression_and_never_a_branch(clie
     assert not plugin_muted(tmp_path, "tip")
 
 
+def test_a_chat_compacted_many_times_since_its_mute_still_unmutes(client, tmp_path):
+    # 40 sessions, each compacted into the next: more than the plugin keeps per chat.
+    ids = [f"s{n}" for n in range(40)]
+    _sessions(tmp_path, [(sid, ids[n - 1] if n else None, None if n == 39 else "compression", {}, n * 10,
+                          None if n == 39 else (n + 1) * 10) for n, sid in enumerate(ids)])
+    stored = api.notifications._chat_mute().ChatMuteStore(tmp_path)
+    stored.set_mute(api.notifications._same_chats([["s2"]])[0], None)
+    assert plugin_muted(tmp_path, "s0"), "the chat's first session is kept"
+    muted = client.get(f"{BASE}/notifications/muted-chats").json()
+    assert "s39" in muted["chats"][0]["session_ids"], "the client finds it under its newest id"
+    assert client.put(f"{BASE}/notifications/muted-chats", json={"session_ids": ["s39"], "mute_s": 0}).json() \
+        == {"ok": True, "chats": []}
+
+
+def test_an_entry_without_an_end_is_no_mute(tmp_path):
+    import json
+
+    store = api.notifications._chat_mute().ChatMuteStore(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(json.dumps({"version": 1, "chats": [{"ids": ["a"], "at": store.clock()}]}))
+    assert not store.muted(["a"])
+
+
 def plugin_muted(home, session_id):
     return api.notifications._chat_mute().ChatMuteStore(home).muted([session_id])

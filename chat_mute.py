@@ -182,6 +182,10 @@ def _normalized(raw: Any) -> dict[str, Any]:
             at = _number(entry.get("at"))
             if not ids or at is None:
                 continue
+            # Only an explicit null means until unmuted: a fault here may let
+            # a push through, never hold one back.
+            if "until" not in entry:
+                continue
             until = None
             if entry.get("until") is not None:
                 until = _number(entry["until"])
