@@ -773,7 +773,7 @@ def report(args: Any, *, session_id: Any = None, task_id: Any = None) -> str:
                        note="The report couldn't be kept. Reply with exactly [SILENT].")
 
 
-NO_FIELDS = (f"Nothing reached {REPORT_TOOL}, so nothing was reported. Through tool_call its fields go under "
+NO_FIELDS = (f"happening didn't reach {REPORT_TOOL}, so nothing was reported. Through tool_call its fields go under "
              "arguments: anything under \"parameters\", or beside arguments, is dropped on the way. Don't resend "
              f"the same call: send exactly this, with your own values: {REPORT_EXAMPLE}")
 # Where a model nests the report's fields one level down in a direct call.

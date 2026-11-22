@@ -739,6 +739,8 @@ def test_an_approval_goes_out_ahead_of_finished_turn_notices_queued_before_it(pa
     ({"accepted": True, "delivered": True}, "INFO", "delivered=True"),
     ({"accepted": True, "duplicate": True}, "INFO", "as a duplicate, no new push"),
     ({"accepted": True, "delivered": False}, "WARNING", "did not push it: the phone's delivery preferences"),
+    # A relay that doesn't say whether it pushed: a plain "took", not delivered=None.
+    ({"accepted": True}, "INFO", "took "),
 ])
 def test_each_accepted_event_logs_what_the_relay_did_with_it(paired, caplog, answer, level, words):
     relay = paired([])
@@ -752,6 +754,7 @@ def test_each_accepted_event_logs_what_the_relay_did_with_it(paired, caplog, ans
     line = lines[0].getMessage()
     assert lines[0].levelname == level and words in line
     assert client._log_tag(_event()) in line and "try 1" in line and "s queued" in line
+    assert "None" not in line
     # Never the content, nor the event id itself.
     assert "Done." not in caplog.text and "0123456789abcdef" not in caplog.text
 

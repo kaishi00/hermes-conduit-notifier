@@ -1459,12 +1459,14 @@ def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
             return False
         try:
             timeout = max(MIN_SEND_TIMEOUT, min(SEND_TIMEOUT, started + RETRY_BUDGET - now))
+            # A capability read that fails is a try too: the trace counts
+            # every round trip to the relay.
+            tries += 1
             gate = RELAY_GATED.get(str(event.get("type")))
             if gate and not relay_takes(state, gate, timeout=timeout, clock=clock):
                 logger.info("Conduit notification for %s not sent: the relay doesn't take it yet",
                             tag)
                 return False
-            tries += 1
             answer = _send(event, state, timeout=timeout)
         except Exception as error:
             if delay is not None and _worth_retrying(error) and clock() - started + delay <= RETRY_BUDGET:
@@ -1517,8 +1519,10 @@ def _log_accepted(tag: str, answer: Any, tries: int, timing: str) -> None:
         elif answer.get("delivered") is False and not tag.startswith("plugin.hello"):
             reason = str(answer.get("reason") or "the phone's delivery preferences")[:80]
             logger.warning("Conduit relay took %s but did not push it: %s (try %d, %s)", tag, reason, tries, timing)
-        else:
+        elif "delivered" in answer:
             logger.info("Conduit relay took %s (delivered=%s, try %d, %s)", tag, answer.get("delivered"), tries, timing)
+        else:
+            logger.info("Conduit relay took %s (try %d, %s)", tag, tries, timing)
     except Exception:  # noqa: BLE001
         logger.debug("Conduit could not log an accepted push", exc_info=True)
 

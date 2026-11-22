@@ -496,6 +496,7 @@ class LiveActivityReporter:
             # A reload (after pairing again, say) starts unpaused.
             self._paused_until = 0.0
             self._failed = 0
+            self._failing_since = 0.0
             thread, self._thread = self._thread, None
             self._wake.notify_all()
         if thread is not None:
