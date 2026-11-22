@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Optional
 
 from fastapi import HTTPException, Request, Response
 
-from . import core
+from . import core, session_usage
 
 router = core.router
 
@@ -102,10 +102,10 @@ def update_cron_notifications(body: Any) -> Dict[str, Any]:
 
 
 async def _cron_route(profile: Optional[str], response: Response, fn: Callable[[], Dict[str, Any]],
-                      route: str, feature: str = "Cron notifications") -> Dict[str, Any]:
+                      route: str, feature: str = "Cron notifications", limiter: Any = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        return {"ok": True, **(await core._run_scoped(profile, core._limited(_cron_limiter, profile, fn)))}
+        return {"ok": True, **(await core._run_scoped(profile, core._limited(limiter or _cron_limiter, profile, fn)))}
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
@@ -237,6 +237,114 @@ async def put_chat_on_screen(request: Request, response: Response, profile: Opti
         raise
     except Exception as exc:
         raise core._unexpected("on-screen", exc, feature="Reply notifications")
+
+
+# --- Muted chats (chat_mute.py) ---------------------------------------------
+#
+# The user mutes one chat in Conduit (its menu, or a reply's notification) for
+# 15 minutes, an hour, a day or until unmuted. The muted chats live in the
+# profile's conduit-muted-chats.json, read by the plugin's turn-end hooks
+# (agent process), which skip that chat's reply and failure pushes.
+
+CHAT_MUTE_MAX_BODY_BYTES = 8 * 1024
+_chat_mute_module: Any = None
+_chat_mute_lock = threading.Lock()
+
+
+def _chat_mute() -> Any:
+    """chat_mute.py in the plugin's folder, loaded once."""
+    global _chat_mute_module
+    with _chat_mute_lock:
+        if _chat_mute_module is None:
+            path = os.path.join(core._plugin_root(), "chat_mute.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_chat_mute", path)
+            if spec is None or spec.loader is None or not os.path.isfile(path):
+                raise core.TokenError(501, "This plugin install is missing chat_mute.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _chat_mute_module = module
+        return _chat_mute_module
+
+
+def _same_chats(id_lists: list) -> list:
+    """Each list of ``id_lists`` with every session of the chat it names
+    through compression (session_usage._chain), over one read of state.db: a
+    client names a chat by the ids it has, and a compaction since gives it new
+    ones. The chat's first session comes first, so a mute and its unmute share
+    an id however many compactions apart they are and however the plugin's
+    bound on ids cuts them; then the ids asked about, then the rest newest
+    first. A branch, a reset or a subagent's run is a chat of its own, so it
+    never joins. The lists as they are when the store can't be read."""
+    import sqlite3
+
+    lists = [list(ids) for ids in id_lists]
+    path = _cron_home() / "state.db"
+    if not lists or not path.exists():
+        return lists
+    try:
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
+        try:
+            conn.row_factory = sqlite3.Row
+            return [_same_chat(conn, ids) for ids in lists]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return lists
+
+
+def _same_chat(conn: Any, session_ids: list) -> list:
+    firsts: list = []
+    rest: list = []
+    for session_id in session_ids:
+        start = session_usage._row(conn, session_id)
+        if start is None:
+            continue
+        chain = session_usage._chain(conn, start)
+        if chain:
+            firsts.append(chain[0]["id"])
+            rest.extend(row["id"] for row in reversed(chain))
+    found: list = []
+    seen: set = set()
+    for session_id in firsts + list(session_ids) + rest:
+        if session_id not in seen:
+            seen.add(session_id)
+            found.append(session_id)
+    return found
+
+
+def muted_chats() -> Dict[str, Any]:
+    chats = _chat_mute().ChatMuteStore(_cron_home()).chats()
+    expanded = _same_chats([chat["session_ids"] for chat in chats])
+    return {"chats": [{**chat, "session_ids": ids} for chat, ids in zip(chats, expanded)]}
+
+
+def update_muted_chat(body: Any) -> Dict[str, Any]:
+    module = _chat_mute()
+    try:
+        session_ids, seconds = module.parse(body)
+        module.ChatMuteStore(_cron_home()).set_mute(_same_chats([session_ids])[0], seconds)
+    except ValueError as exc:
+        raise core.TokenError(400, str(exc))
+    return muted_chats()
+
+
+# Muted chats have a bucket of their own, so a busy Cron tab can't refuse a
+# mute (with words about cron).
+_chat_mute_limiter = core._MintLimiter(CRON_LIMIT, CRON_WINDOW_S,
+                                       message="Too many muted chat requests; try again shortly")
+
+
+@router.get("/notifications/muted-chats")
+async def get_muted_chats(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    return await _cron_route(profile, response, muted_chats, "status", feature="Muted chats",
+                             limiter=_chat_mute_limiter)
+
+
+@router.put("/notifications/muted-chats")
+async def put_muted_chat(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    body = await core._read_json_body(request, CHAT_MUTE_MAX_BODY_BYTES)
+    return await _cron_route(profile, response, lambda: update_muted_chat(body), "settings", feature="Muted chats",
+                             limiter=_chat_mute_limiter)
 
 
 # --- Confirm prompts Hermes shows on the phone ---------------------------------

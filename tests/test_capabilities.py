@@ -143,6 +143,7 @@ def test_every_capability_names_a_served_route_family():
         "cron-bot-chat-reports": "/cron/notifications",
         "reply-sources": "/notifications/reply-sources",
         "chat-on-screen": "/notifications/on-screen",
+        "chat-mute": "/notifications/muted-chats",
         "predict": "/predict",
         "predict-custom-instructions": "/predict",
         "side-question": "/side-question",

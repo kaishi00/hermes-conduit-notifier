@@ -2243,6 +2243,34 @@ questions, failed turns and calls. There is nothing to set up.
   file that can't be read, or a turn whose hooks don't share the profile's
   home with the dashboard pushes as before. Capability `chat-on-screen`.
 
+## Muted chats (plugin 0.193+)
+
+Mute one chat's notifications from its menu in Conduit (or in Conduit for
+desktop): for 15 minutes, an hour, a day or until you unmute it. The plugin
+keeps the mute and skips the pushes itself, so it holds on every paired
+device, the Apple Watch included. A muted chat sends no reply push, no
+failed-turn push and no automatic alert call for a failed turn, and a
+background task it started finishes without a push. When Hermes compresses
+a long chat into a new session, the mute still covers it; a branch, a reset
+or a subagent's run is a chat of its own. Approvals, questions, calls and
+Pulse still notify, because they wait on you, and scheduled jobs keep their
+own switch (Cron runs, above).
+
+- `GET /api/plugins/conduit_push/notifications/muted-chats?profile=…` lists
+  the muted chats: each one's `session_ids`, `until` (epoch seconds, `null`
+  for until unmuted) and `remaining_s`, so the app counts down on its own
+  clock.
+- `PUT` the same route with `{"session_ids": ["<runtime id>", "<stored id>"],
+  "mute_s": 3600}` mutes a chat (up to 16 ids, a timed mute at most a year);
+  `"mute_s": null` mutes it until unmuted and `"mute_s": 0` unmutes it. A
+  client sends the chat's own ids, never a branch's parent: the plugin adds
+  the chat's other sessions through compression, and both answers list them,
+  newest included, so any id the client has finds the mute.
+- The profile keeps them in `<hermes home>/conduit-muted-chats.json`
+  (private to the user, at most 200 chats, ended mutes dropped on the next
+  write). A file that can't be read mutes nothing, so a fault only lets a
+  push through. Capability `chat-mute`.
+
 ## Reply notifications by source (plugin 0.35+)
 
 If you also talk to Hermes in Desktop, a messaging app or the terminal, you
