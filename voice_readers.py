@@ -1,4 +1,4 @@
-"""Which live voice modes the user lets read each kind of data (#ADD).
+"""Which live voice modes the user lets read each kind of data (notifier #1016).
 
 Conduit asks, per voice mode, before a call may read the user's location,
 health or calendar and phone status: what the call reads goes to the mode's

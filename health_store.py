@@ -594,6 +594,8 @@ class HealthStore:
                     allowed = json.loads(readers)
                 except ValueError:
                     continue
+                if isinstance(allowed, dict):
+                    allowed = allowed.get("readers")
                 if isinstance(allowed, list) and reader in allowed:
                     return device_id
             return None
@@ -914,8 +916,17 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
                 None if detailed is None else json.dumps(detailed), device_id))
     if readers is not None:
         # Kept in meta, beside the schema, so no version bump locks older
-        # plugins out of this store.
-        db.execute("INSERT OR REPLACE INTO meta VALUES(?, ?)", (_readers_key(device_id), json.dumps(readers)))
+        # plugins out of this store. With the batch's time, so an older batch
+        # sent again never brings back a mode the user has since turned off.
+        row = db.execute("SELECT value FROM meta WHERE key=?", (_readers_key(device_id),)).fetchone()
+        try:
+            kept = json.loads(row[0]) if row else None
+        except ValueError:
+            kept = None
+        kept_at = kept.get("at") if isinstance(kept, dict) and isinstance(kept.get("at"), int) else None
+        if kept_at is None or computed_at >= kept_at:
+            db.execute("INSERT OR REPLACE INTO meta VALUES(?, ?)",
+                       (_readers_key(device_id), json.dumps({"readers": readers, "at": computed_at})))
     return {"windows": replaced, "stale_windows": skipped, "events": added, "duplicates": duplicates,
             "skipped_events": len(unusable), "deleted": len(deleted), "removed": removed}
 

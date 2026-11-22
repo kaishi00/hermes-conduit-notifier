@@ -295,23 +295,21 @@ def voice_context(store: LocationStore, device_id: str, reader: str) -> str | No
         now = store.clock()
         if sharing_paused(view["sharing"], now) or now - view["fix"]["at"] > VOICE_CONTEXT_MAX_AGE_S:
             return None
-        _log_voice(store, "now", reader)
         fix = _fix_view(view, now)
+        # The saved place and the area only: the voice provider never gets a
+        # point on the map, as a voice read never does (_spoken).
         parts = []
         if fix.get("at_saved_place"):
             parts.append(f"at {fix['at_saved_place']}")
         if fix.get("area"):
             parts.append(f"in {fix['area']}")
-        coordinates = fix.get("coordinates")
-        if coordinates and not parts:
-            parts.append(f"near {coordinates['lat']}, {coordinates['lon']}")
         if not parts:
             return None
+        _log_voice(store, "now", reader)
         if fix.get("moving"):
             parts.append(f"moving at {fix['moving']}")
         return (f"Where the user is, from their phone, as of {fix['as_of']}: {', '.join(parts)}. Use it when where "
-                "they are matters (weather, anything near them, travel times); don't say it unless it helps, and "
-                "never say coordinates aloud.")
+                "they are matters (weather, anything near them, travel times); don't say it unless it helps.")
     except Exception:  # noqa: BLE001 — a briefing goes on without it
         logger.warning("conduit_location: no location for a call's briefing", exc_info=True)
         return None

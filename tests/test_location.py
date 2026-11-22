@@ -1418,6 +1418,13 @@ def test_a_signed_in_calls_briefing_says_where_the_user_is_at_their_detail(voice
     assert client.get(f"{BASE}/voice-context", params={"reader": "qwen-live"}).json()["context"] == ""
 
 
+def test_a_fix_with_no_place_or_area_gives_the_briefing_no_point_on_the_map(voice):
+    client, store = voice
+    _voice_phone(store, fix=fix(area=None), sharing=sharing(background_precision="precise", voice_readers=["gpt-live"]))
+    assert client.get(f"{BASE}/voice-context", params={"reader": "gpt-live"}).json()["context"] == ""
+    assert store.reads() == [], "nothing said, nothing logged"
+
+
 def test_a_paused_or_old_location_stays_out_of_the_briefing(voice, tmp_path):
     client, store = voice
     phone = _voice_phone(store, fix=fix(), sharing=sharing(voice_readers=["gemini-live"]))

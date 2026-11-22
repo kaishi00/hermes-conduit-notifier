@@ -284,6 +284,17 @@ def test_a_signed_in_call_reads_health_only_for_the_modes_the_phone_names(client
     assert names("grok-live") == []
 
 
+def test_an_older_batch_sent_again_never_brings_back_a_mode_turned_off(client):
+    phone = VoicePhone()
+    old = _batch(voice_readers=["grok-live"])
+    _share(client, phone, old)
+    newer = _batch("batch-0002", computed_at="2026-10-13T13:00:00+02:00", voice_readers=[])
+    assert client.post(f"{BASE}/health/ingest", json=phone.seal(newer)).status_code == 200
+    replayed = client.post(f"{BASE}/health/ingest", json=phone.seal({**old, "batch_id": "batch-0003"}))
+    assert replayed.status_code == 200
+    assert client.get(f"{BASE}/voice-tools", params={"reader": "grok-live"}).json()["tools"] == []
+
+
 def test_wiping_health_forgets_which_modes_could_read_it(client):
     phone = VoicePhone()
     _share(client, phone, _batch(voice_readers=["grok-live"]))
