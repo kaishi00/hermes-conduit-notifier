@@ -1554,11 +1554,13 @@ def test_the_job_list_says_which_of_its_jobs_are_failing(tmp_path):
         {"id": "b2", "name": "Nightly backup", "prompt": "y", "schedule_display": "daily at 10:00",
          "next_run_at": "2026-10-21T10:00:00+00:00", "last_status": "failed", "failure_streak": 3,
          "last_error": "disk full"},
+        # Never run yet: the list can't vouch for it, so it isn't in health.
+        {"id": "c3", "name": "New watcher", "prompt": "z", "schedule_display": "every 1h"},
     ]
     (tmp_path / "cron" / "jobs.json").write_text(json.dumps({"jobs": jobs}))
     keys, health = {}, {}
     text = report.cron_jobs(tmp_path, keys=keys, health=health)
-    assert keys == {"j1": "job::a1", "j2": "job::b2"}
+    assert keys == {"j1": "job::a1", "j2": "job::b2", "j3": "job::c3"}
     assert health == {"job::a1": "", "job::b2": "failed its last 3 runs: disk full"}
     assert text.splitlines()[2] == ("- j2 Nightly backup (daily at 10:00, next 2026-10-21T10:00:00+00:00)"
                                     " [failing: failed its last 3 runs: disk full]: y")

@@ -480,7 +480,8 @@ def cron_jobs(home: Path, others: Sequence[tuple[str, Path]] = (), keys: Optiona
     unless the job is failing (``job_health``), which covers nothing. With
     ``keys``, each job listed gets a key ("j1"), and ``keys`` maps it to the
     job's lasting subject ("job:<profile>:<id>", pulse_picks). With ``health``,
-    that subject maps to what ``job_health`` said of it ("" when it runs fine),
+    that subject maps to what ``job_health`` said of it ("" when its last run
+    went fine; a job that hasn't run yet isn't in it),
     so a pick naming the job as failing can be checked against this list
     (pulse_picks.unbacked_failing)."""
     active = [("", job) for job in _active_jobs(home)]
@@ -500,7 +501,9 @@ def cron_jobs(home: Path, others: Sequence[tuple[str, Path]] = (), keys: Optiona
         if keys is not None and subject:
             key = f"j{len(keys) + 1} "
             keys[key.strip()] = subject
-        if health is not None and subject:
+        # Only a job with a run behind it is known to run fine: one that hasn't
+        # run yet (or an older Hermes that keeps no status) says nothing either way.
+        if health is not None and subject and (failing or job.get("last_status") in JOB_OK):
             health[subject] = failing
         lines.append(f"- {key}{f'[{profile}] ' if profile else ''}{_clip(job.get('name') or job.get('id'), 80)} ({when}"
                      + (f", next {_clip(upcoming, 40)}" if upcoming else "") + ")"
