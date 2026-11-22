@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.193.7 (2026-11-22)
+
+### Fixes
+
+- The note that your dashboard signs everyone out on restart could show up late or not at all if the dashboard's settings couldn't be read yet. It now reflects the settings your dashboard actually started with.
+
 ## 0.193.6 (2026-11-22)
 
 ### New and improved

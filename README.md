@@ -5633,6 +5633,12 @@ gateway (`POST /api/gateway/restart`), then this dashboard:
   `workspace-files`: Hermes has a managed-files policy and couldn't say which
   folder it keeps files in, so the Folder refuses until it can. Both clear
   by themselves, and a new process starts with none.
+- `GET /capabilities` reports `sign_in_ends_on_restart: true` when Hermes'
+  password sign-in is on and the dashboard started without a usable
+  `dashboard.basic_auth.secret` (or `HERMES_DASHBOARD_BASIC_AUTH_SECRET`), so
+  every restart, an update's included, ends every sign-in (plugin 0.193.6+).
+  Conduit says so on its sign-in screen. Setting the secret to a long random
+  value and restarting Hermes clears it.
 - `POST /api/plugins/conduit_push/self/restart` answers
   `{ok, restarting, boot_id, loaded_version, version}` and a second later
   re-executes the dashboard with the command line it started with, keeping its

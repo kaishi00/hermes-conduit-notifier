@@ -78,6 +78,14 @@ keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, 
 # What each integration point feeds in Conduit, for whoever reads an alert.
 # Feature map entries are in hermes-conduit docs/FEATURE_MAP.md.
 notes:
+  password sign-in secret: >-
+    dashboard/api/capabilities.py reports sign_in_ends_on_restart when Hermes' basic dashboard
+    sign-in provider is registered (hermes_cli.dashboard_auth.registry.get_provider("basic"), asked
+    on each request) and, as the dashboard started, neither HERMES_DASHBOARD_BASIC_AUTH_SECRET nor
+    dashboard.basic_auth.secret held a usable secret (unset, or unexpanded shell text), the rule the
+    basic provider applies before falling back to a per-process key. Conduit then says on its
+    sign-in screen why a restart signed the user out (feature map: "Connection failure messages").
+    Without the registry the flag is left out.
   chat usage: >-
     dashboard/api/session_usage.py reads the sessions table's token and cost columns
     (id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
