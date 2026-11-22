@@ -573,9 +573,11 @@ class Asks:
         return PresentStore(self._profile_home(profile))
 
     def _phone(self, profile: str) -> Any:
-        from .phone_store import PhoneStore
+        from .phone_store import store_for
 
-        return PhoneStore(self._profile_home(profile))
+        # The calendar another profile on this host shares with this one
+        # counts too ("Share with this host's other profiles").
+        return store_for(self._profile_home(profile))[0]
 
     def _profile_home(self, profile: str) -> Path:
         return self.root if profile == "default" else self.root / "profiles" / profile

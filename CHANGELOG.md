@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.194.0 (2026-11-22)
+
+### New and improved
+
+- Your calendar, reminders, phone status and health can reach your other Hermes profiles on the same host. Turn on Share with this host's other profiles in Conduit's Calendar & phone or Health settings, and every bot paired with this iPhone can read them, as location already could.
+
 ## 0.193.9 (2026-11-22)
 
 ### Fixes

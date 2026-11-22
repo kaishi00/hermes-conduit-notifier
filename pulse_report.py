@@ -322,10 +322,10 @@ def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]
     way. ``upcoming`` gains every entry in the next EVENT_MATCH_DAYS, listed
     or not."""
     try:
-        from .phone_store import PhoneStore
+        from .phone_store import store_for as phone_store_for
     except Exception:  # noqa: BLE001 — no phone store in this build
         return "", None
-    phone = PhoneStore(home)
+    phone = phone_store_for(home)[0]
     if not phone.exists():
         return "", None
     parts, zone_name = [], None
@@ -663,8 +663,8 @@ def ended_events(home: Path, since: float, now: float) -> list[dict]:
     ended, at most the last MAX_ENDED. None when Conduit shares no calendar
     or it can't be read: the phone's own section says so."""
     try:
-        from .phone_store import PhoneStore
-        phone = PhoneStore(home)
+        from .phone_store import store_for as phone_store_for
+        phone = phone_store_for(home)[0]
         if not phone.exists():
             return []
         with phone.reader("events") as opened:
@@ -1213,8 +1213,8 @@ def slot_on(now: float, zone: tzinfo, value: Any, day: int) -> float:
 def phone_zone(home: Path) -> Optional[str]:
     """The time zone of the phone that synced last, if Conduit shares one."""
     try:
-        from .phone_store import PhoneStore
-        phone = PhoneStore(home)
+        from .phone_store import store_for as phone_store_for
+        phone = phone_store_for(home)[0]
         if not phone.exists():
             return None
         with phone.reader("any") as opened:

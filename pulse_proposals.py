@@ -22,7 +22,8 @@ from typing import Any, Optional
 from . import phone_tool
 from . import pulse_report as report
 from . import pulse_store as store
-from .phone_store import FILE_NAME as PHONE_FILE, LOST_NOTE, PhoneError, PhoneStore, new_change_id
+from .phone_store import LOST_NOTE, PhoneError, PhoneStore, new_change_id
+from .phone_store import store_for as phone_store_for
 
 logger = logging.getLogger(__name__)
 
@@ -268,8 +269,11 @@ def _state(proposal: dict, home: Path, now: float) -> tuple[str, str]:
 
 
 def _phone(profile: str, home: Path) -> Optional[PhoneStore]:
+    """The profile's phone store, or the one another profile on this host
+    shares with it (phone_store.store_for), as Pulse read it."""
     path = phone_home(home, profile)
-    return PhoneStore(path) if path is not None and (path / PHONE_FILE).exists() else None
+    phone = phone_store_for(path)[0] if path is not None else None
+    return phone if phone is not None and phone.exists() else None
 
 
 # One tap -------------------------------------------------------------------------
@@ -291,7 +295,7 @@ def add(pulse_store: store.PulseStore, proposal_id: Any, home: Path, now: float)
     try:
         if path is None:
             raise PhoneError("nothing_shared", "The Hermes profile this suggestion was for is gone")
-        change = PhoneStore(path).add_change(proposal["kind"], proposal["fields"], None, reason=REASON,
+        change = phone_store_for(path)[0].add_change(proposal["kind"], proposal["fields"], None, reason=REASON,
                                              session_title=pulse_store.get("home_title") or "Pulse",
                                              device=proposal["device"], ask=True, change_id=change_id)
     except PhoneError as error:
