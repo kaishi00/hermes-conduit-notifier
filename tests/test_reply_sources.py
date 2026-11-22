@@ -2,6 +2,7 @@
 import os
 import importlib.util
 import pathlib
+import importlib
 import sys
 import types
 
@@ -408,6 +409,27 @@ def test_a_push_a_scripts_run_wrote_with_conduit_notify_still_goes(turn, monkeyp
     assert turn("cli") == []
 
 
+def _hermes_store():
+    """The plugin's hermes_store, imported if no earlier test has yet (the
+    plugin imports it lazily)."""
+    return importlib.import_module(plugin.__name__.rpartition(".")[0] + ".hermes_store")
+
+
+def _kanban_store(monkeypatch, sources):
+    """A session store whose rows carry these sources."""
+    class Store:
+        def get_session(self, session_id):
+            return {"id": session_id, "source": sources[session_id]} if session_id in sources else None
+
+        def close(self):
+            pass
+
+    hermes_store = _hermes_store()
+    monkeypatch.setattr(hermes_store, "open_store", lambda home: Store())
+    monkeypatch.setattr(hermes_store, "can", lambda method: True)
+    monkeypatch.setattr(plugin, "_stored_automation", {})
+
+
 def test_a_kanban_workers_chat_woken_in_the_dashboard_sends_no_push(turn, monkeypatch):
     # A watch's update resumes a Kanban worker's chat in the dashboard's
     # gateway, whose turn says "tui": the session's stored source decides.
@@ -421,7 +443,7 @@ def test_a_kanban_workers_chat_woken_in_the_dashboard_sends_no_push(turn, monkey
         def close(self):
             pass
 
-    hermes_store = sys.modules[plugin.__name__.rpartition(".")[0] + ".hermes_store"]
+    hermes_store = _hermes_store()
     monkeypatch.setattr(hermes_store, "open_store", lambda home: Store())
     monkeypatch.setattr(hermes_store, "can", lambda method: True)
     monkeypatch.setattr(plugin, "_stored_automation", {})
@@ -438,7 +460,7 @@ def test_an_unreadable_session_store_still_pushes(turn, monkeypatch):
     def broken(home):
         raise OSError("locked")
 
-    hermes_store = sys.modules[plugin.__name__.rpartition(".")[0] + ".hermes_store"]
+    hermes_store = _hermes_store()
     monkeypatch.setattr(hermes_store, "open_store", broken)
     monkeypatch.setattr(hermes_store, "can", lambda method: True)
     monkeypatch.setattr(plugin, "_stored_automation", {})
@@ -460,7 +482,7 @@ def test_a_sessions_stored_source_is_read_once_it_is_stored(turn, monkeypatch):
         def close(self):
             pass
 
-    hermes_store = sys.modules[plugin.__name__.rpartition(".")[0] + ".hermes_store"]
+    hermes_store = _hermes_store()
     monkeypatch.setattr(hermes_store, "open_store", lambda home: Store())
     monkeypatch.setattr(hermes_store, "can", lambda method: True)
     monkeypatch.setattr(plugin, "_stored_automation", {})
@@ -477,6 +499,23 @@ def test_a_sessions_stored_source_is_read_once_it_is_stored(turn, monkeypatch):
     assert reads == ["s-1"] * 3 + ["s-2"]
     assert plugin._stored_automation_session("") is False
     assert plugin._stored_automation_session(None) is False
+
+
+def test_a_woken_kanban_workers_chat_shows_no_lock_screen_progress_or_background_push(turn, monkeypatch):
+    # The stored source quiets the whole turn, as the variable does for a script's.
+    _no_hermes_sources(monkeypatch)
+    _kanban_store(monkeypatch, {"worker-1": "kanban", "chat-1": "tui"})
+    started, pushed = [], []
+    monkeypatch.setattr(plugin.live_activity.reporter, "turn_started", started.append)
+    monkeypatch.setattr(plugin, "enqueue", pushed.append)
+    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args: False)
+    monkeypatch.setenv("HERMES_SESSION_SOURCE", "tui")
+    plugin._pre_llm_call(session_id="worker-1", turn_id="t-1", user_message="watch update", platform="tui")
+    plugin._subagent_stop(child_session_id="child-1", parent_session_id="worker-1", child_status="completed")
+    assert started == [] and pushed == []
+    plugin._pre_llm_call(session_id="chat-1", turn_id="t-2", user_message="hi", platform="tui")
+    plugin._subagent_stop(child_session_id="child-2", parent_session_id="chat-1", child_status="completed")
+    assert started == ["chat-1"] and [event["type"] for event in pushed] == ["background_task.finished"]
 
 
 def test_a_scripts_background_task_sends_no_push(turn, monkeypatch):
