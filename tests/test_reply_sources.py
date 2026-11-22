@@ -408,6 +408,74 @@ def test_a_push_a_scripts_run_wrote_with_conduit_notify_still_goes(turn, monkeyp
     assert turn("cli") == []
 
 
+def test_a_kanban_workers_chat_woken_in_the_dashboard_sends_no_push(turn, monkeypatch):
+    # A watch's update resumes a Kanban worker's chat in the dashboard's
+    # gateway, whose turn says "tui": the session's stored source decides.
+    _no_hermes_sources(monkeypatch)
+    sources = {"s-1": "kanban"}
+
+    class Store:
+        def get_session(self, session_id):
+            return {"id": session_id, "source": sources.get(session_id)}
+
+        def close(self):
+            pass
+
+    hermes_store = sys.modules[plugin.__name__.rpartition(".")[0] + ".hermes_store"]
+    monkeypatch.setattr(hermes_store, "open_store", lambda home: Store())
+    monkeypatch.setattr(plugin, "_stored_automation", {})
+    assert turn("tui") == []
+    # A conversation's turn still pushes.
+    sources["s-1"] = "tui"
+    monkeypatch.setattr(plugin, "_stored_automation", {})
+    assert turn("tui") == ["response.ready"]
+
+
+def test_an_unreadable_session_store_still_pushes(turn, monkeypatch):
+    _no_hermes_sources(monkeypatch)
+
+    def broken(home):
+        raise OSError("locked")
+
+    hermes_store = sys.modules[plugin.__name__.rpartition(".")[0] + ".hermes_store"]
+    monkeypatch.setattr(hermes_store, "open_store", broken)
+    monkeypatch.setattr(plugin, "_stored_automation", {})
+    assert turn("tui") == ["response.ready"]
+
+
+def test_a_sessions_stored_source_is_read_once_it_is_stored(turn, monkeypatch):
+    # A session's source never changes, so a stored row is read once either
+    # way; one Hermes hasn't stored yet is asked again next turn.
+    _no_hermes_sources(monkeypatch)
+    rows = {}
+    reads = []
+
+    class Store:
+        def get_session(self, session_id):
+            reads.append(session_id)
+            return rows.get(session_id)
+
+        def close(self):
+            pass
+
+    hermes_store = sys.modules[plugin.__name__.rpartition(".")[0] + ".hermes_store"]
+    monkeypatch.setattr(hermes_store, "open_store", lambda home: Store())
+    monkeypatch.setattr(plugin, "_stored_automation", {})
+    assert plugin._stored_automation_session("s-1") is False
+    assert plugin._stored_automation_session("s-1") is False
+    assert reads == ["s-1", "s-1"]
+    rows["s-1"] = {"id": "s-1", "source": "tui"}
+    assert plugin._stored_automation_session("s-1") is False
+    assert plugin._stored_automation_session("s-1") is False
+    assert reads == ["s-1"] * 3
+    rows["s-2"] = {"id": "s-2", "source": "Kanban "}
+    assert plugin._stored_automation_session("s-2") is True
+    assert plugin._stored_automation_session("s-2") is True
+    assert reads == ["s-1"] * 3 + ["s-2"]
+    assert plugin._stored_automation_session("") is False
+    assert plugin._stored_automation_session(None) is False
+
+
 def test_a_scripts_background_task_sends_no_push(turn, monkeypatch):
     _no_hermes_sources(monkeypatch)
     pushed = []

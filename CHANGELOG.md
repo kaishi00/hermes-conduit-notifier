@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.195.2 (2026-11-22)
+
+### Fixes
+
+- A Kanban worker's chat that a watch or other update woke later could send its reply to your phone as a notification, every few minutes. Those turns stay quiet now, like the worker's first run.
+
 ## 0.195.1 (2026-11-22)
 
 ### Fixes
