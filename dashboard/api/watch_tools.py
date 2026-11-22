@@ -893,7 +893,8 @@ def run_watch_read_chat(grant: _WatchGrant, args: Dict[str, Any], routes=None,
         return {"ok": False, "status": 501, "detail": "Reading chats needs a newer Hermes on this host."}
     response = asyncio.run(asyncio.wait_for(routes.get_session_messages(
         match["session_id"], profile=grant.profile, limit=WATCH_CHAT_PAGE, offset=0, order="latest",
-        include_compacted=True, inline_images=False), WATCH_CHAT_READ_TIMEOUT_S))
+        **core.supported_flags(routes.get_session_messages, {"include_compacted": True, "inline_images": False})),
+        WATCH_CHAT_READ_TIMEOUT_S))
     rows = response.get("messages") if isinstance(response, dict) else None
     rows = rows if isinstance(rows, list) else []
     turns = chat_turns(rows)

@@ -670,3 +670,29 @@ def test_the_compaction_lineage_is_read_from_the_session_store(monkeypatch, tmp_
     assert live.compacted_from("loop-a", {"root"}) is False, "a loop in the store ends the walk"
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path / "missing")
     assert live.compacted_from("third", {"root"}) is None
+
+
+def test_an_outage_is_logged_when_it_starts_and_when_it_ends(reporter, relay, clock, caplog):
+    reporter.turn_started("s-1")
+    reporter.tool_started("s-1", "terminal")
+    relay.failure = OSError("connection reset")
+    with caplog.at_level("DEBUG", logger="hermes.plugins.conduit_push"):
+        clock[0] += live.FIRST_DELAY_S
+        reporter.flush()
+        for _ in range(3):
+            clock[0] += live.BACKOFF_S
+            reporter.flush()
+        assert len(relay.posts) == 4
+        relay.failure = None
+        clock[0] += live.BACKOFF_S
+        reporter.flush()
+    above_debug = [(r.levelname, r.getMessage()) for r in caplog.records if r.levelname != "DEBUG"]
+    assert above_debug[0][0] == "WARNING" and "aren't reaching the relay: connection reset" in above_debug[0][1]
+    assert above_debug[1][0] == "INFO" and f"after 4 failed over {int(4 * live.BACKOFF_S)}s" in above_debug[1][1]
+    assert len(above_debug) == 2, "the failures between are DEBUG"
+    caplog.clear()
+    with caplog.at_level("INFO", logger="hermes.plugins.conduit_push"):
+        reporter.turn_started("s-2")
+        clock[0] += live.FIRST_DELAY_S
+        reporter.flush()
+    assert "again" not in caplog.text, "a send after a good one logs nothing"

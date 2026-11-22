@@ -127,7 +127,8 @@ async def _history_page(request: Request, profile: Optional[str]) -> Dict[str, A
     # caps the page at its own limit.
     try:
         page = await asyncio.wait_for(routes.get_session_messages(
-            session_id, profile=profile, limit=limit, offset=offset, order=body.get("order"), **flags),
+            session_id, profile=profile, limit=limit, offset=offset, order=body.get("order"),
+            **core.supported_flags(routes.get_session_messages, flags)),
             HISTORY_READ_TIMEOUT_S)
     except HTTPException:
         raise

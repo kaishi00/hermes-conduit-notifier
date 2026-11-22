@@ -134,3 +134,19 @@ def test_a_hermes_failure_is_named(monkeypatch, hermes):
     assert response.status_code == 500
     assert response.headers["cache-control"] == "no-store"
     assert "Chat history history-page failed" in response.json()["detail"]
+
+
+def test_a_hermes_without_inline_images_still_answers_the_page(monkeypatch):
+    async def get_session_messages(session_id, profile=None, limit=None, offset=0, order=None,
+                                   include_compacted=False):
+        return {"session_id": session_id, "messages": list(ROWS)}
+
+    sessions = types.ModuleType("hermes_cli.web_routers.sessions")
+    sessions.get_session_messages = get_session_messages
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_routers.sessions", sessions)
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_dashboard", None)
+
+    response = _post({"session_id": "s1", "limit": 120, "offset": 0, "order": "latest",
+                      "include_compacted": True, "inline_images": False})
+    assert response.status_code == 200
+    assert response.json()["messages"] == ROWS
