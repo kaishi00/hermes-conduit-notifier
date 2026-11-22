@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.193.8 (2026-11-22)
+
+### Fixes
+
+- On a damaged Hermes install, Conduit's check of the plugin could fail outright instead of leaving out the sign-in note. It now leaves the note out.
+
 ## 0.193.7 (2026-11-22)
 
 ### Fixes

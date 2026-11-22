@@ -361,3 +361,19 @@ def test_no_password_sign_in_or_no_registry_reports_nothing(monkeypatch):
     monkeypatch.delattr(sys.modules["hermes_cli.dashboard_auth"], "registry")
     monkeypatch.setitem(sys.modules, "hermes_cli.dashboard_auth.registry", None)
     assert "sign_in_ends_on_restart" not in _client().get(f"{BASE}/capabilities").json()
+
+
+def test_a_registry_that_fails_to_import_reports_nothing(monkeypatch):
+    # A broken or partial Hermes install raising something other than ImportError.
+    _fake_basic_sign_in(monkeypatch, basic=True, config={})
+
+    class Exploding(types.ModuleType):
+        def __getattr__(self, name):
+            raise RuntimeError("half-installed")
+
+    monkeypatch.delattr(sys.modules["hermes_cli.dashboard_auth"], "registry")
+    monkeypatch.setitem(sys.modules, "hermes_cli.dashboard_auth", Exploding("hermes_cli.dashboard_auth"))
+    monkeypatch.delitem(sys.modules, "hermes_cli.dashboard_auth.registry")
+    reply = _client().get(f"{BASE}/capabilities")
+    assert reply.status_code == 200
+    assert "sign_in_ends_on_restart" not in reply.json()
