@@ -464,15 +464,17 @@ def test_report_outside_a_watch_run(home, hermes, clock):
 
 def test_a_report_without_saw_still_counts(home, hermes, clock):
     """Hermes refuses a call missing a required argument before the plugin
-    sees it, so only happening is required; a missing saw never drops the
-    call a run owes, and the watch's name is said instead."""
-    assert watches.REPORT_SCHEMA["parameters"]["required"] == ["happening"]
+    sees it, so nothing is required; a missing saw never drops the call a run
+    owes, and the watch's name is said instead."""
+    assert watches.REPORT_SCHEMA["parameters"]["required"] == []
     prompt = watches.run_prompt({"what": "site down", "how": "curl it", "unless": ""})
     assert "every time" in prompt
     # The call shown whole, with both arguments, for a run where it's behind Tool Search
     # (Furina's W21, 2026-11-15: a weak model called it by name, or skipped to [SILENT]).
     assert watches.REPORT_EXAMPLE in prompt and watches.REPORT_EXAMPLE in watches.RUN_NOTE
-    assert "argument is missing" in prompt and "argument is missing" in watches.RUN_NOTE
+    for text in (prompt, watches.RUN_NOTE):
+        assert watches.REPORT_SHAPE in text and watches.REPORT_RETRY in text
+        assert "send the same call once more" not in text
     example = json.loads(watches.REPORT_EXAMPLE.removeprefix("tool_call "))
     assert example["calls"][0]["name"] == watches.REPORT_TOOL
     assert set(example["calls"][0]["arguments"]) == {"happening", "saw"}
@@ -483,6 +485,28 @@ def test_a_report_without_saw_still_counts(home, hermes, clock):
     calling = json.loads(watches.report({"happening": True, "saw": "  "}, session_id=RUN.format(job_id)))
     assert calling["ok"] is True and calling["status"] == "calling", calling
     assert _rang(home)[0]["reason"] == "Your call watch went off: homelab down.", _rang(home)
+
+
+def test_a_report_whose_fields_went_astray_hears_the_call_to_copy(home, hermes, clock):
+    """Furina's report (2026-11-21): step-3.7-flash put the report's fields
+    under "parameters", which tool_call drops, so the report arrived empty,
+    and it resent the same call when Hermes said an argument was missing.
+    With nothing required the empty report reaches the plugin, which says
+    where the fields go and gives the call to copy; fields nested one level
+    down in a direct call are read where they are."""
+    job_id = _homelab(hermes, for_minutes=0)
+    session = RUN.format(job_id)
+    empty = json.loads(watches.report({}, session_id=session))
+    assert empty["ok"] is False and empty["error"] == "no_fields", empty
+    assert watches.REPORT_EXAMPLE in empty["note"] and '"parameters"' in empty["note"]
+    assert "Don't resend the same call" in empty["note"]
+    wrong = json.loads(watches.report({"happening": "maybe"}, session_id=session))
+    assert wrong["error"] == "invalid", "a value that's there but wrong keeps its own answer"
+    for nested in ({"parameters": {"happening": False, "saw": "Inbox quiet."}},
+                   {"arguments": '{"happening": false}'}):
+        quiet = json.loads(watches.report(nested, session_id=session))
+        assert quiet["ok"] is True and quiet["status"] == "quiet", (nested, quiet)
+    assert watches.PROMPT_VERSION == 4, "the new wording reaches existing watches on their next run"
 
 
 def test_conduit_call_user_sends_a_watch_run_to_its_report(home, hermes, clock, monkeypatch):

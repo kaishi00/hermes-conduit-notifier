@@ -19,6 +19,20 @@ checks it). The format is fixed, because Conduit reads it:
 
 - Mute a chat's notifications in Conduit for 15 minutes, an hour, a day or until you unmute it. Its replies and failures stay quiet on every device; approvals and questions still come through.
 
+## 0.192.6 (2026-11-22)
+
+### Fixes
+
+- Pulse no longer says a scheduled job is failing or its script is missing when the job runs fine. Before, a failed file read in a chat could turn into a card asking you to fix a healthy job.
+- Pulse is told to name a scheduled job, reminder or event by its name on its cards. Before, a card could say "j6" in its text or in the message its button sends.
+- Pulse no longer lists Podman commands that Hermes' sandbox stopped before they ran among the failed tool calls.
+
+## 0.192.5 (2026-11-22)
+
+### Fixes
+
+- A call watch on some models could fail every run because its report reached the plugin empty, and then kept resending the same broken call. The run's instructions now show the exact shape, and a report that arrives empty is told how to send it right.
+
 ## 0.192.4 (2026-11-22)
 
 ### Fixes
