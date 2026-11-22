@@ -941,7 +941,10 @@ def _chat_muted(session_id: str) -> bool:
 
 def _compaction_ancestors(session_id: str) -> list[str]:
     """The sessions ``session_id`` continues through compaction, nearest
-    first, read from Hermes' session store; a branch is a new chat, so the
+    first, read from Hermes' session store. Only a compression's continuation
+    counts, by the rule chat usage keeps (dashboard/api/session_usage.py
+    _continues, after hermes_state's _COMPRESSION_CHILD_SQL): a branch, a
+    reset, a subagent's run or a tool's session is a chat of its own, so the
     walk stops there. Empty when the store can't be read."""
     import sqlite3
 
@@ -949,24 +952,44 @@ def _compaction_ancestors(session_id: str) -> list[str]:
     if not path.exists():
         return []
     db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
+    db.row_factory = sqlite3.Row
+    columns = "id, source, parent_session_id, started_at, ended_at, end_reason, model_config"
     try:
         found: list[str] = []
-        current = session_id
+        row = db.execute(f"SELECT {columns} FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        child = dict(row) if row else None
         for _ in range(_LINEAGE_HOPS):
-            row = db.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (current,)).fetchone()
-            parent = row[0] if row else None
-            if not parent or parent in found:
+            parent_id = child and child.get("parent_session_id")
+            if not parent_id or parent_id in found or parent_id == session_id:
                 break
-            ended = db.execute("SELECT end_reason FROM sessions WHERE id = ?", (parent,)).fetchone()
-            if ended and ended[0] == "branched":
+            row = db.execute(f"SELECT {columns} FROM sessions WHERE id = ?", (parent_id,)).fetchone()
+            parent = dict(row) if row else None
+            if parent is None or not _continues_compaction(child, parent):
                 break
-            found.append(parent)
-            current = parent
+            found.append(parent_id)
+            child = parent
         return found
     except sqlite3.Error:
         return []
     finally:
         db.close()
+
+
+def _continues_compaction(child: dict, parent: dict) -> bool:
+    """Whether ``child`` is ``parent``'s compression continuation: the parent
+    ended in compression, and the child is no branch, reset, subagent's run or
+    tool's session (whose model_config markers name their own parent;
+    continuations inherit model_config, so only the parent's id counts)."""
+    if parent.get("end_reason") != "compression" or (child.get("source") or "") == "tool":
+        return False
+    try:
+        config = json.loads(child.get("model_config") or "{}")
+    except (TypeError, ValueError):
+        config = {}
+    config = config if isinstance(config, dict) else {}
+    if parent["id"] in (config.get("_branched_from"), config.get("_reset_from"), config.get("_delegate_from")):
+        return False
+    return (child.get("started_at") or 0) >= (parent.get("ended_at") or 0)
 
 
 def _turn_source(platform: Any, session_id: str = "") -> str | None:

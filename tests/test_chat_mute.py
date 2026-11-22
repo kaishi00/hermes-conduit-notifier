@@ -150,3 +150,17 @@ def test_routes_mute_and_unmute_a_chat(client):
 def test_a_bad_body_is_a_400(client):
     assert client.put(f"{BASE}/notifications/muted-chats", json={"session_ids": ["a"], "mute_s": -5}).status_code == 400
     assert client.put(f"{BASE}/notifications/muted-chats", json=["a"]).status_code == 400
+
+
+def test_a_busy_cron_tab_cant_refuse_a_mute(client, monkeypatch):
+    def full(limiter):
+        def acquire(key, limit=None):
+            raise api.core.TokenError(429, limiter.message)
+        return acquire
+
+    monkeypatch.setattr(api.notifications._cron_limiter, "acquire", full(api.notifications._cron_limiter))
+    response = client.put(f"{BASE}/notifications/muted-chats", json={"session_ids": ["chat-1"], "mute_s": 900})
+    assert response.status_code == 200, "muted chats have their own bucket"
+    monkeypatch.setattr(api.notifications._chat_mute_limiter, "acquire", full(api.notifications._chat_mute_limiter))
+    refused = client.get(f"{BASE}/notifications/muted-chats")
+    assert refused.status_code == 429 and "cron" not in refused.text.lower()

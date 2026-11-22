@@ -102,10 +102,10 @@ def update_cron_notifications(body: Any) -> Dict[str, Any]:
 
 
 async def _cron_route(profile: Optional[str], response: Response, fn: Callable[[], Dict[str, Any]],
-                      route: str, feature: str = "Cron notifications") -> Dict[str, Any]:
+                      route: str, feature: str = "Cron notifications", limiter: Any = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        return {"ok": True, **(await core._run_scoped(profile, core._limited(_cron_limiter, profile, fn)))}
+        return {"ok": True, **(await core._run_scoped(profile, core._limited(limiter or _cron_limiter, profile, fn)))}
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
@@ -280,15 +280,23 @@ def update_muted_chat(body: Any) -> Dict[str, Any]:
     return {"chats": chats}
 
 
+# Muted chats have a bucket of their own, so a busy Cron tab can't refuse a
+# mute (with words about cron).
+_chat_mute_limiter = core._MintLimiter(CRON_LIMIT, CRON_WINDOW_S,
+                                       message="Too many muted chat requests; try again shortly")
+
+
 @router.get("/notifications/muted-chats")
 async def get_muted_chats(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
-    return await _cron_route(profile, response, muted_chats, "status", feature="Muted chats")
+    return await _cron_route(profile, response, muted_chats, "status", feature="Muted chats",
+                             limiter=_chat_mute_limiter)
 
 
 @router.put("/notifications/muted-chats")
 async def put_muted_chat(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     body = await core._read_json_body(request, CHAT_MUTE_MAX_BODY_BYTES)
-    return await _cron_route(profile, response, lambda: update_muted_chat(body), "settings", feature="Muted chats")
+    return await _cron_route(profile, response, lambda: update_muted_chat(body), "settings", feature="Muted chats",
+                             limiter=_chat_mute_limiter)
 
 
 # --- Confirm prompts Hermes shows on the phone ---------------------------------

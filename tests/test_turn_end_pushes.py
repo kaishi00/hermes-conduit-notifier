@@ -1065,20 +1065,54 @@ def test_a_muted_chat_sends_no_reply_or_failure_until_unmuted(pushed, tmp_path, 
     assert _types(pushed) == ["response.ready", "response.ready"]
 
 
-def test_a_muted_chat_stays_muted_after_compaction_but_not_in_a_branch(pushed, tmp_path):
+def _sessions_db(path, rows):
+    """A state.db with the columns the compaction walk reads:
+    (id, parent, end_reason, model_config markers, source, started_at, ended_at)."""
+    import json
     import sqlite3
 
-    db = sqlite3.connect(tmp_path / "state.db")
-    db.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, end_reason TEXT)")
-    db.executemany("INSERT INTO sessions VALUES (?, ?, ?)", [
-        ("root", None, "compression"), ("next", "root", None),
-        ("trunk", None, "branched"), ("branch", "trunk", None),
-    ])
+    db = sqlite3.connect(path / "state.db")
+    db.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, parent_session_id TEXT, started_at REAL, "
+               "ended_at REAL, end_reason TEXT, model_config TEXT)")
+    db.executemany("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?)", [
+        (sid, source, parent, started, ended, reason, json.dumps(markers))
+        for sid, parent, reason, markers, source, started, ended in rows])
     db.commit()
     db.close()
+
+
+def test_a_muted_chat_stays_muted_after_compaction_but_not_in_a_chat_of_its_own(pushed, tmp_path):
+    _sessions_db(tmp_path, [
+        ("root", None, "compression", {}, "cli", 1, 10), ("next", "root", "compression", {}, "cli", 10, 20),
+        ("newest", "next", None, {}, "cli", 20, None),
+        # Ended by a branch, and branches a live chat leaves only as the child's marker.
+        ("trunk", None, "branched", {}, "cli", 1, 10), ("branch", "trunk", None, {}, "cli", 10, None),
+        ("live", None, "compression", {}, "cli", 1, 10),
+        ("marked", "live", None, {"_branched_from": "live"}, "cli", 10, None),
+        ("reset", "live", None, {"_reset_from": "live"}, "cli", 10, None),
+        ("delegate", "live", None, {"_delegate_from": "live"}, "cli", 10, None),
+        ("tool", "live", None, {}, "tool", 10, None),
+        # A continuation inherits its parent's markers: only its own parent's id counts.
+        ("inherits", "live", None, {"_branched_from": "elsewhere"}, "cli", 10, None),
+    ])
     store = plugin.chat_mute.ChatMuteStore(tmp_path)
-    store.set_mute(["root"], None)
-    store.set_mute(["trunk"], None)
-    assert plugin._chat_muted("next")
-    assert not plugin._chat_muted("branch"), "a branch is a new chat"
+    for chat in ("root", "trunk", "live"):
+        store.set_mute([chat], None)
+    assert plugin._chat_muted("next") and plugin._chat_muted("newest"), "compaction keeps the mute"
+    assert plugin._chat_muted("inherits")
+    for own in ("branch", "marked", "reset", "delegate", "tool"):
+        assert not plugin._chat_muted(own), f"{own} is a chat of its own"
     assert not plugin._chat_muted("unrelated")
+
+
+def test_a_muted_chats_background_task_stays_quiet(pushed, tmp_path):
+    _sessions_db(tmp_path, [("old", None, "compression", {}, "cli", 1, 10), ("p", "old", None, {}, "cli", 10, None)])
+    store = plugin.chat_mute.ChatMuteStore(tmp_path)
+    store.set_mute(["old"], 3600)
+    plugin._pre_llm_call(session_id="p", turn_id="t")
+    plugin._on_session_end(session_id="p", turn_id="t", completed=True, failed=False, interrupted=False)
+    _subagent()
+    assert pushed == [], "muted through the chat it continues"
+    store.set_mute(["old"], 0)
+    _subagent(child="c2")
+    assert _types(pushed) == ["background_task.finished"]
