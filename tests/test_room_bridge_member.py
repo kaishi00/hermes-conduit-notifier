@@ -706,10 +706,15 @@ def test_a_failure_goes_back_as_a_fixed_sentence(laifu, hermes):
     # Z.AI's spent coding plan, as Hermes writes it into the failed run (2026-11-22).
     ("HTTP 429: Insufficient balance or no resource package. Please recharge.", OUT_OF_CREDIT),
     ("HTTP 402: Payment Required", OUT_OF_CREDIT),
-    ("You exceeded your current quota, please check your plan and billing details.", OUT_OF_CREDIT),
+    ("HTTP 429: You exceeded your current quota, please check your plan and billing details.", OUT_OF_CREDIT),
+    ("HTTP 400: Your credit balance is too low to access the API.", OUT_OF_CREDIT),
     ("HTTP 429: Rate limit reached for requests", RATE_LIMITED),
     ("HTTP 401: Invalid API key provided: sk-****", KEY_REFUSED),
     ("Traceback (most recent call last)", FAILED),
+    # Only Hermes' "HTTP <status>:" refusal is read, never words elsewhere.
+    ("KeyError: 'billing'", FAILED),
+    ("ValueError: please top up my balance, the room said", FAILED),
+    ("HTTP 500: Internal server error, unauthorized retry", FAILED),
     (None, FAILED),
 ])
 def test_a_providers_refusal_goes_back_as_why_never_its_text(laifu, hermes, error, sentence):

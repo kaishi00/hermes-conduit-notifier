@@ -648,25 +648,30 @@ def _shown(answer: Any, *, home_stopped: bool) -> Optional[dict]:
 
 
 # What a failed run's error says, read for its kind only: Hermes writes the
-# provider's refusal into it ("HTTP 429: Insufficient balance ..."), and the
-# home hears one of these fixed sentences, never the text. Credit comes
-# before rate limits, since providers send a spent balance as a 429 too.
-_FAILURE_KINDS = (
-    (OUT_OF_CREDIT, re.compile(
-        r"insufficient[ _](balance|credit|funds|quota)|out of credit|no resource package|recharge|top[ -]?up"
-        r"|billing|payment required|\bhttp 402\b|credit balance|exceeded your current quota", re.I)),
-    (KEY_REFUSED, re.compile(r"\bhttp 401\b|invalid[ _]api[ _]key|incorrect api key|authentication[ _]failed"
-                             r"|unauthori[sz]ed", re.I)),
-    (RATE_LIMITED, re.compile(r"\bhttp 429\b|rate[ _-]?limit|too many requests", re.I)),
-)
+# provider's refusal into it as "HTTP <status>: <the provider's message>"
+# ("HTTP 429: Insufficient balance ..."), and the home hears one of these
+# fixed sentences, never the text. Only an error that starts that way is
+# read, so a traceback quoting a word like "billing" stays a failed turn.
+# Credit comes before rate limits: providers send a spent balance as a 429.
+_PROVIDER_REFUSAL = re.compile(r"\s*http (\d{3})\b:?(.*)", re.I | re.S)
+_OUT_OF_CREDIT = re.compile(
+    r"\binsufficient[ _](balance|credits?|funds|quota)\b|\bout of credits?\b|\bno resource package\b"
+    r"|\brecharge\b|\btop[ -]?up\b|\bbilling\b|\bpayment required\b|\bcredit balance\b"
+    r"|\bexceeded your current quota\b", re.I)
 
 
 def _failure(error: Any) -> str:
     """The fixed sentence for a failed run's error: why, when it's the model provider's refusal."""
-    if isinstance(error, str):
-        for sentence, pattern in _FAILURE_KINDS:
-            if pattern.search(error[:4096]):
-                return sentence
+    found = _PROVIDER_REFUSAL.match(error[:4096]) if isinstance(error, str) else None
+    if found is None:
+        return FAILED
+    status, said = int(found.group(1)), found.group(2)
+    if status == 402 or (status in (400, 403, 429) and _OUT_OF_CREDIT.search(said)):
+        return OUT_OF_CREDIT
+    if status == 401:
+        return KEY_REFUSED
+    if status == 429:
+        return RATE_LIMITED
     return FAILED
 
 
