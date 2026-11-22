@@ -623,6 +623,12 @@ _sources: "OrderedDict[tuple[str, str], str]" = OrderedDict()
 _sources_lock = threading.Lock()
 
 
+def forget_sources() -> None:
+    """The plugin unloads: a reload reads state.db again."""
+    with _sources_lock:
+        _sources.clear()
+
+
 def _session_source(session_id: str) -> str:
     """The session's ``source`` in Hermes' state.db, or "" when it can't be read."""
     if not session_id:

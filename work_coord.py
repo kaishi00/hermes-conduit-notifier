@@ -532,7 +532,8 @@ def open_questions(store: work_store.Store) -> list[dict]:
         with _open_lock:
             # Kept with the stamp read before: a withdrawal just now changes
             # the registry, so the next call reads it again.
-            _open_kept[key] = (stamp, now + OPEN_QUESTIONS_TTL_S, [dict(row) for row in found])
+            # Its seconds count from the end of the read: a slow one still keeps.
+            _open_kept[key] = (stamp, time.monotonic() + OPEN_QUESTIONS_TTL_S, [dict(row) for row in found])
             _open_kept.move_to_end(key)
             while len(_open_kept) > OPEN_QUESTIONS_KEPT:
                 _open_kept.popitem(last=False)
