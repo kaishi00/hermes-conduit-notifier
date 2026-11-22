@@ -7,7 +7,10 @@ better seen than heard. The tool keeps a card (present_store) that the phone
 picks up on its next exchange, which it runs as soon as it sees the tool in
 the turn and again when the turn ends. Conduit opens the card over the call;
 Hermes says in a sentence that it's there. A card nobody picks up within ten
-minutes is dropped: it belongs to the conversation it was shown in.
+minutes is dropped: it belongs to the conversation it was shown in. A card
+is kept for a call's screen only while a call is live (``calls.in_call``)
+and the message wasn't typed; any other turn's cards are drawn in the chat
+from the tool's answer, and Markdown alone goes in the reply (notifier#1002).
 
 Maps, places, stats, charts, forecasts, comparisons, steps, media, contacts
 and statuses go as rich cards (``cards``, checked against ``card_schema``): Conduit draws them
@@ -146,8 +149,8 @@ SHOWN_NOTE = ("On the user's screen. Say in a sentence that it's there and give 
               "repeat it in your reply.")
 IN_CHAT_NOTE = ("The cards are shown in the chat; Markdown isn't, so put anything else in your reply. Give the "
                 "gist in a sentence or two; don't repeat the cards' details.")
-TYPED_CHAT_NOTE = ("No call screen is open, only the chat, which shows cards but not Markdown, so nothing was "
-                   "shown: write it in your reply instead.")
+TYPED_CHAT_NOTE = ("This turn shows in the chat, not on a call's screen, and the chat draws cards but not Markdown, "
+                   "so nothing was shown: write it in your reply instead.")
 CHAT_NO_CARDS_NOTE = ("This version of Conduit draws no cards in a chat. Put the markdown below in your reply "
                       "instead, as it is or tidied up.")
 NOT_CONDUIT_NOTE = ("This conversation isn't open in Conduit, so cards can't be drawn. Put the markdown below in "
@@ -510,7 +513,9 @@ def _kept_review(raw: dict[str, Any], index: int, session: str, problems: list[s
     if session and reviews.in_workstream(session):
         problems.append(WORKSTREAM_REVIEW_NOTE)
         return None
-    if turn_surface.turn_entry(session) == "spoken":
+    if turn_surface.turn_entry(session) == "spoken" and calls.in_call():
+        # Spoken with no call live (a call's job after the hang-up), the
+        # chat is where it shows, and the review is marked there.
         problems.append(SPOKEN_REVIEW_NOTE)
         return None
     given = raw.get("review")

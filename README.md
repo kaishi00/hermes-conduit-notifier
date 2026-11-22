@@ -3086,6 +3086,13 @@ call. Cards go to the chat, from the tool's answer; Markdown alone answers
 `"error": "typed_chat"`, so Hermes writes it in its reply rather than telling
 the user to look at a screen that shows nothing.
 
+The same goes for any turn while no call is live (0.193.3+), spoken or
+unreported: a message sent with an attachment (Hermes changes its text, so
+Conduit's report can't match it), a Shortcut, a call's job that ends after
+the hang-up. A card is kept for a call's screen only while the call presence
+Conduit renews during a call (or the Watch audio bridge holds) says one is
+live; otherwise nothing would claim it.
+
 ### Map and place cards (plugin 0.45+)
 
 `conduit_show` also takes `cards`: up to 12 maps, places and other cards Conduit draws (four before boards, below)

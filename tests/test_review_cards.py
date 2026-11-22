@@ -170,11 +170,22 @@ def test_a_review_is_shown_only_in_a_typed_chat_or_bot_chat(tool_home, monkeypat
         kwargs["is_room"] = lambda session: True
     if where == "spoken":
         monkeypatch.setattr(tool.turn_surface, "turn_entry", lambda session: "spoken")
+        monkeypatch.setattr(tool.calls, "in_call", lambda: True)
     answer = _call({"cards": [_review()]}, **kwargs)
     assert not answer.get("cards")
     note = {"room": tool.ROOM_REVIEW_NOTE, "workstream": tool.WORKSTREAM_REVIEW_NOTE,
             "spoken": tool.SPOKEN_REVIEW_NOTE, "no host": tool.NO_REVIEWS_NOTE}[where]
     assert note in answer["problems"]
+
+
+def test_a_review_on_a_spoken_turn_with_no_call_live_goes_in_the_chat(tool_home, monkeypatch):
+    # A call's job that ends after the hang-up: the chat is where it shows,
+    # and the review is marked there (notifier#1003 review).
+    monkeypatch.setattr(tool.turn_surface, "turn_entry", lambda session: "spoken")
+    monkeypatch.setattr(tool.calls, "in_call", lambda: False)
+    answer = _call({"cards": [_review()]}, reviews=Host(tool_home))
+    assert answer["ok"] and answer["cards"][0]["review"]["id"]
+    assert tool.SPOKEN_REVIEW_NOTE not in answer.get("problems", [])
 
 
 # --- Bot Mode: one review, one workstream, every round ----------------------------

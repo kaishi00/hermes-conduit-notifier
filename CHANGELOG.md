@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.193.4 (2026-11-22)
+
+### Fixes
+
+- A review your agent shows from a call's job that finishes after you hang up goes in the chat, where you can mark it. Before, it was left out because the request was spoken.
+
 ## 0.193.3 (2026-11-22)
 
 ### Fixes
