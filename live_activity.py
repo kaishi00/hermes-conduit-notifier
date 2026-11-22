@@ -191,6 +191,12 @@ class LiveActivityReporter:
         self._wake = threading.Condition(self._lock)
         # The relay has no Live Activity route: nothing is sent until then.
         self._paused_until = 0.0
+        # An outage of the relay is logged once when it starts and once when
+        # it ends, not once per failed update (one every few seconds while a
+        # turn runs): how many failed, since when (the clock), and the first
+        # error.
+        self._failed = 0
+        self._failing_since = 0.0
         self._thread: threading.Thread | None = None
         # stop() (the plugin was unloaded) ends the thread and keeps a new
         # one from starting until start(); a thread from before a stop()
@@ -377,9 +383,24 @@ class LiveActivityReporter:
                 logger.warning("Conduit Live Activity paused for %d minutes: the relay answered %s",
                                paused_for // 60, status)
             else:
-                logger.info("Conduit Live Activity update not delivered: %s", error)
+                with self._lock:
+                    self._failed += 1
+                    first = self._failed == 1
+                    if first:
+                        self._failing_since = self._clock()
+                if first:
+                    logger.warning("Conduit Live Activity updates aren't reaching the relay: %s "
+                                   "(retrying; logged again once one gets through)", error)
+                else:
+                    logger.debug("Conduit Live Activity update not delivered: %s", error)
             return
         tracked = bool(isinstance(answer, dict) and answer.get("tracked"))
+        with self._lock:
+            failed, self._failed = self._failed, 0
+            down_for = self._clock() - self._failing_since
+        if failed:
+            logger.info("Conduit Live Activity updates reach the relay again, after %d failed over %ds",
+                        failed, max(0, int(down_for)))
         with self._lock:
             turn.tracked = tracked
             turn.retry_at = 0.0
@@ -474,6 +495,7 @@ class LiveActivityReporter:
             self._unsettled.clear()
             # A reload (after pairing again, say) starts unpaused.
             self._paused_until = 0.0
+            self._failed = 0
             thread, self._thread = self._thread, None
             self._wake.notify_all()
         if thread is not None:

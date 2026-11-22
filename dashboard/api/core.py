@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import json
 import logging
 import os
@@ -273,6 +274,30 @@ async def _scoped_acquire(limiter: "_MintLimiter", profile: Optional[str], key: 
     except Exception as exc:
         # A broken scope is the host's failure, named like the routes' own.
         raise _unexpected("profile check", exc, feature="Conduit")
+
+
+# Optional flags a Hermes may not know yet, by the name they're passed under.
+_unknown_flags_logged: set = set()
+
+
+def supported_flags(function: Callable[..., Any], flags: Dict[str, Any]) -> Dict[str, Any]:
+    """``flags`` without the keyword arguments ``function`` doesn't take, so an
+    older Hermes (its get_session_messages without ``inline_images``, say)
+    answers with its own default instead of a TypeError on every call. Each
+    flag it lacks is logged once per process."""
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return flags
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return flags
+    missing = [name for name in flags if name not in parameters]
+    for name in missing:
+        key = f"{getattr(function, '__qualname__', function)}:{name}"
+        if key not in _unknown_flags_logged:
+            _unknown_flags_logged.add(key)
+            logger.warning("Conduit: this Hermes' %s has no %s; calling it without", key.split(":")[0], name)
+    return {name: value for name, value in flags.items() if name not in missing}
 
 
 def _unexpected(route: str, exc: Exception, feature: str = "Gemini Live") -> HTTPException:
