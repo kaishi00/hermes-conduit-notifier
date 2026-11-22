@@ -308,9 +308,10 @@ def parse(reply: Any, gathered: report.Gathered, drawn: Sequence[str] = ()) -> l
         if item is None or item["id"] in answered:
             continue
         answered.add(item["id"])
-        rows.append(with_pick(remembered_row(item, entry), entry, jobs=gathered.jobs, drawn=drawn))
+        rows.append(with_pick(remembered_row(item, entry), entry, jobs=gathered.jobs, drawn=drawn,
+                              health=gathered.jobs_health))
     rows += [{**remembered_row(item, {}), "decision": UNANSWERED} for item in gathered.shown if item["id"] not in answered]
-    found = [with_pick(row, entry, jobs=gathered.jobs, drawn=drawn, shown=shown)
+    found = [with_pick(row, entry, jobs=gathered.jobs, drawn=drawn, shown=shown, health=gathered.jobs_health)
              for row, entry in ((found_row(entry, gathered.chats, gathered.zone, follows=gathered), entry)
                                 for entry in _entries(reply.get("found"))) if row]
     rows += found[:MAX_FOUND]
@@ -340,11 +341,13 @@ def subject_of(row: dict, entry: dict, *, jobs: Optional[dict[str, str]] = None,
 
 
 def with_pick(row: dict, entry: dict, *, jobs: Optional[dict[str, str]] = None, drawn: Sequence[str] = (),
-              shown: Optional[dict[int, dict]] = None) -> dict:
+              shown: Optional[dict[int, dict]] = None, health: Optional[dict[str, str]] = None) -> dict:
     """``row`` with its subject and, when the model brings it up or wrote it
     a line, its pick (pulse_picks.parse, its words the row's), as the
     journal keeps them: what learning brings up that the model didn't is
-    drawn from its pick too."""
+    drawn from its pick too. A pick that calls a job failing while ``health``
+    (the report's job list, by lasting subject) shows it fine is left out
+    (``skip``), not brought up (pulse_picks.unbacked_failing)."""
     row["subject"] = subject_of(row, entry, jobs=jobs, shown=shown)
     if row.get("bring_up") or pulse_picks.clip(entry.get("line"), pulse_picks.LINE_LIMIT):
         if pulse_picks.from_calendar(row["subject"]) and isinstance(entry.get("actions"), list):
@@ -356,6 +359,13 @@ def with_pick(row: dict, entry: dict, *, jobs: Optional[dict[str, str]] = None, 
             pick["line"] = pulse_picks.clip(str(row.get("text") or ""), pulse_picks.LINE_LIMIT) or pick["line"]
             if why:
                 pick["dropped"] = why
+            unbacked = pulse_picks.unbacked_failing(row["subject"], pick, health or {})
+            if unbacked:
+                # The report's own record shows the job running fine. A failed
+                # tool call in a chat is not a failing job, and a card saying
+                # otherwise asks the user to fix what isn't broken.
+                row["skip"] = unbacked
+                return row
             row["pick"] = pulse_picks.dumps(pick)
     return row
 
