@@ -117,7 +117,8 @@ SCHEMA: dict[str, Any] = {
             "markdown": {"type": "string", "maxLength": MAX_CARD_MARKDOWN_CHARS,
                          "description": f"What to show, as Markdown (up to {MAX_CARD_MARKDOWN_CHARS} characters). "
                                         "Leave it out when cards say it all."},
-            "cards": card_schema.tool_parameter("Cards for Conduit to draw, shown above the Markdown.",
+            "cards": card_schema.tool_parameter("Cards for Conduit to draw, shown above the Markdown: an array of "
+                                                "card objects, not a JSON string.",
                                                 {"template": card_templates.TEMPLATE_INPUT}),
             "from_work": {"type": "string",
                           "description": "In a Bot Chat: a workstream's ref (\"W3\") whose update says it showed "
@@ -378,6 +379,9 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     cards = card_schema.normalize_cards(given, problems)
     if args.get("cards") not in (None, []) and not cards:
         _drop_unshown(reviews, kept, [])
+        if any(problem.startswith(CARDS_NOT_JSON_NOTE[:40]) for problem in problems):
+            return {"ok": False, "error": "cards_not_json", "note": CARDS_NOT_JSON_ERROR_NOTE,
+                    "problems": problems[:20], **({"saved": saved} if saved else {})}
         return {"ok": False, "error": "invalid_cards", "note": INVALID_CARDS_NOTE, "problems": problems[:20],
                 **({"saved": saved} if saved else {})}
     if saved and not cards and not (isinstance(args.get("markdown"), str) and args["markdown"].strip()):
@@ -701,6 +705,23 @@ def _review_decision(raw: Any, where: str, problems: list[str]) -> tuple[dict[st
 # How deep _cards_unwrapped opens wrappers: past this the cards are refused.
 _MAX_CARD_WRAPS = 8
 
+CARDS_NOT_JSON_NOTE = ("cards: sent as a JSON string that doesn't parse ({error}, near: {near}), nothing shown. "
+                       "Send cards as an array of card objects, not a string. Quotes, apostrophes and accents "
+                       "are fine as they are; check that every {{ and [ is closed")
+CARDS_NOT_JSON_ERROR_NOTE = ("No card was shown: cards came as a JSON string that doesn't parse (its problems say "
+                             "where). Send cards as an array of card objects, not a string, and keep the text as "
+                             "written: quotes, apostrophes and accents need no change.")
+_NEAR_CHARS = 40
+
+
+def _not_json_note(text: str, error: json.JSONDecodeError) -> str:
+    """Where a cards string stops parsing, for the model to fix that spot
+    instead of guessing: Angelos blamed French quotes and stripped every
+    apostrophe and accent, when a } was missing (2026-11-22)."""
+    near = text[max(0, error.pos - _NEAR_CHARS):error.pos + _NEAR_CHARS].replace("\n", " ")
+    return CARDS_NOT_JSON_NOTE.format(error=f"{error.msg} at character {error.pos}", near=json.dumps(near, ensure_ascii=False))
+
+
 CARD_WRAPS_NOTE = ("cards: wrapped more than {depth} deep (lists, JSON strings or {{\"cards\": ...}} "
                    "inside each other), the cards inside left out; send them as one list")
 
@@ -721,6 +742,10 @@ def _cards_unwrapped(given: Any, problems: list[str] | None = None, depth: int =
     if _is_card_json(given):
         try:
             given = json.loads(given)
+        except json.JSONDecodeError as error:
+            if problems is not None:
+                problems.append(_not_json_note(given, error))
+            return given
         except (ValueError, RecursionError):
             return given
     if isinstance(given, dict):
