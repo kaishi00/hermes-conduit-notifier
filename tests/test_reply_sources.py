@@ -518,6 +518,19 @@ def test_a_woken_kanban_workers_chat_shows_no_lock_screen_progress_or_background
     assert started == ["chat-1"] and [event["type"] for event in pushed] == ["background_task.finished"]
 
 
+def test_a_woken_kanban_workers_failed_turn_sends_no_failure_push(turn, monkeypatch):
+    _no_hermes_sources(monkeypatch)
+    _kanban_store(monkeypatch, {"worker-1": "kanban", "chat-1": "tui"})
+    pushed = []
+    monkeypatch.setattr(plugin, "enqueue", pushed.append)
+    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args: False)
+    monkeypatch.setenv("HERMES_SESSION_SOURCE", "tui")
+    plugin._on_session_end(session_id="worker-1", turn_id="t-1", completed=False, interrupted=False, platform="tui")
+    assert pushed == []
+    plugin._on_session_end(session_id="chat-1", turn_id="t-2", completed=False, interrupted=False, platform="tui")
+    assert [event["type"] for event in pushed] == ["turn.failed"]
+
+
 def test_a_scripts_background_task_sends_no_push(turn, monkeypatch):
     _no_hermes_sources(monkeypatch)
     pushed = []

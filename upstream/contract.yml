@@ -104,8 +104,8 @@ notes:
     names, issue 945) since Hermes'
     2026-11-18 canary removed SessionDB (issues 883-897), and SessionDB on a release before it. It
     feeds the session titles that tell a Bot Chat (its step budget, board and coordination), cron
-    reports shown in a Bot Chat, voice calls' rows and tags, room chat cleanup and workstream
-    transcripts. A missing repository verb turns its feature off or fails its route.
+    reports shown in a Bot Chat, voice calls' rows and tags, room chat cleanup, workstream
+    transcripts and the stored source that keeps a woken Kanban worker's turns quiet (automation turns). A missing repository verb turns its feature off or fails its route.
   chat close hooks: >-
     tui_gateway's _finalize_session says a chat closed with on_session_end (no turn_id) and then
     on_session_finalize. The plugin's _on_session_finalize ends a turn still running there as
