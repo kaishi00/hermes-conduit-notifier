@@ -1553,6 +1553,24 @@ def test_a_signed_in_call_reads_the_phone_only_for_the_modes_it_names(client):
         assert bad.status_code == 400, tool_name
 
 
+def test_a_signed_in_calls_phone_briefing_is_logged_when_it_says_something(client, caplog):
+    http = client.http
+    handset = Phone()
+    handset.accept(http.post(f"{BASE}/phone/key", json=handset.key_request()).json())
+    now = datetime.now(timezone.utc).isoformat()
+    batch = _batch(sent_at=now, sharing=_sharing(voice_readers=["grok-live"]),
+                   status={"at": now, "battery": 0.4, "carplay": True})
+    assert http.post(f"{BASE}/phone/ingest", json=handset.seal(batch)).status_code == 200
+    with caplog.at_level("INFO"):
+        context = http.get(f"{BASE}/voice-context", params={"reader": "grok-live"}).json()["context"]
+    assert "40% battery" in context
+    assert "Conduit signed-in voice context: phone status for grok-live" in caplog.text
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        assert http.get(f"{BASE}/voice-context", params={"reader": "gemini-live"}).json()["context"] == ""
+    assert "signed-in voice context" not in caplog.text
+
+
 def test_body_caps(client):
     for route, cap in (("ingest", api.phone_data.PHONE_MAX_INGEST_BODY_BYTES), ("exchange", api.phone_data.PHONE_MAX_EXCHANGE_BODY_BYTES),
                        ("key", api.phone_data.PHONE_MAX_KEY_BODY_BYTES)):
@@ -2704,3 +2722,25 @@ def test_a_newer_plugins_store_in_another_profile_isnt_read(home):
         db.execute("UPDATE meta SET value='99' WHERE key='schema'")
     assert phone.store_for(home.path)[1] is None
     assert tool.calendar_available() is False
+
+
+def test_a_re_keyed_device_keeps_another_profiles_changes_in_view(home):
+    store, handset = _work_shares(home)
+    shared = phone.store_for(home.path, clock=lambda: NOW)[0]
+    change = shared.add_change("add_reminder", {"title": "Milk"})
+    assert [item["id"] for item in shared.changes()] == [change["id"]]
+    # The phone sets up again: its sharing waits on the next batch, the change stays in view.
+    reset = Phone()  # the same device with a new key
+    reset.accept(store.register_key(reset.key_request()))
+    [lost] = shared.changes()
+    assert lost["id"] == change["id"] and lost["state"] == "lost"
+
+
+def test_a_shared_store_picks_a_voice_reader_only_among_devices_sharing_out(home):
+    store, _ = _work_shares(home)  # the iPhone shares with other profiles, no voice mode
+    ipad = Phone(device_id="ipad-installation-2", name="Eric's iPad")
+    ipad.accept(store.register_key(ipad.key_request()))
+    store.ingest(ipad.seal(_batch(batch_id="batch-ipad", sharing=_sharing(other_profiles=False, voice_readers=["gpt-live"]))))
+    assert store.voice_reader_device("gpt-live") == "ipad-installation-2", "its own profile reads the iPad"
+    assert phone.store_for(home.path)[0].voice_reader_device("gpt-live") is None, "the iPad doesn't share out"
+

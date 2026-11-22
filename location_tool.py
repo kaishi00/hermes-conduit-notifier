@@ -252,10 +252,12 @@ def voice_parameters() -> dict[str, Any]:
             "required": ["action"]}
 
 
-def voice_handle(args: Any, *, device_id: str, store: LocationStore, provider: str = "") -> dict[str, Any]:
+def voice_handle(args: Any, *, device_id: str, store: LocationStore, provider: str = "",
+                 profile: str = "") -> dict[str, Any]:
     """The same read for a live voice call on one device, which sees only
     the location that device shared (its id, never another device). Logged
-    like any read, as a voice call."""
+    like any read, as a voice call; ``profile``: the profile reading another
+    one's store, named in the title as the agent's reads are."""
     try:
         wanted = args if isinstance(args, dict) else {}
         action = wanted.get("action")
@@ -264,7 +266,7 @@ def voice_handle(args: Any, *, device_id: str, store: LocationStore, provider: s
         view = store.snapshot(device_id)
         if view is None:
             return _spoken(_nothing_shared())
-        _log_voice(store, action, provider)
+        _log_voice(store, action, provider, profile)
         now = store.clock()
         if sharing_paused(view["sharing"], now):
             return {"ok": False, "error": "paused",
@@ -283,7 +285,7 @@ def voice_handle(args: Any, *, device_id: str, store: LocationStore, provider: s
 VOICE_CONTEXT_MAX_AGE_S = 6 * 3600.0
 
 
-def voice_context(store: LocationStore, device_id: str, reader: str) -> str | None:
+def voice_context(store: LocationStore, device_id: str, reader: str, profile: str = "") -> str | None:
     """Where the user is, as one line for the start of a signed-in voice call
     whose mode the user lets read location (voice_readers): the latest fix of
     ``device_id`` at the detail they share. None when paused, off, or too old.
@@ -305,7 +307,7 @@ def voice_context(store: LocationStore, device_id: str, reader: str) -> str | No
             parts.append(f"in {fix['area']}")
         if not parts:
             return None
-        _log_voice(store, "now", reader)
+        _log_voice(store, "now", reader, profile)
         if fix.get("moving"):
             parts.append(f"moving at {fix['moving']}")
         return (f"Where the user is, from their phone, as of {fix['as_of']}: {', '.join(parts)}. Use it when where "
@@ -776,9 +778,12 @@ _VOICE_TITLES = {"qwen-live": "Qwen Live call", "gemini-live": "Gemini Live call
                  "local-live": "Local Live call"}
 
 
-def _log_voice(store: LocationStore, action: str, provider: str) -> None:
+def _log_voice(store: LocationStore, action: str, provider: str, profile: str = "") -> None:
     try:
-        store.log_read(action, "", _VOICE_TITLES.get(provider, "Voice call"))
+        title = _VOICE_TITLES.get(provider, "Voice call")
+        if profile:
+            title = f"{location_profiles.label(profile)}: {title}"
+        store.log_read(action, "", title)
     except Exception:  # noqa: BLE001 — the read still answers
         logger.warning("conduit_push: could not log a location read", exc_info=True)
 
