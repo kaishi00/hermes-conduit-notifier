@@ -1607,3 +1607,133 @@ def test_a_sessions_source_is_read_once(monkeypatch, tmp_path):
         conn.execute("INSERT INTO sessions VALUES ('sess-2', 'a2a', '')")
     assert loop._session_source("sess-1") == "a2a", "kept"
     assert loop._session_source("sess-2") == "a2a", "one not found is read again"
+
+
+# A message the user writes over an open question (issue 3105)
+
+class _Agent:
+    def __init__(self, steers=()):
+        self._pending_steer_parts = [(None, text) for text in steers]
+        self._pending_steer = "\n".join(steers) or None
+
+    def steer(self, text):
+        self._pending_steer_parts.append((None, text))
+        self._pending_steer = "\n".join(part for _, part in self._pending_steer_parts)
+
+
+def _app_gateway(monkeypatch, record, busy_mode="steer"):
+    """Hermes' app gateway as the loop reads it: the chat's record on this
+    thread, the sessions it's listed under, and server_requests.cancel,
+    which here lets Hermes' own prompt return as the real one does."""
+    cancelled = []
+    released = threading.Event()
+    server = types.ModuleType("tui_gateway.server")
+    server._sessions = {"sid-1": record}
+    server._load_busy_input_mode = lambda: busy_mode
+    requests = types.ModuleType("tui_gateway.server_requests")
+
+    def cancel(sid, reason="interrupted", *, method=None):
+        cancelled.append((sid, reason, method))
+        released.set()
+        return 1
+
+    requests.cancel = cancel
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", server)
+    monkeypatch.setitem(sys.modules, "tui_gateway.server_requests", requests)
+    monkeypatch.setattr(loop.turn_surface, "current_session", lambda: record)
+
+    def original(args):
+        released.wait(5)
+        return json.dumps({"responses": [], "outcome": "cancelled"})
+
+    return original, cancelled
+
+
+def test_a_message_written_over_a_question_withdraws_it(monkeypatch):
+    fake = _FakeState([])
+    _install(fake)
+    monkeypatch.setattr(loop, "CALL_ANSWER_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(loop, "_poll_delay", lambda polls: 30.0)
+    agent = _Agent()
+    record = {"agent": agent}
+    original, cancelled = _app_gateway(monkeypatch, record)
+    threading.Timer(0.2, agent.steer, args=("Actually, let's do something else",)).start()
+
+    started = time.monotonic()
+    result = json.loads(loop.middleware(**_kwargs(original, _batch_args())))
+    assert time.monotonic() - started < 5
+    assert result["outcome"] == "cancelled"
+    assert result["notice"] == loop.SUPERSEDED_NOTICE
+    assert [row["status"] for row in result["responses"]] == ["unanswered", "unanswered"]
+    # Hermes' own card goes for every client, and the phone's card with it.
+    assert cancelled == [("sid-1", "superseded", "clarify")]
+    deadline = time.monotonic() + 2
+    while not fake.cancelled_ids and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert fake.cancelled_ids == [fake.enqueued[0]["decision"]["request_id"]]
+
+
+def test_a_steer_waiting_before_the_question_doesnt_withdraw_it(monkeypatch):
+    fake = _FakeState([{"status": "pending"}, {"status": "answered", "answers": {"q1": "staging", "q2": ["unit"]}}])
+    _install(fake)
+    record = {"agent": _Agent(["sent during an earlier tool"])}
+    original, cancelled = _app_gateway(monkeypatch, record)
+    monkeypatch.setattr(loop, "_poll_delay", lambda polls: 0.01)
+
+    result = json.loads(loop.middleware(**_kwargs(original, _batch_args())))
+    assert result["outcome"] == "submitted"
+    # The phone's answer won: Hermes' own card is withdrawn as answered elsewhere.
+    assert cancelled == [("sid-1", "resolved", "clarify")]
+
+
+def test_a_queued_message_withdraws_it_only_under_the_queue_busy_mode(monkeypatch):
+    fake = _FakeState([])
+    _install(fake)
+    monkeypatch.setattr(loop, "CALL_ANSWER_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(loop, "_poll_delay", lambda polls: 30.0)
+    record = {"agent": _Agent()}
+    original, cancelled = _app_gateway(monkeypatch, record, busy_mode="queue")
+    threading.Timer(0.2, lambda: record.__setitem__("queued_prompt", {"text": "next"})).start()
+
+    result = json.loads(loop.middleware(**_kwargs(original, _batch_args())))
+    assert result["notice"] == loop.SUPERSEDED_QUEUED_NOTICE
+    assert cancelled == [("sid-1", "superseded", "clarify")]
+
+    # Under steer, a message the user queued themselves runs after the turn.
+    writes = loop._UserWrites()
+    monkeypatch.setattr(sys.modules["tui_gateway.server"], "_load_busy_input_mode", lambda: "steer")
+    record["queued_prompts"] = [{"text": "after"}]
+    assert writes.wrote() == ""
+
+
+def test_a_chat_without_an_app_gateway_record_is_never_written_in(monkeypatch):
+    monkeypatch.setattr(loop.turn_surface, "current_session", lambda: None)
+    assert loop._UserWrites().wrote() == ""
+
+
+def test_a_relay_answer_cancels_the_messaging_gateways_own_question(monkeypatch):
+    fake = _FakeState([{"status": "pending"}, {"status": "answered", "answer": "Red"}])
+    _install(fake)
+    monkeypatch.setattr(loop, "_poll_delay", lambda polls: 0.01)
+    monkeypatch.setattr(loop.turn_surface, "current_session", lambda: None)
+    gateway = types.ModuleType("tools.clarify_gateway")
+    gateway.CANCELLED = "\x00cancelled"
+    gateway._entries = {"old": types.SimpleNamespace(question="Which color?")}
+    resolved = []
+    gateway.get_pending = lambda clarify_id: gateway._entries.get(clarify_id)
+    gateway.resolve_gateway_clarify = lambda clarify_id, response: resolved.append((clarify_id, response)) or True
+    monkeypatch.setitem(sys.modules, "tools.clarify_gateway", gateway)
+    release = threading.Event()
+
+    def original(args):
+        # The gateway registers its question as the original runs.
+        gateway._entries["new"] = types.SimpleNamespace(question="Which color?")
+        gateway._entries["other"] = types.SimpleNamespace(question="Something else?")
+        release.wait(5)
+        return "never used"
+
+    result = loop.middleware(**_kwargs(original, {"question": "Which color?", "choices": ["Red", "Blue"]}))
+    release.set()
+    assert json.loads(result)["user_response"] == "Red"
+    # Only the question this call registered: one open before it is another's.
+    assert resolved == [("new", "\x00cancelled")]

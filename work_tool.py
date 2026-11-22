@@ -5793,7 +5793,7 @@ def _answer_for_another_chat(home: Path, args: dict, session_id: Any, chat: str)
 
 def _app_answer(home: Path, item: str, action: str, body: Optional[dict] = None, note: str = "") -> dict:
     """The user's answer on a question the bot asked them (work_propose),
-    tapped on its card: Approve or Decline, or ``answer`` with the body's
+    tapped on its card: Approve or Decline, ``dismiss`` (no answer), or ``answer`` with the body's
     ``choice``, recorded as their own. It goes to the chat that asked as a
     work update that is theirs, so it acts on it under Ask Me First too: the
     Bot Chat, or the other chat the question was asked in. A Bot Chat's no
@@ -5801,6 +5801,8 @@ def _app_answer(home: Path, item: str, action: str, body: Optional[dict] = None,
     body = body if isinstance(body, dict) else {}
     if action == work_coord.APP_PICK:
         answer, choice = "answered", " ".join(str(body.get("choice") or "").split())
+    elif action == work_coord.APP_DISMISS:
+        answer, choice = "dismissed", ""
     else:
         answer, choice = work_coord.APP_ANSWERS.get(action), ""
     if answer is None:

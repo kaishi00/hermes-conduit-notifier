@@ -563,7 +563,7 @@ def test_a_question_is_answered_with_a_tap_and_a_yes_is_the_users_turn(on, herme
     listed = work.app_list(on.home)
     assert listed["counts"]["questions"] == 1 and listed["counts"]["needs_you"] == 0
     shown = next(item for item in listed["coordination"]["items"] if item["id"] == first)
-    assert shown["actions"] == ["approve", "decline"]
+    assert shown["actions"] == ["approve", "decline", "dismiss"]
     assert work.app_act(on.home, first, "stop")["error"] == "unknown_action"
     assert work.app_act(on.home, "P9", "approve")["error"] == "no_such_work"
     done = work.app_act(on.home, "p1", "approve")
@@ -795,7 +795,7 @@ def test_another_chat_asks_with_choices_and_the_tapped_answer_goes_back_there(on
                                   "choices": ["Roll back", "Keep diagnosing"]}, session_id=OTHER_CHAT)
     assert again["error"] == "already_asked"
     card = coord.question_card(row)
-    assert card["chat"] == OTHER_CHAT and card["actions"] == ["answer"]
+    assert card["chat"] == OTHER_CHAT and card["actions"] == ["answer", "dismiss"]
     assert card["choices"] == ["Roll back", "Keep diagnosing"] and card["recommended"] == "Roll back"
     shown = next(entry for entry in work.app_list(on.home)["coordination"]["items"] if entry["id"] == item)
     assert shown["chat"] == OTHER_CHAT
@@ -811,6 +811,34 @@ def test_another_chat_asks_with_choices_and_the_tapped_answer_goes_back_there(on
     kept, = on.outbox_rows("", "line_answer")
     assert kept["target"] == OTHER_CHAT
     assert on.proposal(item)["status"] == "answered" and on.proposal(item)["answer"] == "Keep diagnosing"
+
+
+def test_a_question_dismissed_without_an_answer_is_told_as_no_answer(on, hermes, home, monkeypatch):
+    """Dismiss takes an open question off the user's list with no answer
+    (issue 3105): the chat that asked is told it was dismissed, never a
+    pick, and a second tap finds it closed."""
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 3600.0)
+    out = call("work_propose", {"text": "Dinner earlier or later?", "choices": ["Earlier", "Later"]},
+               session_id=OTHER_CHAT)
+    item = out["id"]
+    done = work.app_act(on.home, item, "dismiss")
+    assert done == {"ok": True, "id": item, "status": "dismissed"}
+    line, = batched()
+    assert line.startswith(f"- {item}: the user dismissed it just now without answering")
+    assert "isn't their yes, no or pick" in line and line.endswith("You asked: «Dinner earlier or later?»")
+    row = on.proposal(item)
+    assert row["status"] == "dismissed" and row["answer"] == ""
+    assert coord.question_card(row)["actions"] == []
+    assert work.app_act(on.home, item, "dismiss")["error"] == "not_now"
+    # The Bot Chat's own question it waited on: kept on its board, no turn.
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    start()
+    woken(home)
+    second = call("work_propose", {"text": "Stop W1.", "ref": "W1"})["id"]
+    work._wakes.clear()
+    assert work.app_act(on.home, second, "dismiss")["status"] == "dismissed"
+    assert batched() == []
+    assert f"- {second} (about W1), dismissed by the user just now" in work.digest(BOT_CHAT)
 
 
 def test_going_ahead_under_auto_and_a_no_to_it_is_told(on, hermes, home, monkeypatch):
@@ -878,7 +906,7 @@ def test_a_clarify_that_ran_out_is_kept_and_answered_in_words_or_with_a_choice(o
     assert "P1, P2" in kept["notice"] and "Needs you" in kept["notice"]
     first, second = on.proposal("P1"), on.proposal("P2")
     assert first["source"] == "clarify" and first["source_id"] == "conduit-push-abc" and first["chat"] == OTHER_CHAT
-    assert coord.question_card(first)["actions"] == ["answer"] and coord.question_card(second)["actions"] == ["answer"]
+    assert coord.question_card(first)["actions"] == ["answer", "dismiss"] and coord.question_card(second)["actions"] == ["answer", "dismiss"]
     assert work.app_act(on.home, "P2", "answer", {"choice": "Ship it Friday"})["answer"] == "Ship it Friday"
     batched()
     # Answered, submitted or a refused unsealed answer: nothing is kept.
@@ -911,7 +939,7 @@ def test_a_reworded_question_takes_its_new_choices_and_a_peers_chat_asks_nothing
     row = on.proposal(item)
     assert work.work_store.proposal_choices(row) == ["Restart now", "Wait for tonight"]
     assert row["recommended"] == "Wait for tonight" and row["going_ahead"]
-    assert coord.question_card(row)["actions"] == ["answer"]
+    assert coord.question_card(row)["actions"] == ["answer", "dismiss"]
     assert out["going_ahead"] and "«Wait for tonight»" in out["note"]
     # A reword that only adds evidence keeps its choices, recommended one and going ahead.
     kept = call("work_propose", {"replaces": item, "text": "How should the watcher come back? It crashed twice."},
