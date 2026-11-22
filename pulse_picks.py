@@ -486,8 +486,9 @@ def resolve(pulse_store: Any, pick: Mapping[str, Any], subject: str, now: float,
             closing: Collection[int] = ()) -> tuple[str, Optional[int], str]:
     """What a pick does, checked against the store: (NEW, None, why),
     (UPDATE, card, ""), (CLOSE, card, "") or (DROP, card or None, why). An
-    update to a card that's gone, closed or about something else is a new
-    card; a close of one is nothing; a new incident about a ``subject`` that
+    update to a card that's gone, closed or about something else is read as
+    a new incident (below: held, folded into its subject's open card, or a
+    new card); a close of one is nothing; a new incident about a ``subject`` that
     has a card open from the last HOLD_S is held for that card (DROP, HOLD):
     only an update by the card's id changes it. One about a subject whose
     open card is older updates that card (UPDATE, card, OPEN_SUBJECT), so a

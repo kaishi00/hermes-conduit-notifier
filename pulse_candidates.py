@@ -211,8 +211,9 @@ def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> s
     cards = [card for card in pulse_store.touched_cards(RECENT_CARDS)
              if card["kind"] in RECENT_KINDS and max(card["created_at"], card.get("updated_at") or 0) >= now - RECENT_S]
     marks = pulse_store.done_marks([card["id"] for card in cards])
-    # A card that can hold a new pick about its subject (pulse_picks.resolve)
-    # is always listed, past the budget, so a pick can always name it.
+    # A card listed here that a new pick about its subject would go to
+    # (pulse_picks.resolve: held, or updated once past the hold) is kept
+    # past the budget, so a pick can name it.
     subjects = sorted({str(card.get("subject") or "") for card in cards} - {""})
     holding = {int(card["id"]) for card in pulse_store.open_cards_with(subjects, 0.0)}
     lines, used, extra = [], 0, 0

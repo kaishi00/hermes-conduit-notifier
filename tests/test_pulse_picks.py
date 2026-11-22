@@ -422,12 +422,14 @@ def test_a_card_that_can_hold_a_pick_is_listed_past_the_recent_budget(tmp_path):
     pulse_store = fresh(tmp_path)
     now = 30 * 86400.0
     holding = card(pulse_store, subject="job:default:41", created_at=now - 6 * 3600)
+    # One past the day's hold still takes a pick about its subject (an update, OPEN_SUBJECT).
+    older = card(pulse_store, subject="job:default:42", created_at=now - 3 * 86400)
     for n in range(40):
         pulse_store.add_cards([{"kind": "noticed", "item_id": None, "level": "screen", "title": "x",
                                 "news": f"Something else entirely, number {n}, " + "words " * 30, "why": "x",
                                 "created_at": now - 3600 + n, "topic": "other"}])
     text = pulse.candidates.recent_section(pulse_store, None, now)
-    assert f"pc_{holding} " in text
+    assert f"pc_{holding} " in text and f"pc_{older} " in text
     assert "number 0," not in text  # the budget still cuts the others
     assert len(text) <= len(pulse.candidates.RECENT_TITLE) + 1 + pulse.candidates.RECENT_BUDGET \
         + pulse.candidates.HOLDING_BUDGET

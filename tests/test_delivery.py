@@ -57,6 +57,7 @@ class _Relay:
         self.statuses = list(statuses)
         self.event_ids = []
         self.delay = 0.0
+        self.answer = {"accepted": True}  # what a 2xx says
         self.meta = list(meta or [404])
         self.meta_reads = []
         relay = self
@@ -86,7 +87,7 @@ class _Relay:
                     # Something in front of the relay: no JSON error body.
                     status, answer = 403, b""
                 else:
-                    answer = json.dumps({"accepted": True} if status < 300 else {"error": "nope"}).encode()
+                    answer = json.dumps(relay.answer if status < 300 else {"error": "nope"}).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(answer)))
@@ -732,3 +733,46 @@ def test_an_approval_goes_out_ahead_of_finished_turn_notices_queued_before_it(pa
     client._events.join()
 
     assert sent == ["approval.needed", "response.ready", "response.ready"]
+
+
+@pytest.mark.parametrize("answer, level, words", [
+    ({"accepted": True, "delivered": True}, "INFO", "delivered=True"),
+    ({"accepted": True, "duplicate": True}, "INFO", "as a duplicate, no new push"),
+    ({"accepted": True, "delivered": False}, "WARNING", "did not push it: the phone's delivery preferences"),
+    # A relay that doesn't say whether it pushed: a plain "took", not delivered=None.
+    ({"accepted": True}, "INFO", "took "),
+])
+def test_each_accepted_event_logs_what_the_relay_did_with_it(paired, caplog, answer, level, words):
+    relay = paired([])
+    relay.answer = answer
+
+    with caplog.at_level("INFO", logger="hermes.plugins.conduit_push"):
+        _deliver(_event())
+
+    lines = [r for r in caplog.records if "Conduit relay took" in r.getMessage()]
+    assert len(lines) == 1
+    line = lines[0].getMessage()
+    assert lines[0].levelname == level and words in line
+    assert client._log_tag(_event()) in line and "try 1" in line and "s queued" in line
+    assert "None" not in line
+    # Never the content, nor the event id itself.
+    assert "Done." not in caplog.text and "0123456789abcdef" not in caplog.text
+
+
+def test_every_line_of_one_event_carries_the_same_tag_and_the_try(paired, caplog):
+    paired([503, 503, 400])
+
+    with caplog.at_level("INFO", logger="hermes.plugins.conduit_push"):
+        _deliver(_event())
+
+    tag = client._log_tag(_event())
+    retries = [r.getMessage() for r in caplog.records if "will be retried" in r.getMessage()]
+    assert [f"{tag} will be retried (try {n})" in line for n, line in enumerate(retries, 1)] == [True, True]
+    failed = [r.getMessage() for r in caplog.records if "delivery failed" in r.getMessage()]
+    assert len(failed) == 1 and f"{tag} after 3 tries" in failed[0] and "s sending" in failed[0]
+
+
+def test_the_log_tag_is_the_type_and_a_digest_of_the_id():
+    tag = client._log_tag(_event())
+    assert tag.startswith("response.ready #") and len(tag.split("#")[1]) == 10
+    assert client._log_tag({"type": "plugin.hello"}) == "plugin.hello"

@@ -558,7 +558,7 @@ def enqueue(event: dict[str, Any]) -> bool:
     accepted = False
     for device, state in targets:
         if _paused_until(state) > time.monotonic():
-            logger.info("Conduit notification dropped for %s: %s", event.get("type", "event"), _pause_reason(state))
+            logger.info("Conduit notification dropped for %s: %s", _log_tag(event), _pause_reason(state))
             continue
         # Hermes can serve several profiles in one process, each through a
         # context variable for its home that a new thread doesn't inherit.
@@ -572,9 +572,10 @@ def enqueue(event: dict[str, Any]) -> bool:
             if _stopped.is_set():
                 return False
             try:
-                _events.put_nowait((rank, next(_order), context, event, _pairing_of(state), _generation))
+                _events.put_nowait((rank, next(_order), context, event, _pairing_of(state), _generation,
+                                    time.monotonic()))
             except queue.Full:
-                logger.warning("Conduit notification queue is full; dropping %s", event.get("type", "event"))
+                logger.warning("Conduit notification queue is full; dropping %s", _log_tag(event))
                 continue
             _start_worker_locked()
         accepted = True
@@ -1371,11 +1372,12 @@ def _delivery_worker(generation: int = 0) -> None:
                 # Queued for the worker started after a stop(): hand it back.
                 _requeue(item)
                 continue
-            _, _, context, event, pairing, accepted = item
-            context.run(lambda: _deliver(event, pairing=pairing, generation=accepted))
+            _, _, context, event, pairing, accepted = item[:6]
+            queued = item[6] if len(item) > 6 else None
+            context.run(lambda: _deliver(event, pairing=pairing, generation=accepted, queued=queued))
         except Exception as error:  # the worker thread must outlive any one event
             logger.warning("Conduit notification delivery failed for %s: %s",
-                           item[3].get("type", "event") if item and len(item) >= 6 else "event", error)
+                           _log_tag(item[3]) if item and len(item) >= 6 else "event", error)
         finally:
             _events.task_done()
 
@@ -1411,7 +1413,7 @@ def _requeue(item: Any) -> None:
     try:
         _events.put_nowait(item)
     except queue.Full:
-        logger.warning("Conduit notification queue is full; dropping %s", item[3].get("type", "event"))
+        logger.warning("Conduit notification queue is full; dropping %s", _log_tag(item[3]))
 
 
 def _pause(seconds: float) -> None:
@@ -1421,56 +1423,108 @@ def _pause(seconds: float) -> None:
 
 def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
              clock: Callable[[], float] = time.monotonic, pairing: tuple[str, str, str] | None = None,
-             generation: int | None = None) -> bool:
+             generation: int | None = None, queued: float | None = None) -> bool:
     """Sends ``event``, with retries. ``pairing`` and ``generation`` are the
     pairing and the plugin load that accepted it (enqueue): every attempt
     checks both again, so what one pairing accepted never reaches a device
     paired since, and a load that was stopped never retries into the next
-    one (notifier issue 834)."""
+    one (notifier issue 834). ``queued`` is when enqueue took it (the
+    monotonic clock), so its log lines say how long it waited.
+
+    Every line names the event by ``_log_tag``: its type and a short digest
+    of its id, the same on each line for one event, never its content."""
     started = clock()
     generation = _generation if generation is None else generation
+    tag = _log_tag(event)
+    tries = 0
     for delay in (*RETRY_DELAYS, None):
         # The generation too: start() may have cleared the flag meanwhile.
         if _stopped.is_set() or generation != _generation:
-            logger.info("Conduit notification dropped for %s: the plugin was unloaded", event.get("type", "event"))
+            logger.info("Conduit notification dropped for %s: the plugin was unloaded", tag)
             return False
         state = load_state()
         if not state:
-            logger.warning("Conduit notification dropped for %s: this profile is no longer paired", event.get("type", "event"))
+            logger.warning("Conduit notification dropped for %s: this profile is no longer paired", tag)
             return False
         if pairing is None:
             pairing = _pairing_of(state)  # a direct call: the pairing of its first attempt
         elif _pairing_of(state) != pairing:
             logger.info("Conduit notification dropped for %s: this profile was paired again since it was queued",
-                        event.get("type", "event"))
+                        tag)
             return False
         paused_until, now = _paused_until(state), clock()
         if now < paused_until:
             logger.info("Conduit notification dropped for %s: %s for %d more seconds",
-                        event.get("type", "event"), _pause_reason(state), paused_until - now)
+                        tag, _pause_reason(state), paused_until - now)
             return False
         try:
             timeout = max(MIN_SEND_TIMEOUT, min(SEND_TIMEOUT, started + RETRY_BUDGET - now))
+            # A capability read that fails is a try too: the trace counts
+            # every round trip to the relay.
+            tries += 1
             gate = RELAY_GATED.get(str(event.get("type")))
             if gate and not relay_takes(state, gate, timeout=timeout, clock=clock):
                 logger.info("Conduit notification for %s not sent: the relay doesn't take it yet",
-                            event.get("type", "event"))
+                            tag)
                 return False
             answer = _send(event, state, timeout=timeout)
         except Exception as error:
             if delay is not None and _worth_retrying(error) and clock() - started + delay <= RETRY_BUDGET:
-                logger.info("Conduit notification delivery for %s will be retried: %s", event.get("type", "event"), error)
+                logger.info("Conduit notification delivery for %s will be retried (try %d): %s", tag, tries, error)
                 sleep(delay)
                 continue
-            logger.warning("Conduit notification delivery failed for %s: %s", event.get("type", "event"), error)
+            logger.warning("Conduit notification delivery failed for %s after %d tries (%s): %s",
+                           tag, tries, _timing(queued, started, clock()), error)
             _note_push(False, error)
             if isinstance(error, RelayRejected) and error.status in (401, 403):
                 _refused(state, error, clock(), generation)
             return False
         record_relay_accepted(state)
         _note_push(True)
+        _log_accepted(tag, answer, tries, _timing(queued, started, clock()))
         return True
     return False  # not reached: the last attempt has no delay
+
+
+def _log_tag(event: dict[str, Any]) -> str:
+    """How log lines name one event: its type and the first 10 hex of a
+    digest of its id. The id itself can be an unkeyed digest of hook data
+    (an approval's command), so it isn't logged; the digest still matches
+    every line of one event, retries and the relay's answer included."""
+    kind = str(event.get("type") or "event")
+    event_id = event.get("event_id")
+    if not isinstance(event_id, str) or not event_id:
+        return kind
+    return f"{kind} #{hashlib.sha256(event_id.encode()).hexdigest()[:10]}"
+
+
+def _timing(queued: float | None, started: float, now: float) -> str:
+    """Where a notification's time went: queued before the first try, then
+    sending (retries and their waits included)."""
+    sending = f"{max(0.0, now - started):.1f}s sending"
+    if queued is None:
+        return sending
+    return f"{max(0.0, started - queued):.1f}s queued, {sending}"
+
+
+def _log_accepted(tag: str, answer: Any, tries: int, timing: str) -> None:
+    """One line for each event the relay took, with what it did with it,
+    so a notification that never reached the phone can be traced: the
+    relay pushed it, saw a duplicate, or chose not to push (the phone's
+    delivery preferences). Never content."""
+    try:
+        answer = answer if isinstance(answer, dict) else {}
+        if answer.get("duplicate"):
+            logger.info("Conduit relay took %s as a duplicate, no new push (try %d, %s)", tag, tries, timing)
+        elif answer.get("delivered") is False and not tag.startswith("plugin.hello"):
+            reason = str(answer.get("reason") or "the phone's delivery preferences")[:80]
+            logger.warning("Conduit relay took %s but did not push it: %s (try %d, %s)", tag, reason, tries, timing)
+        elif "delivered" in answer:
+            logger.info("Conduit relay took %s (delivered=%s, try %d, %s)", tag, answer.get("delivered"), tries, timing)
+        else:
+            logger.info("Conduit relay took %s (try %d, %s)", tag, tries, timing)
+    except Exception:  # noqa: BLE001
+        logger.debug("Conduit could not log an accepted push", exc_info=True)
 
 
 def _note_push(ok: bool, error: Exception | None = None) -> None:
