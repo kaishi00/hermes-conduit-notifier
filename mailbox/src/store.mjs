@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS envelopes (
   PRIMARY KEY (inbox, seq),
   FOREIGN KEY (inbox, sender) REFERENCES senders (inbox, sender)
 );
+-- So the minute's prune finds idle inboxes without reading a million rows.
+CREATE INDEX IF NOT EXISTS inboxes_by_last_seen ON inboxes (last_seen_at);
 CREATE INDEX IF NOT EXISTS envelopes_by_sender ON envelopes (inbox, sender);
 CREATE INDEX IF NOT EXISTS envelopes_by_expiry ON envelopes (expires_at);
 CREATE UNIQUE INDEX IF NOT EXISTS envelopes_by_idempotency_key

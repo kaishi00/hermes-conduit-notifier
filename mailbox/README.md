@@ -39,7 +39,7 @@ npm test
 | `PUBLIC_URL` | required | The URL owners reach the mailbox at, such as `https://rooms.example.com`, with no path. Their signatures are checked against its host name. |
 | `HOST`, `PORT` | `127.0.0.1`, `9130` | Where the mailbox listens. |
 | `TRUST_PROXY` | `0` | How many reverse proxies are in front of the mailbox (0 to 10). |
-| `MAILBOX_REGISTRATION_TOKEN` | empty | Empty means open registration. When it's set (at least 16 characters, no spaces), only a registration that sends it as `Mailbox-Registration` can make an inbox. |
+| `MAILBOX_REGISTRATION_TOKEN` | empty | Empty means open registration, within the registration rates (see [Open registration](#open-registration)). When it's set (at least 16 characters, no spaces), only a registration that sends it as `Mailbox-Registration` can make an inbox. Set it for a mailbox only you and people you trust use. |
 | `MAILBOX_*` | see [Limits](#limits) | Capacity limits. |
 
 Run one mailbox process per `DATA_PATH`. Its rate limits, replay protection and waiting polls live in that process. A restart forgets which signatures it has seen, so an owner request captured in the five minutes before a restart could be sent once more after it. Requests travel over HTTPS, so only someone who can read that traffic could capture one.
@@ -102,7 +102,7 @@ Each bound is a backstop against floods, sized far above what linked installatio
 | Envelope size (the protocol's 256 KB) | 262144 bytes | `MAILBOX_MAX_ENVELOPE_BYTES` |
 | How long an envelope waits (the protocol's 7 days) | 604800 s | `MAILBOX_TTL_SECONDS` |
 | Longest poll wait, under common proxy timeouts | 25 s | `MAILBOX_MAX_WAIT_SECONDS` |
-| Inboxes | 10000 | `MAILBOX_MAX_INBOXES` |
+| Inboxes, about 200 bytes each | 1000000 | `MAILBOX_MAX_INBOXES` |
 | Senders per inbox | 64 | `MAILBOX_MAX_SENDERS_PER_INBOX` |
 | Pending envelopes per inbox | 2000 | `MAILBOX_MAX_PENDING_PER_INBOX` |
 | Pending bytes per inbox | 67108864 | `MAILBOX_MAX_PENDING_BYTES_PER_INBOX` |
@@ -110,14 +110,18 @@ Each bound is a backstop against floods, sized far above what linked installatio
 | Bytes stored in all | 4294967296 | `MAILBOX_MAX_TOTAL_BYTES` |
 | Sends per minute per sender | 600 | `MAILBOX_SENDS_PER_MINUTE_PER_SENDER` |
 | Owner requests per minute per inbox | 600 | `MAILBOX_OWNER_REQUESTS_PER_MINUTE_PER_INBOX` |
-| New inboxes per minute, mailbox-wide | 24 | `MAILBOX_REGISTRATIONS_PER_MINUTE` |
-| New inboxes per hour per client address | 10 | `MAILBOX_REGISTRATIONS_PER_HOUR_PER_CLIENT` |
+| New inboxes per minute, mailbox-wide | 6 | `MAILBOX_REGISTRATIONS_PER_MINUTE` |
+| New inboxes per hour per client network (an IPv4 /24 or an IPv6 /48) | 10 | `MAILBOX_REGISTRATIONS_PER_HOUR_PER_CLIENT` |
 | Failed authentications per minute per client address, before it's turned away until the minute ends | 120 | `MAILBOX_FAILED_AUTH_PER_MINUTE_PER_CLIENT` |
 | Waiting polls, mailbox-wide | 2000 | `MAILBOX_MAX_WAITERS` |
 | Waiting polls per inbox | 8 | `MAILBOX_MAX_WAITERS_PER_INBOX` |
 | Days before an unread inbox is deleted | 90 | `MAILBOX_INBOX_IDLE_DAYS` |
 
 Registering a new inbox counts against the registration rates; registering one that exists counts as an owner request. Each inbox has its own room for the signatures it has used, twelve minutes of its owner rate (7,200 by default), so an owner that fills it is answered `rate_limited` until its oldest signatures expire, and no other owner notices. A remembered signature takes about 150 bytes: the rooms use that much for each owner request accepted in the last five minutes (up to ten, for an owner whose clock runs ahead), and one room at most about 1 MB. The per-address rates follow up to 100,000 addresses at a time: past that, new addresses go uncounted rather than anyone being turned away, and the mailbox-wide registration rate still holds.
+
+### Open registration
+
+With no registration token, anyone can make an inbox, so the limits keep one party from taking all the room. New inboxes are counted per network rather than per address, because one IPv6 host usually holds a /64 or more. And the mailbox has room for more inboxes than the mailbox-wide registration rate can make before an untouched inbox is deleted as idle: 6 a minute for 90 days is 777,600, under the 1,000,000 default. So registering alone can't fill it; someone would have to keep hundreds of thousands of inboxes in use for months. If you lower `MAILBOX_MAX_INBOXES` or raise the registration rate or `MAILBOX_INBOX_IDLE_DAYS` so that this no longer holds, an open mailbox logs a warning at startup. A full mailbox answers new registrations `507 mailbox_full`, and inboxes that exist keep working.
 
 ## What the mailbox keeps
 

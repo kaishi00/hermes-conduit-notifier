@@ -14,7 +14,9 @@ services:
       DATA_PATH: /var/lib/conduit-rooms/mailbox.sqlite
       TRUST_PROXY: 1
       # Set it to keep registration to those who send it (a private
-      # mailbox); leave it empty for open registration.
+      # mailbox); leave it empty for open registration, which the
+      # registration limits keep any one party from filling (see the
+      # README's Open registration).
       MAILBOX_REGISTRATION_TOKEN: ${MAILBOX_REGISTRATION_TOKEN:-}
       MAILBOX_MAX_ENVELOPE_BYTES: ${MAILBOX_MAX_ENVELOPE_BYTES:-}
       MAILBOX_TTL_SECONDS: ${MAILBOX_TTL_SECONDS:-}

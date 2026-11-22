@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { limitsFromEnv } from '../src/limits.mjs';
+import { DEFAULT_LIMITS, inboxesRegistrationCanFill, limitsFromEnv } from '../src/limits.mjs';
 
 test('the defaults are the spec\'s: 256 KB envelopes kept 7 days', () => {
   const limits = limitsFromEnv({});
@@ -23,4 +23,9 @@ test('a limit that is not a positive integer fails at boot', () => {
     assert.throws(() => limitsFromEnv({ MAILBOX_MAX_PENDING_PER_INBOX: raw }),
       /MAILBOX_MAX_PENDING_PER_INBOX must be a positive integer/);
   }
+});
+
+test('with the defaults, registering alone can\'t fill the mailbox before untouched inboxes go idle (notifier#1014)', () => {
+  assert.equal(inboxesRegistrationCanFill(DEFAULT_LIMITS), 777_600);
+  assert.ok(DEFAULT_LIMITS.maxInboxes > inboxesRegistrationCanFill(DEFAULT_LIMITS));
 });
