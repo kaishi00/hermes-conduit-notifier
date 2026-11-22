@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.192.3 (2026-11-22)
+
+### Fixes
+
+- Pulse no longer shows the same thing twice under different headings, such as one reminder as both a Reminder and a Commitment card. When it comes up again while its card is still open, that card is brought up to date instead, so it doesn't keep saying "due tomorrow" after the day has passed.
+
 ## 0.192.2 (2026-11-22)
 
 ### Fixes

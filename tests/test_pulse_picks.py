@@ -151,8 +151,13 @@ def test_a_new_incident_about_an_open_subject_is_held(tmp_path):
     made = card(pulse_store, subject="job:default:41", created_at=1000.0)
     pick, _ = picks.parse({"line": "Audit failed", "subject": "job:default:41"})
     assert picks.resolve(pulse_store, pick, "job:default:41", 2000.0) == (picks.DROP, made, picks.HOLD)
-    # A day later that card no longer holds a new one back.
-    assert picks.resolve(pulse_store, pick, "job:default:41", 1000.0 + picks.HOLD_S + 1)[0] == picks.NEW
+    # A day later that card no longer holds a new one back: it's updated
+    # instead, never a second open card about the same thing.
+    assert picks.resolve(pulse_store, pick, "job:default:41", 1000.0 + picks.HOLD_S + 1) == (
+        picks.UPDATE, made, picks.OPEN_SUBJECT)
+    # Once it's done, a new one is a new card.
+    pulse_store.mark_done(made, None, closed_by="user", now=1500.0)
+    assert picks.resolve(pulse_store, pick, "job:default:41", 1000.0 + picks.HOLD_S + 1) == (picks.NEW, None, "")
 
 
 def test_a_dates_next_lead_time_isnt_held_by_the_last_ones_card(tmp_path):
@@ -392,7 +397,9 @@ def test_one_due_today_comes_once_more_past_its_open_card(tmp_path):
     assert pulse.candidates._due_today(pulse_store, {**row, "due_at": now + 3 * 86400}, made, now) is None
     pick, _ = picks.parse({"line": "Send the deck today", "subject": "item:7"})
     assert picks.resolve(pulse_store, pick, "item:7", now)[0] == picks.DROP
-    assert picks.resolve(pulse_store, {**pick, picks.DUE_AGAIN: said}, "item:7", now) == (picks.NEW, None, "")
+    # Its day: once more, in its open card's place (its words brought up to date).
+    assert picks.resolve(pulse_store, {**pick, picks.DUE_AGAIN: said}, "item:7", now) == (
+        picks.UPDATE, made, picks.OPEN_SUBJECT)
     # Carded meanwhile (its repeat already said): held again.
     since = card(pulse_store, subject="item:7", created_at=now - 60)
     held = picks.resolve(pulse_store, {**pick, picks.DUE_AGAIN: said}, "item:7", now)
@@ -552,3 +559,48 @@ def test_the_gated_shapes_wait_for_every_drawing_conduit(monkeypatch, tmp_path):
     assert not set(picks.GATED_SHAPES) & set(picks.drawn_types(tmp_path))
     features.add(picks.MORE_SHAPES_FEATURE)
     assert picks.drawn_types(tmp_path)[-3:] == picks.GATED_SHAPES
+
+
+def test_one_reminder_carded_under_another_kind_updates_its_open_card(tmp_path):
+    # Eric's host, 2026-11-21: one phone reminder ("E5 rankings") carded as a
+    # Reminder on Wednesday, then as a Commitment on its due day, with the
+    # Reminder card still open and still saying "due tomorrow".
+    import sqlite3
+    pulse_store = fresh(tmp_path)
+    now = 100 * 86400.0
+    subject = "reminder:r_e5"
+    first = {"line": "E5 rankings are due tomorrow", "subject": subject, "shape": "due",
+             "facts": {"due": "1970-04-11", "noticed": "1970-04-08"}}
+    [made] = report_cards(pulse_store, [first], now - 2 * 86400)
+    with sqlite3.connect(pulse_store.path) as conn:
+        conn.execute("UPDATE cards SET topic='reminder' WHERE id=?", (made,))
+    again = {"line": "Your E5 rankings are due today", "subject": subject, "incident": {"card": "new"},
+             "shape": "due", "facts": {"due": "1970-04-11"}}
+    [updated] = report_cards(pulse_store, [again], now)
+    assert updated == made
+    card_now = pulse_store.card(made)
+    assert card_now["news"] == "Your E5 rankings are due today" and card_now["updated_at"] == now
+    assert len(pulse_store.open_cards_with([subject], 0.0)) == 1
+    assert pulse_store.get(picks.PICK_COUNTS)["1970-04-11"]["update:open_subject"] == 1
+
+
+def test_a_pick_that_only_finds_an_open_card_by_subject_is_still_kept_out_by_it(tmp_path):
+    # Folding into the open card isn't a deliberate update: a reminder whose
+    # card still says it stays out until its day (still_open), as before.
+    pulse_store = fresh(tmp_path)
+    now = 100 * 86400.0
+    subject = "reminder:r_e5"
+    [candidate_id] = pulse_store.add_candidates("run-1", [{
+        "origin": "found", "item_id": None, "kind": "reminder", "profile": "", "chat_id": "", "source": "reminders",
+        "area": "work", "due_at": now + 5 * 86400, "actionable": True, "value": 4, "bring_up": True, "skip": "",
+        "text": "E5 rankings are due Friday", "why": "", "asked": True, "ref": subject, "subject": subject,
+        "decision": pulse.candidates.SURFACED}], now=now - 3 * 86400)
+    pulse_store.add_cards([{"kind": "noticed", "level": "screen", "topic": "reminder", "news": "E5 rankings are due Friday",
+                            "created_at": now - 3 * 86400, "subject": subject}], links=[candidate_id])
+    pick, _ = picks.parse({"line": "Your E5 rankings are due Friday", "subject": subject, "incident": {"card": "new"}})
+    row = {"origin": "found", "item_id": None, "kind": "commitment", "profile": "", "chat_id": "",
+           "source": "reminders", "area": "work", "due_at": now + 5 * 86400, "actionable": True, "value": 5,
+           "bring_up": True, "skip": "", "text": "Your E5 rankings are due Friday", "why": "", "asked": True,
+           "ref": subject, "subject": subject, "pick": picks.dumps(pick)}
+    pulse.candidates.decide(pulse_store, [row], now=now)
+    assert row["skip"] == "raised" and row["decision"] == pulse.candidates.SKIPPED
