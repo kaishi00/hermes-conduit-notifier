@@ -705,8 +705,9 @@ def failed_calls(pulse_store: store.PulseStore, since: float, zone: tzinfo) -> s
     """Tool calls that failed since ``since``, leaving out the ones nothing
     went wrong in: a command whose non-zero exit it expected, with nothing wrong
     in its output (pulse_ledger.harmless_exit), a call to an app the user hasn't
-    connected (pulse_ledger.unset_source), and a call that later went through as the
-    very same call (same tool and arguments)."""
+    connected (pulse_ledger.unset_source), a command the sandbox stopped before
+    it ran (pulse_ledger.blocked_by_sandbox), and a call that later went through
+    as the very same call (same tool and arguments)."""
     recent = [row for row in pulse_store.recent_outcomes(500) if row["at"] >= since]
     went_through: dict[tuple[str, str], float] = {}
     for row in recent:
@@ -715,6 +716,7 @@ def failed_calls(pulse_store: store.PulseStore, since: float, zone: tzinfo) -> s
             went_through[key] = max(went_through.get(key, 0.0), row["at"])
     rows = [row for row in recent if row["status"] == "error" and not ledger.harmless_exit(row)
             and not ledger.unset_source(row)
+            and not ledger.blocked_by_sandbox(row)
             and went_through.get((row["tool"], row.get("args_digest") or ""), 0.0) <= row["at"]]
     if not rows:
         return ""
