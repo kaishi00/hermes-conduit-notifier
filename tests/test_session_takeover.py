@@ -591,3 +591,143 @@ def test_hermes_real_ledger_schema(tmp_path):
     db.commit()
     db.close()
     assert _take(tmp_path, ["chat"]) == {"status": "free"}
+
+
+# --- This process's claim held by a runtime nobody is attached to (#3125) ----
+
+DEAD = object()  # the gateway's detached-socket sentinel
+LIVE = object()  # a client's open socket
+
+
+class FakeLease:
+    def __init__(self, registry, home, session_id, lease_id="lease-own", surface="desktop"):
+        self.registry, self.home = registry, home
+        self.lease_id, self.session_id, self.surface = lease_id, session_id, surface
+        self.state_path = home / "runtime" / "active_sessions.json"
+        self.enabled, self.released = True, False
+
+    def release(self):
+        state_path, lock_path = self.registry._lease_paths(registry_home=self.home)
+        with self.registry._FileLock(lock_path):
+            entries = self.registry._read_entries(state_path, strict=True)
+            self.registry._write_entries(state_path, [e for e in entries if e["lease_id"] != self.lease_id])
+        self.released = True
+
+
+class FakeGateway:
+    """tui_gateway.server's runtimes and the helpers the takeover reads."""
+
+    def __init__(self, pending=(), delegating=(), writing=()):
+        self._sessions = {}
+        self._sessions_lock = contextlib.nullcontext()
+        self.pending, self.delegating, self.writing = set(pending), set(delegating), set(writing)
+
+    def _transport_is_dead(self, transport):
+        return transport is DEAD
+
+    def _session_pending_kind(self, sid):
+        return "approval" if sid in self.pending else None
+
+    def _session_has_active_delegations(self, sid, session):
+        return sid in self.delegating
+
+    def _session_holds_transcript_claim(self, session, now):
+        return session.get("session_key") in self.writing
+
+    def _release_active_session_slot(self, session):
+        lease = session.get("active_session_lease")
+        lease.release()
+        session.pop("active_session_lease", None)
+        return True
+
+
+def _runtime(gateway, registry, home, sid, chat, transport=DEAD, **fields):
+    import threading
+    lease = FakeLease(registry, home, chat)
+    gateway._sessions[sid] = {"session_key": chat, "transport": transport, "running": False,
+                              "history_lock": threading.Lock(), "active_session_lease": lease, **fields}
+    return lease
+
+
+def _take_with(home, ids, gateway, registry, marker=None):
+    return api.chats.take_over_session(ids, registry=registry, turn_marker=marker or FakeTurnMarker(), home=home,
+                                       own_pid=OWN_PID, server=gateway)
+
+
+def test_this_devices_own_detached_claim_is_let_go(tmp_path):
+    registry, gateway = FakeRegistry(tmp_path), FakeGateway()
+    _seed(tmp_path, [_entry("chat", pid=OWN_PID, lease="lease-own")])
+    _runtime(gateway, registry, tmp_path, "62cd492f", "chat")
+    assert _take_with(tmp_path, ["chat"], gateway, registry) == {"status": "taken_over", "surface": "desktop"}
+    assert _entries(tmp_path) == []
+    session = gateway._sessions["62cd492f"]
+    assert "active_session_lease" not in session and session["_lease_idle_released"] == "62cd492f"
+
+
+def test_a_detached_claim_and_another_process_claim_are_both_let_go(tmp_path):
+    registry, gateway = FakeRegistry(tmp_path), FakeGateway()
+    _seed(tmp_path, [_entry("chat", pid=OWN_PID, lease="lease-own"), _entry("runtime-id")])
+    _runtime(gateway, registry, tmp_path, "62cd492f", "chat")
+    assert _take_with(tmp_path, ["chat", "runtime-id"], gateway, registry)["status"] == "taken_over"
+    assert _entries(tmp_path) == []
+
+
+@pytest.mark.parametrize("case", ["attached", "running", "isolated_turn", "building", "pending", "delegating",
+                                  "writing", "marked", "other_chat", "other_profile", "finalized"])
+def test_a_claim_with_a_client_or_work_on_it_stays(tmp_path, case):
+    import threading
+    registry = FakeRegistry(tmp_path)
+    gateway = FakeGateway(pending={"sid"} if case == "pending" else (),
+                          delegating={"sid"} if case == "delegating" else (),
+                          writing={"chat"} if case == "writing" else ())
+    _seed(tmp_path, [_entry("chat", pid=OWN_PID, lease="lease-own")])
+    building = threading.Event()
+    fields = {"attached": {"transport": LIVE}, "running": {"running": True},
+              "isolated_turn": {"_compute_host_turn_id": "t1"}, "building": {"agent_ready": building},
+              "finalized": {"_finalized": True}}.get(case, {})
+    lease = _runtime(gateway, registry, tmp_path, "sid", "other" if case == "other_chat" else "chat", **fields)
+    if case == "other_chat":
+        lease.session_id = "other"
+    if case == "other_profile":
+        lease.state_path = tmp_path / "profiles" / "bot" / "runtime" / "active_sessions.json"
+    marker = FakeTurnMarker({"chat": {"writer_pid": OWN_PID}}) if case == "marked" else None
+    assert _take_with(tmp_path, ["chat"], gateway, registry, marker)["status"] == "same_host"
+    assert _entries(tmp_path) == [_entry("chat", pid=OWN_PID, lease="lease-own")]
+    assert gateway._sessions["sid"]["active_session_lease"] is lease
+
+
+def test_a_runtime_that_turns_busy_before_the_release_keeps_its_claim(tmp_path):
+    registry, gateway = FakeRegistry(tmp_path), FakeGateway()
+    _seed(tmp_path, [_entry("chat", pid=OWN_PID, lease="lease-own")])
+    _runtime(gateway, registry, tmp_path, "sid", "chat")
+    session = gateway._sessions["sid"]
+
+    class TurnStartsOnLock:
+        def __enter__(self):
+            session["running"] = True  # a turn admitted between the probe and the lock
+
+        def __exit__(self, *exc):
+            return False
+
+    session["history_lock"] = TurnStartsOnLock()
+    assert _take_with(tmp_path, ["chat"], gateway, registry)["status"] == "same_host"
+    assert len(_entries(tmp_path)) == 1
+
+
+def test_an_abandoned_takeover_lets_go_of_nothing(tmp_path):
+    import threading
+    registry, gateway = FakeRegistry(tmp_path), FakeGateway()
+    _seed(tmp_path, [_entry("chat", pid=OWN_PID, lease="lease-own")])
+    _runtime(gateway, registry, tmp_path, "sid", "chat")
+    abandoned = threading.Event()
+    abandoned.set()
+    with pytest.raises(Exception, match="timed out"):
+        api.chats.take_over_session(["chat"], registry=registry, turn_marker=FakeTurnMarker(), home=tmp_path,
+                                    own_pid=OWN_PID, abandoned=abandoned, server=gateway)
+    assert len(_entries(tmp_path)) == 1
+
+
+def test_without_hermes_gateway_loaded_nothing_changes(tmp_path):
+    _seed(tmp_path, [_entry("chat", pid=OWN_PID, lease="lease-own")])
+    assert "tui_gateway.server" not in sys.modules
+    assert _take(tmp_path, ["chat"])["status"] == "same_host"

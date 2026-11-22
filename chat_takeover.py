@@ -16,6 +16,7 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -209,9 +210,116 @@ def _owner_alive(registry: Any, entry: dict[str, Any]) -> Optional[bool]:
         return None
 
 
+# A claim this process holds can belong to a runtime nobody is attached to any
+# more: Conduit's own earlier connection, left detached when its socket closed
+# (hermes-conduit#3125). Hermes reaps such a runtime after a short grace
+# (tui_gateway.session_lifecycle._schedule_ws_orphan_reap) and hands its claim
+# to a new runtime of the same chat (_take_over_detached_runtime_lease), but a
+# runtime kept alive past the grace (a wake-up it drives, another profile path
+# for the same chat) slips through both, and its claim then refuses every send
+# from the device that left it, with nobody to close it. So the takeover lets
+# go of it, the way Hermes' idle release does (session_reaper.
+# _release_idle_session_leases): only with no client on it, no turn running or
+# marked, nothing waiting on an answer, no delegated work and no write in
+# progress, rechecked under the runtime's history_lock; the runtime stays and
+# its next turn claims the chat again. A runtime a client is still attached to
+# (Conduit on another device, the web chat) keeps its claim.
+_DETACHED_REQUIRED = ("_sessions", "_sessions_lock", "_release_active_session_slot", "_transport_is_dead",
+                      "_session_pending_kind")
+
+
+def _gateway() -> Any:
+    """This process's TUI gateway as Hermes loaded it, or None (never imported here)."""
+    server = sys.modules.get("tui_gateway.server")
+    if server is None or not all(getattr(server, name, None) is not None for name in _DETACHED_REQUIRED):
+        return None
+    return server
+
+
+def _same_path(a: Any, b: Any) -> bool:
+    try:
+        return os.path.realpath(os.fspath(a)) == os.path.realpath(os.fspath(b))
+    except (TypeError, ValueError, OSError):
+        return False
+
+
+def _detached_idle_claim(server: Any, sid: str, session: Any, wanted: set, state_path: Any,
+                         turn_marker: Any, home: Any) -> Any:
+    """The claim of a runtime in this process with no client and nothing running, on this chat, or None."""
+    if not isinstance(session, dict) or session.get("_finalized") or session.get("_closing"):
+        return None
+    lease = session.get("active_session_lease")
+    if lease is None or not getattr(lease, "enabled", False) or getattr(lease, "released", True):
+        return None
+    key = str(session.get("session_key") or "")
+    if str(getattr(lease, "session_id", "") or "") not in wanted and key not in wanted:
+        return None
+    lease_path = getattr(lease, "state_path", None)
+    if lease_path is not None and not _same_path(lease_path, state_path):
+        return None  # another profile's registry: not the claim this takeover reads
+    if not server._transport_is_dead(session.get("transport")):
+        return None
+    if session.get("running") or session.get("_compute_host_turn_id"):
+        return None
+    ready = session.get("agent_ready")
+    if ready is not None and callable(getattr(ready, "is_set", None)) and not ready.is_set():
+        return None
+    if server._session_pending_kind(sid):
+        return None
+    delegations = getattr(server, "_session_has_active_delegations", None)
+    if callable(delegations) and delegations(sid, session):
+        return None
+    writing = getattr(server, "_session_holds_transcript_claim", None)
+    if callable(writing) and writing(session, time.time()):
+        return None
+    root = session.get("profile_home") or home
+    if _owner_turn_running(turn_marker, root, {"session_id": key or getattr(lease, "session_id", "")}, sorted(wanted)):
+        return None
+    return lease
+
+
+def release_detached_claims(session_ids: list, *, registry: Any, turn_marker: Any, home: Any,
+                            server: Any = None, abandoned: Optional[threading.Event] = None) -> list:
+    """Lets go of this process's claims on the chat held by runtimes nobody is
+    attached to; the surfaces it let go of. Hermes' lease release takes the
+    registry lock itself, so this runs before take_over_session takes it."""
+    server = _gateway() if server is None else server
+    if server is None:
+        return []
+    wanted = {str(value) for value in session_ids if str(value)}
+    state_path = registry._lease_paths(registry_home=home)[0]
+    with server._sessions_lock:
+        runtimes = list(server._sessions.items())
+    surfaces = []
+    for sid, session in runtimes:
+        try:
+            if _detached_idle_claim(server, sid, session, wanted, state_path, turn_marker, home) is None:
+                continue
+            lock = session.get("history_lock")
+            if lock is None:
+                continue
+            with lock:  # a turn's admission and Hermes' own release take it too
+                if abandoned is not None and abandoned.is_set():
+                    raise TakeoverError(504, "Chat takeover timed out")
+                lease = _detached_idle_claim(server, sid, session, wanted, state_path, turn_marker, home)
+                if lease is None or server._sessions.get(sid) is not session:
+                    continue
+                if not server._release_active_session_slot(session):
+                    continue
+                session["_lease_idle_released"] = sid  # off-turn writers re-claim first, as after an idle release
+            surfaces.append(str(getattr(lease, "surface", "") or session.get("source") or ""))
+            logger.info("Chat takeover: let go of this process's claim on chat %r held by detached runtime %r"
+                        " (hermes-conduit#3125)", getattr(lease, "session_id", None), sid)
+        except TakeoverError:
+            raise
+        except Exception:  # noqa: BLE001 — can't tell, so the claim stays
+            logger.debug("Chat takeover: detached claim check failed for %r", sid, exc_info=True)
+    return surfaces
+
+
 def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, home: Any, by: str = "Conduit",
                       own_pid: Optional[int] = None,
-                      abandoned: Optional[threading.Event] = None) -> dict[str, Any]:
+                      abandoned: Optional[threading.Event] = None, server: Any = None) -> dict[str, Any]:
     """Drop other processes' claims on the chat. ``session_ids`` are the ids
     of ONE chat (its stored id and live id); a running turn under any of
     them makes the whole request busy. Statuses:
@@ -229,6 +337,11 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
     A claim whose pid is missing or invalid can't be attributed to another
     process, so it is kept like this dashboard's own. ``abandoned`` is set
     when the request timed out: nothing is written after that.
+
+    First, this process's own claims held by runtimes nobody is attached to
+    are let go (release_detached_claims); ``server`` is the TUI gateway to
+    look in (default: the one Hermes loaded here). A chat that then has no
+    claim left answers ``taken_over``.
     """
     own_pid = os.getpid() if own_pid is None else own_pid
     wanted = set(session_ids)
@@ -239,6 +352,8 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
         logger.info("Chat takeover: Hermes' gateway ledger holds chat %r (surface %r); nothing dropped",
                     session_ids, queued)
         return {"status": "busy", "surface": queued}
+    released = release_detached_claims(session_ids, registry=registry, turn_marker=turn_marker, home=home,
+                                       server=server, abandoned=abandoned)
     state_path, lock_path = registry._lease_paths(registry_home=home)
     def check_abandoned() -> None:
         if abandoned is not None and abandoned.is_set():
@@ -259,7 +374,7 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
         owners = [entry for entry in entries
                   if isinstance(entry, dict) and _entry_session_id(entry) in wanted]
         if not owners:
-            return {"status": "free"}
+            return {"status": "taken_over", "surface": released[0]} if released else {"status": "free"}
         # Kept: this dashboard's own claims, and any claim with no usable pid.
         foreign, own = [], []
         for entry in owners:

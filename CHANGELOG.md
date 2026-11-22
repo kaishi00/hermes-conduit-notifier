@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.194.6 (2026-11-22)
+
+### Fixes
+
+- After your phone lost its connection to the dashboard (a plugin update, a network change), sending in that chat could be refused with "open in Conduit on another device" though it was open nowhere else, and nothing in Conduit could undo it. Conduit now takes the chat back from its own earlier connection.
+
 ## 0.194.5 (2026-11-22)
 
 ### Fixes
