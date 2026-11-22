@@ -143,11 +143,13 @@ WHY_LIMIT = 300
 # (instructions, text, schema=the reply's shape) -> (the parsed reply, tokens).
 Llm = Callable[..., tuple[Any, int]]
 # The replies' shapes (pulse_memory.SCHEMA says why they're loose). Each
-# names every key its parser reads, the pick's included (PICK_INSTRUCTION):
-# sent closed (pulse.closed_schema), a key it leaves out can't come back.
+# names every key its parser reads or its prompt describes, the pick's all
+# included (PICK_INSTRUCTION and pulse_picks.PICK_RULES, whose "subject" and
+# "incident" check() overrides): sent closed (pulse.closed_schema), a reply
+# with a key it leaves out would fail Hermes' check, and the whole check with it.
 CHECK_SCHEMA = {"type": "object", "properties": {
     key: {} for key in ("decision", "news", "why", "check_again_hours", "when", "urgent",
-                        "line", "detail", "shape", "facts", "actions")}}
+                        "line", "detail", "subject", "incident", "event", "shape", "facts", "actions")}}
 ACT_SCHEMA = {"type": "object", "properties": {"done": {}, "why": {}}}
 STALE_SCHEMA = {"type": "object", "properties": {"stale": {}, "why": {}}}
 

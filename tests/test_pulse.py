@@ -3149,6 +3149,9 @@ def test_pulse_reply_schemas_take_the_replies_the_parsers_take():
         # The pick's keys too (PICK_INSTRUCTION): sent closed, a key left out couldn't come (issue 1001).
         (followup.CHECK_SCHEMA, {"decision": "tell", "news": "x", "line": "Headline", "detail": "More",
                                  "shape": "plain", "facts": [], "actions": []}),
+        # PICK_RULES describes subject and incident (check() overrides them): one given isn't a failed check.
+        (followup.CHECK_SCHEMA, {"decision": "tell", "news": "x", "line": "Headline", "subject": "#41",
+                                 "incident": {"card": "new"}, "event": None}),
         (followup.CHECK_SCHEMA, {"decision": "wait", "check_again_hours": "24"}),
         (followup.ACT_SCHEMA, {"done": True, "why": "sent"}),
         (followup.ACT_SCHEMA, {"done": None}),
