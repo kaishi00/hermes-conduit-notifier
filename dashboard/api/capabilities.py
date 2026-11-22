@@ -471,6 +471,9 @@ def sign_in_ends_on_restart() -> bool:
         from hermes_cli.dashboard_auth import registry
     except ImportError:  # a Hermes from before dashboard sign-in providers
         return False
+    except Exception:  # noqa: BLE001 - a broken install never fails the capabilities answer
+        core.logger.debug("Conduit plugin: couldn't import the dashboard's sign-in providers", exc_info=True)
+        return False
     try:
         # Asked each time: the provider registers as the dashboard starts,
         # which may be after this module is imported.
