@@ -165,6 +165,28 @@ def test_read_chat_reads_only_the_newest_searchs_chats():
     assert api.watch_tools.run_watch_read_chat(grant, {}, routes=routes)["detail"] == "number is required"
 
 
+class OlderHermesRoutes(FakeRoutes):
+    """A Hermes whose get_session_messages doesn't take inline_images yet."""
+
+    async def get_session_messages(self, session_id, profile=None, limit=None, offset=0, order=None,
+                                   include_compacted=False):
+        self.reads.append((session_id, profile, limit, order, include_compacted))
+        if session_id not in self.messages:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {"session_id": session_id, "messages": self.messages[session_id]}
+
+
+def test_read_chat_answers_on_a_hermes_without_inline_images():
+    routes = OlderHermesRoutes(
+        {"GPU": [{"session_id": "s-gpu", "title": "GPU setup", "last_active": NOW}]},
+        {"s-gpu": [{"role": "user", "content": "Which slot?"}, {"role": "assistant", "content": "Slot two"}]})
+    grant = make_grant()
+    api.watch_tools.run_watch_find_chat(grant, {"query": "GPU"}, routes=routes)
+    read = api.watch_tools.run_watch_read_chat(grant, {"number": "1"}, routes=routes, stored_summary=lambda sid: None, now=NOW)
+    assert read["ok"] is True and "Hermes: Slot two" in read["chat"]
+    assert routes.reads == [("s-gpu", "work", 500, "latest", True)], "include_compacted still passed"
+
+
 def test_a_long_chat_is_summarized_once_per_grant():
     turns = []
     for index in range(30):
