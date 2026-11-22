@@ -406,7 +406,7 @@ def test_the_waiting_list_names_the_questions_that_wait_past_their_turn(paired, 
     monkeypatch.setattr(api.core._plugin_package_module("work_coord"), "_chat_gone", lambda home, chat: False)
     questions = _http().get(f"{BASE}/waiting").json()["questions"]
     assert [(item["id"], item["chat"], item["actions"]) for item in questions] == [
-        (asked, "chat-1", ["answer"]), ("P2", "", ["approve", "decline"])]
+        (asked, "chat-1", ["answer", "dismiss"]), ("P2", "", ["approve", "decline", "dismiss"])]
     assert questions[0]["choices"] == ["Roll back", "Wait"] and questions[0]["recommended"] == "Roll back"
     # Its row opens the chat that asked; the Bot Chat's opens the Bot Chat when there is one.
     assert questions[0]["session_ids"] == ["chat-1"] and questions[1]["session_ids"] == []

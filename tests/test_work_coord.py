@@ -839,6 +839,10 @@ def test_a_question_dismissed_without_an_answer_is_told_as_no_answer(on, hermes,
     assert work.app_act(on.home, second, "dismiss")["status"] == "dismissed"
     assert batched() == []
     assert f"- {second} (about W1), dismissed by the user just now" in work.digest(BOT_CHAT)
+    # Like a no, a dismissed question isn't asked again that day without what's new.
+    again = call("work_propose", {"text": "Stop W1 now?", "ref": "W1"})
+    assert again["error"] == "dismissed" and again["id"] == second
+    assert call("work_propose", {"text": "Stop W1 now?", "ref": "W1", "new": "It's spending fast."})["ok"]
 
 
 def test_going_ahead_under_auto_and_a_no_to_it_is_told(on, hermes, home, monkeypatch):

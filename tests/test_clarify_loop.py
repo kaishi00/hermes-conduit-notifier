@@ -1705,6 +1705,12 @@ def test_a_queued_message_withdraws_it_only_under_the_queue_busy_mode(monkeypatc
     record["queued_prompts"] = [{"text": "after"}]
     assert writes.wrote() == ""
 
+    # A plugin's hidden send (a workstream's wake, Pulse) isn't the user writing.
+    monkeypatch.setattr(sys.modules["tui_gateway.server"], "_load_busy_input_mode", lambda: "queue")
+    writes = loop._UserWrites()
+    record["queued_prompts"].append({"text": "wake", "_queued_display_kind": "hidden"})
+    assert writes.wrote() == ""
+
 
 def test_a_chat_without_an_app_gateway_record_is_never_written_in(monkeypatch):
     monkeypatch.setattr(loop.turn_surface, "current_session", lambda: None)

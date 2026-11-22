@@ -722,6 +722,12 @@ def _asked_before(store: work_store.Store, refs: list[str], new: str, *, besides
         return {"ok": False, "id": declined["id"], "error": "declined",
                 "note": f"The user declined {declined['id']} about this work. Ask again only with what came "
                         "up since, in new, and say it to them; otherwise leave it."}
+    # So does a question they took off their list without answering.
+    dismissed = store.proposal_about(refs, status="dismissed", since=time.time() - PROPOSAL_CLOSED_AGE_S)
+    if dismissed is not None and not new:
+        return {"ok": False, "id": dismissed["id"], "error": "dismissed",
+                "note": f"The user dismissed {dismissed['id']} about this work without answering. Ask again only "
+                        "with what came up since, in new, and say it to them; otherwise leave it."}
     return None
 
 
@@ -814,7 +820,8 @@ ASKED_SPOKEN_HEAD = "Questions you asked the user that still wait on their answe
 ASKED_SPOKEN_RULE = ("Say them when the user asks what waits on them, or when one bears on what they ask; read the "
                      "choices out. When they answer one, record it with work_propose "
                      '{"id": "P1", "answer": ...}: one of its choices, approved or declined for a yes or no, or their '
-                     "own words for one with neither. One another chat asked goes to that chat, which acts on it.")
+                     "own words for one with neither. One another chat asked goes to that chat, which acts on it. "
+                     "When they say one doesn't matter any more, withdraw it rather than record an answer.")
 
 
 # The asked notes' size: they ride with the Bot Chat's digest (NOTE_CHARS)

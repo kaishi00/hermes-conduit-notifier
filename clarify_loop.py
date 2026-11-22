@@ -730,6 +730,7 @@ class _UserWrites:
 
     def __init__(self) -> None:
         self.session = turn_surface.current_session()
+        self._steers = self._queued = 0
         self._steers, self._queued = self._counts()
 
     def _counts(self) -> tuple[int, int]:
@@ -746,7 +747,9 @@ class _UserWrites:
                 steers = len(parts) if parts and joined == pending else (1 if pending else 0)
                 # A correction aimed at a model request (busy mode interrupt) waits here.
                 steers += 1 if getattr(agent, "_pending_redirect", None) else 0
-            queued = (1 if session.get("queued_prompt") else 0) + len(session.get("queued_prompts") or [])
+            head = session.get("queued_prompt")
+            queued = sum(1 for envelope in ([head] if head else []) + list(session.get("queued_prompts") or [])
+                         if not _hidden_send(envelope))
             return steers, queued
         except Exception:  # noqa: BLE001 - an unreadable record reads as nothing sent
             return self._steers, self._queued
@@ -760,6 +763,13 @@ class _UserWrites:
         if queued > self._queued and _busy_mode() == "queue":
             return "queued"
         return ""
+
+
+def _hidden_send(envelope: Any) -> bool:
+    """A queued prompt the user didn't write: a plugin's hidden send (a
+    workstream's wake, Pulse) carries ``display_kind`` "hidden" on its
+    envelope once Hermes has staged its row."""
+    return isinstance(envelope, dict) and envelope.get("_queued_display_kind") == "hidden"
 
 
 def _busy_mode() -> str:
@@ -818,10 +828,17 @@ def _close_hermes_prompt(app_session: Any, before: Any, batch: list[dict[str, An
         get_pending = getattr(gateway, "get_pending", None)
         if callable(resolve) and callable(get_pending):
             asked = {entry["question"] for entry in batch}
+            matches: dict[str, list[str]] = {}
             for clarify_id in _gateway_prompt_ids() - frozenset(before or ()):
                 entry = get_pending(clarify_id)
-                if entry is not None and getattr(entry, "question", None) in asked:
-                    resolve(clarify_id, getattr(gateway, "CANCELLED", "\x00cancelled"))
+                question = getattr(entry, "question", None) if entry is not None else None
+                if question in asked:
+                    matches.setdefault(question, []).append(clarify_id)
+            # Only a wording that one new question carries: two chats asking
+            # the same thing at once leave the other chat's card alone.
+            for ids in matches.values():
+                if len(ids) == 1:
+                    resolve(ids[0], getattr(gateway, "CANCELLED", "\x00cancelled"))
     except Exception:  # noqa: BLE001 - the answer stands; the card times out as before
         logger.warning("conduit_push: couldn't withdraw Hermes' own question card", exc_info=True)
 
