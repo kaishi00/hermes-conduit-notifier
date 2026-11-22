@@ -13,11 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.193.3 (2026-11-22)
+## 0.193.4 (2026-11-22)
 
 ### Fixes
 
 - With Hermes on a Claude model, Pulse made no reports, memory or follow-ups, and Bot Chat's work watch couldn't read: Claude refused the shape each reply was asked for. When a Pulse call fails, the log now says what the provider said, not only the error's name.
+
+## 0.193.3 (2026-11-22)
+
+### Fixes
+
+- A board your agent shows while no call is open goes in the chat. Before, a reply to a message you sent with an attachment, or from a Shortcut, could say the board was on your screen when nothing showed it.
 
 ## 0.193.2 (2026-11-22)
 

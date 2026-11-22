@@ -144,6 +144,9 @@ def test_a_hand_edited_card_is_cleaned_or_dropped(store, clock):
 def tool_home(tmp_path, monkeypatch):
     monkeypatch.setattr(tool, "get_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(tool.client, "load_state", lambda: {"credential": "c"})
+    # A call is live unless a test says otherwise: only a call's screen
+    # claims a card kept for it (notifier#1002).
+    monkeypatch.setattr(tool.calls, "in_call", lambda: True)
     return tmp_path
 
 
@@ -275,6 +278,28 @@ def test_a_spoken_or_unreported_turn_still_reaches_the_call_screen(tool_home):
         answer = _call({"title": "Forecast", "markdown": TABLE})
         assert answer["ok"] is True and answer["note"] == tool.SHOWN_NOTE, entry
     turn_surface.start_turn("s1")
+
+
+def test_a_turn_with_no_call_live_is_drawn_in_the_chat_not_kept_for_a_screen(tool_home, monkeypatch):
+    # A message sent with an attachment reports no entry; with no call live
+    # nothing would claim the card, and Hermes said it was on the user's
+    # screen (notifier#1002).
+    monkeypatch.setattr(tool.calls, "in_call", lambda: False)
+    _exchange(PresentStore(tool_home), features=("show-cards", "chat-cards"))
+    for entry in ("spoken", None):
+        tool.turn_surface._keep_entry("s1", entry)
+        answer = _call({"title": "Dinner", "markdown": TABLE, "cards": [MAP]})
+        assert answer["ok"] is True and answer["cards"] == [CLEAN_MAP] and "id" not in answer, entry
+        assert answer["note"].startswith(tool.IN_CHAT_NOTE), entry
+        assert _call({"title": "Forecast", "markdown": TABLE}) == \
+            {"ok": False, "error": "typed_chat", "note": tool.TYPED_CHAT_NOTE}, entry
+    tool.turn_surface.start_turn("s1")
+    assert "cards" not in _exchange(PresentStore(tool_home), features=("show-cards", "chat-cards")), \
+        "nothing waits for a screen that isn't open"
+    _exchange(PresentStore(tool_home))
+    answer = _call({"title": "Forecast", "markdown": TABLE, "cards": [MAP]}, session_id="s2")
+    assert answer["error"] == "typed_chat" and answer["markdown"].startswith("**Kin Khao**"), \
+        "a Conduit that draws no chat cards gets the Markdown for the reply"
 
 
 def test_a_typed_turn_counts_only_for_its_own_chat_until_the_next_turn(tool_home):
