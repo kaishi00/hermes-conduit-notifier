@@ -376,6 +376,8 @@ def signed_in_voice_read(body: Any) -> Dict[str, Any]:
         raise core.TokenError(400, "Expected a JSON object")
     reader = _reader(body.get("reader"))
     name, args = body.get("tool"), body.get("args")
+    if not isinstance(name, str) or not name:
+        raise core.TokenError(400, "Expected a tool name")
     for key, (store, module, device_id) in _signed_in_sources(reader).items():
         if key == "phone":
             if name in module.voice_tools(store, device_id):

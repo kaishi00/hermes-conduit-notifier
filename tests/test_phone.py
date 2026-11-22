@@ -1533,6 +1533,26 @@ def test_routes_round_trip(client):
     assert http.get(f"{BASE}/phone/status").json()["stored"] is False
 
 
+def test_a_signed_in_call_reads_the_phone_only_for_the_modes_it_names(client):
+    http = client.http
+    handset = Phone()
+    handset.accept(http.post(f"{BASE}/phone/key", json=handset.key_request()).json())
+    batch = _batch(sent_at=datetime.now(timezone.utc).isoformat(), sharing=_sharing(voice_readers=["grok-live"]))
+    assert http.post(f"{BASE}/phone/ingest", json=handset.seal(batch)).status_code == 200
+    listed = lambda reader: [tool["name"] for tool in  # noqa: E731
+                             http.get(f"{BASE}/voice-tools", params={"reader": reader}).json()["tools"]]
+    names = listed("grok-live")
+    assert names and all(name.startswith("conduit_") for name in names)
+    assert listed("gemini-live") == []
+    read = http.post(f"{BASE}/voice-tools/read", json={"reader": "grok-live", "tool": names[0], "args": {}})
+    assert read.status_code == 200 and "result" in read.json()
+    refused = http.post(f"{BASE}/voice-tools/read", json={"reader": "gemini-live", "tool": names[0], "args": {}})
+    assert refused.status_code == 404
+    for tool_name in ([], {"a": 1}, None, ""):
+        bad = http.post(f"{BASE}/voice-tools/read", json={"reader": "grok-live", "tool": tool_name, "args": {}})
+        assert bad.status_code == 400, tool_name
+
+
 def test_body_caps(client):
     for route, cap in (("ingest", api.phone_data.PHONE_MAX_INGEST_BODY_BYTES), ("exchange", api.phone_data.PHONE_MAX_EXCHANGE_BODY_BYTES),
                        ("key", api.phone_data.PHONE_MAX_KEY_BODY_BYTES)):
