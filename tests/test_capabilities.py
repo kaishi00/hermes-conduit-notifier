@@ -272,14 +272,14 @@ def test_what_the_plugin_cant_do_on_this_hermes_is_listed_until_it_can(monkeypat
     assert "degraded" not in _client().get(f"{BASE}/capabilities").json()
 
 
-def _fake_basic_sign_in(monkeypatch, *, basic: bool, config: dict):
+def _fake_basic_sign_in(monkeypatch, *, basic: bool, config):
     # Hermes' provider registry and config, as the dashboard serving the plugin has them.
     registry = types.ModuleType("hermes_cli.dashboard_auth.registry")
     registry.get_provider = lambda name, scope=None: object() if basic and name == "basic" else None
     dashboard_auth = types.ModuleType("hermes_cli.dashboard_auth")
     dashboard_auth.registry = registry
     config_module = types.ModuleType("hermes_cli.config")
-    config_module.load_config = lambda: config
+    config_module.load_config = config if callable(config) else (lambda: config)
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_cli.dashboard_auth = dashboard_auth
     hermes_cli.config = config_module
@@ -287,7 +287,12 @@ def _fake_basic_sign_in(monkeypatch, *, basic: bool, config: dict):
                          ("hermes_cli.dashboard_auth.registry", registry), ("hermes_cli.config", config_module)):
         monkeypatch.setitem(sys.modules, name, module)
     monkeypatch.delenv("HERMES_DASHBOARD_BASIC_AUTH_SECRET", raising=False)
-    monkeypatch.setattr(api.capabilities, "_sign_in_ends_on_restart", None)
+    _start_dashboard(monkeypatch)
+
+
+def _start_dashboard(monkeypatch):
+    # The secret is read as Hermes imports the plugin, when the dashboard starts.
+    monkeypatch.setattr(api.capabilities, "_SECRET_MISSING_AT_START", api.capabilities._secret_is_missing())
 
 
 def test_password_sign_in_without_a_secret_says_restarts_sign_everyone_out(monkeypatch):
@@ -311,6 +316,39 @@ def test_a_secret_in_config_or_the_environment_keeps_sign_ins(monkeypatch):
 
     _fake_basic_sign_in(monkeypatch, basic=True, config={})
     monkeypatch.setenv("HERMES_DASHBOARD_BASIC_AUTH_SECRET", "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0")
+    _start_dashboard(monkeypatch)
+    assert "sign_in_ends_on_restart" not in _client().get(f"{BASE}/capabilities").json()
+
+
+def test_shell_text_in_the_environment_counts_as_no_secret(monkeypatch):
+    _fake_basic_sign_in(monkeypatch, basic=True, config={})
+    monkeypatch.setenv("HERMES_DASHBOARD_BASIC_AUTH_SECRET", "`openssl rand -base64 32`")
+    _start_dashboard(monkeypatch)
+    assert _client().get(f"{BASE}/capabilities").json()["sign_in_ends_on_restart"] is True
+
+
+def test_a_secret_added_after_the_dashboard_started_doesnt_clear_the_flag(monkeypatch):
+    # Hermes read the secret as it started, so this process's sign-ins still end.
+    _fake_basic_sign_in(monkeypatch, basic=True, config={})
+    monkeypatch.setenv("HERMES_DASHBOARD_BASIC_AUTH_SECRET", "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0")
+    assert _client().get(f"{BASE}/capabilities").json()["sign_in_ends_on_restart"] is True
+
+
+def test_an_unreadable_config_reports_nothing_and_still_answers(monkeypatch):
+    def broken():
+        raise ValueError("bad yaml")
+    _fake_basic_sign_in(monkeypatch, basic=True, config=broken)
+    assert api.capabilities._secret_is_missing() is None
+    reply = _client().get(f"{BASE}/capabilities")
+    assert reply.status_code == 200
+    assert "sign_in_ends_on_restart" not in reply.json()
+
+
+def test_a_broken_provider_registry_reports_nothing(monkeypatch):
+    _fake_basic_sign_in(monkeypatch, basic=True, config={})
+    def broken(name, scope=None):
+        raise RuntimeError("registry not ready")
+    monkeypatch.setattr(sys.modules["hermes_cli.dashboard_auth.registry"], "get_provider", broken)
     assert "sign_in_ends_on_restart" not in _client().get(f"{BASE}/capabilities").json()
 
 
