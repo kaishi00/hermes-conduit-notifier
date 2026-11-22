@@ -3803,8 +3803,10 @@ whether notes and attendees are included (off by default).
   `conduit_contacts`, `conduit_photos`, the phone line with each message,
   Pulse and free/busy in rooms. Its changes queue in the sharing profile's
   store, and the nudge goes through the asking profile's own pairing, so the
-  phone picks them up on its next exchange as usual. Devices that left the
-  switch off stay out of its reads and changes. A profile that a phone
+  phone picks them up on its next exchange as usual. The two profiles share
+  one queue for that device, so `pending` in either lists the other's
+  changes too, and only the first to ask sees them as `new`. Devices that
+  left the switch off stay out of its reads and changes. A profile that a phone
   syncs to itself always reads its own, and if several profiles share with
   the others the first wins (default, then named ones alphabetically).
   Voice reads stay with the sharing profile, whose key they're sealed with.
