@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.192.3 (2026-11-22)
+
+### Fixes
+
+- A call watch on some models could fail every run because its report reached the plugin empty, and then kept resending the same broken call. The run's instructions now show the exact shape, and a report that arrives empty is told how to send it right.
+
 ## 0.192.2 (2026-11-22)
 
 ### Fixes
