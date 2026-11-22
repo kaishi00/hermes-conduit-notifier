@@ -2714,14 +2714,49 @@ def test_another_profile_looking_never_upgrades_or_locks_the_sharing_store(home,
     assert owner == "work" and found.path == store.path and found.shared_only is True
 
 
-def test_a_newer_plugins_store_in_another_profile_isnt_read(home):
+def _set_schema(path, value, *statements):
+    import contextlib
     import sqlite3
 
+    # sqlite3's context manager commits but never closes the connection.
+    with contextlib.closing(sqlite3.connect(path)) as db, db:
+        for statement in statements:
+            db.execute(statement)
+        db.execute("UPDATE meta SET value=? WHERE key='schema'", (value,))
+
+
+def _schema(path):
+    import contextlib
+    import sqlite3
+
+    with contextlib.closing(sqlite3.connect(path)) as db:
+        return db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0]
+
+
+def test_a_newer_plugins_store_in_another_profile_isnt_read(home):
     store, _ = _work_shares(home)
-    with sqlite3.connect(store.path) as db:
-        db.execute("UPDATE meta SET value='99' WHERE key='schema'")
+    _set_schema(store.path, "99")
     assert phone.store_for(home.path)[1] is None
     assert tool.calendar_available() is False
+
+
+def test_a_store_in_another_profile_with_a_schema_that_isnt_a_number_isnt_read(home):
+    store, _ = _work_shares(home)
+    _set_schema(store.path, "five")
+    assert phone.store_for(home.path)[1] is None
+    assert tool.calendar_available() is False
+
+
+def test_an_older_plugins_store_in_another_profile_still_counts_and_its_read_upgrades_it(home):
+    store, _ = _work_shares(home)
+    # As plugin 0.160 left it: schema 4, before the photos tables.
+    _set_schema(store.path, "4", "DROP INDEX photos_by_time", "DROP TABLE photos")
+    found, owner = phone.store_for(home.path)
+    assert owner == "work" and found.path == store.path
+    assert _schema(store.path) == "4", "finding it never upgrades it"
+    assert tool.calendar_available() is True
+    assert any(event["id"] == "e_dentist" for event in _cal({"action": "events", "from": "2026-10-16"})["events"])
+    assert _schema(store.path) == str(phone.SCHEMA_VERSION)
 
 
 def test_a_re_keyed_device_keeps_another_profiles_changes_in_view(home):
