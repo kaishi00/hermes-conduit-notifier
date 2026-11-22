@@ -643,8 +643,8 @@ the FULL batch to Conduit instead of collapsing it to the first question:
   legacy whole-decision body (`{"answer": "…"}`) still works for
   single-question cards, and on a batch it counts as the collapsed first
   question only.
-- A question can be left blank, as Conduit's form leaves a field the user
-  didn't fill: a blank `answer` with its `question_id` locks that question
+- A question can be left blank, as Conduit's Skip, Skip all and a form's
+  unfilled field leave it: a blank `answer` with its `question_id` locks that question
   with an empty answer, which Hermes reads as skipped (relay 0.18,
   capability `clarify-skip`; an encrypted pairing seals the empty answer
   like any other). A blank answer without a question, or for a decision
