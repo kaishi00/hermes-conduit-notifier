@@ -1222,3 +1222,23 @@ def test_decide_lets_a_new_incident_through_when_the_same_list_closes_its_card(l
     rows = [candidate(text="Audit failed again", subject="job:default:41", pick=again["pick"])]
     candidates.decide(live.store, rows, now=now)  # no close in this list: held for its open card
     assert rows[0]["skip"] == "raised"
+
+
+def test_a_pick_that_calls_a_healthy_job_failing_never_comes_up():
+    # A read_file at a wrong path failed in a chat transcript, and the report
+    # called a scheduled job's script missing while its own job list showed the
+    # job running fine.
+    entry = {"line": "The PR-watcher cron script is missing from ~/.hermes/cron/scripts.", "job": "j6",
+             "shape": "status", "facts": {"label": "PR watcher script", "state": "fail"},
+             "actions": [{"label": "Restore the script", "does": "ask", "say": "Restore it"}]}
+    jobs = {"j6": "job::c13b9adf75df"}
+    row = candidates.with_pick(candidate(), entry, jobs=jobs, health={"job::c13b9adf75df": ""})
+    assert row["subject"] == "job::c13b9adf75df"
+    assert row["skip"] == "unbacked_status" and not row.get("pick")
+    # The job list showing it failing keeps the card: that one is news.
+    row = candidates.with_pick(candidate(), entry, jobs=jobs,
+                               health={"job::c13b9adf75df": "failed its last 3 runs: timeout"})
+    assert not row.get("skip") and row["pick"]
+    # A report that listed no job health (an older caller) has nothing to
+    # check the claim against and keeps it.
+    assert candidates.with_pick(candidate(), entry, jobs=jobs).get("skip", "") == ""

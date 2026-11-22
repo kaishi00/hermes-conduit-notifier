@@ -1507,6 +1507,26 @@ def test_the_report_lists_active_cron_jobs(tmp_path):
         assert report.cron_jobs(tmp_path) == ""
 
 
+def test_the_job_list_says_which_of_its_jobs_are_failing(tmp_path):
+    # So a pick naming a job as failing is checked against the same record the
+    # report read (pulse_picks.unbacked_failing).
+    (tmp_path / "cron").mkdir()
+    jobs = [
+        {"id": "a1", "name": "Check the build", "prompt": "x", "schedule_display": "once at 09:00",
+         "next_run_at": "2026-10-21T09:00:00+00:00", "last_status": "ok"},
+        {"id": "b2", "name": "Nightly backup", "prompt": "y", "schedule_display": "daily at 10:00",
+         "next_run_at": "2026-10-21T10:00:00+00:00", "last_status": "failed", "failure_streak": 3,
+         "last_error": "disk full"},
+    ]
+    (tmp_path / "cron" / "jobs.json").write_text(json.dumps({"jobs": jobs}))
+    keys, health = {}, {}
+    text = report.cron_jobs(tmp_path, keys=keys, health=health)
+    assert keys == {"j1": "job::a1", "j2": "job::b2"}
+    assert health == {"job::a1": "", "job::b2": "failed its last 3 runs: disk full"}
+    assert text.splitlines()[2] == ("- j2 Nightly backup (daily at 10:00, next 2026-10-21T10:00:00+00:00)"
+                                    " [failing: failed its last 3 runs: disk full]: y")
+
+
 def test_the_report_context_stays_within_its_budget(db, tmp_path):
     now = time.time()
     db.session()

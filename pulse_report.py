@@ -474,11 +474,15 @@ def _active_jobs(home: Path) -> list[dict]:
             and job.get("state") not in ("paused", "completed")]
 
 
-def cron_jobs(home: Path, others: Sequence[tuple[str, Path]] = (), keys: Optional[dict[str, str]] = None) -> str:
+def cron_jobs(home: Path, others: Sequence[tuple[str, Path]] = (), keys: Optional[dict[str, str]] = None,
+              health: Optional[dict[str, str]] = None) -> str:
     """Hermes's active cron jobs: a promise with a job behind it is handled,
     unless the job is failing (``job_health``), which covers nothing. With
     ``keys``, each job listed gets a key ("j1"), and ``keys`` maps it to the
-    job's lasting subject ("job:<profile>:<id>", pulse_picks)."""
+    job's lasting subject ("job:<profile>:<id>", pulse_picks). With ``health``,
+    that subject maps to what ``job_health`` said of it ("" when it runs fine),
+    so a pick naming the job as failing can be checked against this list
+    (pulse_picks.unbacked_failing)."""
     active = [("", job) for job in _active_jobs(home)]
     for profile, path in others:
         active += [(profile, job) for job in _active_jobs(path)]
@@ -489,14 +493,17 @@ def cron_jobs(home: Path, others: Sequence[tuple[str, Path]] = (), keys: Optiona
     for profile, job in active[:MAX_JOBS]:
         when = _clip(job.get("schedule_display") or "", 60)
         upcoming = job.get("next_run_at")
-        health = job_health(job)
+        failing = job_health(job)
         key = ""
         if keys is not None and str(job.get("id") or ""):
             key = f"j{len(keys) + 1} "
-            keys[key.strip()] = f"job:{profile}:{job['id']}"
+            subject = f"job:{profile}:{job['id']}"
+            keys[key.strip()] = subject
+            if health is not None:
+                health[subject] = failing
         lines.append(f"- {key}{f'[{profile}] ' if profile else ''}{_clip(job.get('name') or job.get('id'), 80)} ({when}"
                      + (f", next {_clip(upcoming, 40)}" if upcoming else "") + ")"
-                     + (f" [failing: {health}]" if health else "") + f": {_clip(job.get('prompt'), 160)}")
+                     + (f" [failing: {failing}]" if failing else "") + f": {_clip(job.get('prompt'), 160)}")
     more = f"\n(and {len(active) - MAX_JOBS} more)" if len(active) > MAX_JOBS else ""
     return "## Hermes's scheduled jobs\n" + "\n".join(lines) + more
 
@@ -933,6 +940,10 @@ class Gathered:
     # With ``keyed``: the scheduled jobs listed (by key, "j1"), each as its
     # lasting subject (pulse_picks).
     jobs: dict[str, str] = field(default_factory=dict)
+    # With ``keyed``: each listed job's lasting subject -> what the list said
+    # of it ("" when it runs fine), so a pick naming it as failing is checked
+    # against the record (pulse_picks.unbacked_failing).
+    jobs_health: dict[str, str] = field(default_factory=dict)
 
 
 def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: float,
@@ -959,6 +970,7 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
     events: Optional[dict[str, dict]] = {} if keyed else None
     upcoming: Optional[list[dict]] = [] if keyed else None
     jobs: Optional[dict[str, str]] = {} if keyed else None
+    jobs_health: dict[str, str] = {}
     phone, zone_name = phone_context(home, now, reminders=reminders, events=events, upcoming=upcoming)
     zone_name = pulse_store.get("time_zone") or zone_name
     zone = zone_for(zone_name)
@@ -980,7 +992,7 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
                 ended_text, extra, phone,
                 inbox_context(home, since),
                 evidence.background(home, zone),
-                cron_jobs(home, others, keys=jobs), failed_calls(pulse_store, since, zone), memory_files(home, others)]
+                cron_jobs(home, others, keys=jobs, health=jobs_health if keyed else None), failed_calls(pulse_store, since, zone), memory_files(home, others)]
     sections = [section for section in sections if section]
     # With memory on, chats it has already read show only as what it kept from them
     # (often nothing): the report spends its room on what memory hasn't seen.
@@ -1012,8 +1024,10 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
         reminders = {key: r for key, r in (reminders or {}).items() if f"\n- {key} " in rest}
         events = {key: e for key, e in (events or {}).items() if f"\n- {key} " in rest}
         jobs = {key: job for key, job in (jobs or {}).items() if f"\n- {key} " in rest}
+        kept = set((jobs or {}).values())
+        jobs_health = {subject: said for subject, said in jobs_health.items() if subject in kept}
     return Gathered(rest + "\n\n" + chats, start, shown, resting, keys or {}, zone, done, ended, reminders or {},
-                    events or {}, upcoming or [], jobs or {})
+                    events or {}, upcoming or [], jobs or {}, jobs_health)
 
 
 def report_room(note: str = "") -> int:
