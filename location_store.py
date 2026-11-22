@@ -46,7 +46,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
-from . import sealing
+from . import sealing, voice_readers
 
 logger = logging.getLogger(__name__)
 
@@ -706,6 +706,18 @@ class LocationStore:
 
     # The agent's view -------------------------------------------------------------------
 
+    def voice_reader_device(self, reader: str, upgrade: bool = True) -> str | None:
+        """The device whose user lets ``reader`` read its location on a
+        signed-in call, the one that synced last; None when none does."""
+        with self._read(upgrade) as db:
+            if db is None:
+                return None
+            for device_id, sharing in db.execute(
+                    "SELECT id, sharing FROM devices WHERE last_seen IS NOT NULL ORDER BY last_seen DESC"):
+                if voice_readers.lets(_decode(sharing, None), reader):
+                    return device_id
+            return None
+
     def snapshot(self, device_id: str | None = None, upgrade: bool = True) -> dict[str, Any] | None:
         """Where the user is: the device with the newest fix, with its sharing
         and places, or None when nothing is shared. The device that synced
@@ -1192,6 +1204,9 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
     if not isinstance(other_profiles, bool):
         raise LocationError("malformed", "sharing.other_profiles must be true or false")
     sharing["other_profiles"] = other_profiles
+    # The voice modes the user lets read it on a signed-in call (voice_readers).
+    sharing["voice_readers"] = voice_readers.parse(value.get("voice_readers"),
+                                                   lambda message: LocationError("malformed", message))
     return sharing
 
 

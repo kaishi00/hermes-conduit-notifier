@@ -263,3 +263,31 @@ def test_the_log_line_carries_only_known_words(client, caplog, action):
         assert client.post(f"{BASE}/voice-tools/call", json=envelope).status_code == 200
     lines = [record.getMessage() for record in caplog.records if "voice read" in record.getMessage()]
     assert lines == ["Conduit voice read: conduit_health other for voice"]
+
+
+def test_a_signed_in_call_reads_health_only_for_the_modes_the_phone_names(client):
+    phone = VoicePhone()
+    _share(client, phone, _batch(voice_readers=["grok-live"]))
+    names = lambda reader: [tool["name"] for tool in  # noqa: E731
+                            client.get(f"{BASE}/voice-tools", params={"reader": reader}).json()["tools"]]
+    assert names("grok-live") == ["conduit_health"]
+    assert names("gemini-live") == []
+    read = client.post(f"{BASE}/voice-tools/read", json={
+        "reader": "grok-live", "tool": "conduit_health",
+        "args": {"action": "daily", "metrics": ["steps"], "from": "2026-10-11", "to": "2026-10-12"}}).json()
+    assert read["result"]["days"] == [{"date": "2026-10-11", "steps": 1200.0}, {"date": "2026-10-12", "steps": 800.0}]
+    # A batch without the field keeps what the phone said; an empty list takes it back.
+    assert client.post(f"{BASE}/health/ingest", json=phone.seal(_batch("batch-0002"))).status_code == 200
+    assert names("grok-live") == ["conduit_health"]
+    assert client.post(f"{BASE}/health/ingest",
+                       json=phone.seal(_batch("batch-0003", voice_readers=[]))).status_code == 200
+    assert names("grok-live") == []
+
+
+def test_wiping_health_forgets_which_modes_could_read_it(client):
+    phone = VoicePhone()
+    _share(client, phone, _batch(voice_readers=["grok-live"]))
+    store = health.HealthStore(api.core._calls_home())
+    assert store.voice_reader_device("grok-live") == DEVICE
+    store.wipe(DEVICE)
+    assert store.voice_reader_device("grok-live") is None

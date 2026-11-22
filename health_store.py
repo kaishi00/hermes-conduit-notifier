@@ -48,7 +48,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from . import sealing
+from . import sealing, voice_readers
 
 logger = logging.getLogger(__name__)
 
@@ -406,6 +406,7 @@ class HealthStore:
                 # private key can use what this exchange agrees.
                 for table in ("buckets", "events", "tombstones", "windows"):
                     db.execute(f"DELETE FROM {table} WHERE device=?", (device_id,))
+                db.execute("DELETE FROM meta WHERE key=?", (_readers_key(device_id),))
             db.execute(
                 "INSERT INTO devices(id, name, device_public, host_private, host_public, kid, created_at, last_seen)"
                 " VALUES(?,?,?,?,?,?,?,NULL)"
@@ -548,6 +549,10 @@ class HealthStore:
                     db.execute(f"DELETE FROM {table}")
                 else:
                     db.execute(f"DELETE FROM {table} WHERE {column}=?", (device_id,))
+            if device_id is None:
+                db.execute("DELETE FROM meta WHERE key LIKE 'voice_readers:%'")
+            else:
+                db.execute("DELETE FROM meta WHERE key=?", (_readers_key(device_id),))
         # The file goes once no device is left. Counted again under the
         # writers' lock, so a key registered since the delete stays.
         with self._locked():
@@ -575,6 +580,23 @@ class HealthStore:
             connection.close()
 
     # Queries (the agent's tool) ------------------------------------------------------
+
+    def voice_reader_device(self, reader: str) -> str | None:
+        """The device whose user lets ``reader`` read its health on a
+        signed-in call, the one that synced last; None when none does."""
+        with self._read() as db:
+            if db is None:
+                return None
+            for device_id, readers in db.execute(
+                    "SELECT devices.id, meta.value FROM devices JOIN meta ON meta.key = 'voice_readers:' || devices.id"
+                    " ORDER BY devices.last_seen IS NULL, devices.last_seen DESC"):
+                try:
+                    allowed = json.loads(readers)
+                except ValueError:
+                    continue
+                if isinstance(allowed, list) and reader in allowed:
+                    return device_id
+            return None
 
     def overview(self, only: str | None = None) -> dict[str, Any]:
         """``only``: one device id (a voice read); no other device is read."""
@@ -721,6 +743,10 @@ def _meta(db: sqlite3.Connection, key: str) -> str | None:
     return row[0] if row else None
 
 
+def _readers_key(device_id: str) -> str:
+    return f"voice_readers:{device_id}"
+
+
 def _migrate(db: sqlite3.Connection, now: float) -> None:
     version = _meta(db, "schema")
     if version == str(SCHEMA_VERSION):
@@ -808,6 +834,10 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
         value for value in batch["categories"] if isinstance(value, str) and value in CATEGORIES]
     detailed = None if batch.get("detailed") is None else [
         value for value in batch["detailed"] if isinstance(value, str) and value in CATEGORIES]
+    # The voice modes the user lets read health on a signed-in call; absent
+    # (an older Conduit, or a batch of deletions only) means unchanged.
+    readers = None if batch.get("voice_readers") is None else voice_readers.parse(
+        batch.get("voice_readers"), lambda message: HealthError("malformed", message), "voice_readers")
 
     # Validate everything before writing anything, so a bad item can't leave
     # half a batch behind. A reading the store can't keep (years of Apple
@@ -882,6 +912,10 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
                " detailed=COALESCE(?, detailed) WHERE id=?",
                (now, tz, None if categories is None else json.dumps(categories),
                 None if detailed is None else json.dumps(detailed), device_id))
+    if readers is not None:
+        # Kept in meta, beside the schema, so no version bump locks older
+        # plugins out of this store.
+        db.execute("INSERT OR REPLACE INTO meta VALUES(?, ?)", (_readers_key(device_id), json.dumps(readers)))
     return {"windows": replaced, "stale_windows": skipped, "events": added, "duplicates": duplicates,
             "skipped_events": len(unusable), "deleted": len(deleted), "removed": removed}
 

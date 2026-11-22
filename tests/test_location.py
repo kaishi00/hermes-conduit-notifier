@@ -1373,3 +1373,57 @@ def test_a_local_live_read_is_logged_as_a_local_live_call():
     tool._log_voice(Store(), "now", "local-live")
     tool._log_voice(Store(), "now", "something-new")
     assert logged == [("now", "", "Local Live call"), ("now", "", "Voice call")]
+
+
+# --- Signed-in voice reads (Conduit for desktop) ------------------------------------
+
+
+def test_a_signed_in_call_reads_location_only_for_the_modes_the_user_lets(voice):
+    client, store = voice
+    _voice_phone(store, fix=fix(), sharing=sharing(voice_readers=["gemini-live", "not-a-mode"]))
+    assert store.snapshot()["sharing"]["voice_readers"] == ["gemini-live"], "an unknown mode is dropped"
+    names = lambda reader: [item["name"] for item in  # noqa: E731
+                            client.get(f"{BASE}/voice-tools", params={"reader": reader}).json()["tools"]]
+    assert names("gemini-live") == ["conduit_location"]
+    assert names("grok-live") == []
+    read = client.post(f"{BASE}/voice-tools/read",
+                       json={"reader": "gemini-live", "tool": "conduit_location", "args": {"action": "now"}})
+    assert read.status_code == 200 and read.headers["cache-control"] == "no-store"
+    assert read.json()["result"]["area"] == "Shoreditch, London, United Kingdom"
+    assert store.reads()[0]["session_title"] == "Gemini Live call"
+    refused = client.post(f"{BASE}/voice-tools/read",
+                          json={"reader": "grok-live", "tool": "conduit_location", "args": {"action": "now"}})
+    assert refused.status_code == 404
+    assert client.get(f"{BASE}/voice-tools", params={"reader": "gemini"}).status_code == 400
+
+
+def test_a_phone_that_doesnt_say_lets_no_signed_in_call_read(voice):
+    client, store = voice
+    _voice_phone(store, fix=fix())
+    assert store.snapshot()["sharing"]["voice_readers"] == []
+    assert client.get(f"{BASE}/voice-tools", params={"reader": "gemini-live"}).json()["tools"] == []
+    assert client.get(f"{BASE}/voice-context", params={"reader": "gemini-live"}).json() == {"ok": True, "context": ""}
+    # The phone's own sealed list is unchanged.
+    assert [item["name"] for item in client.get(f"{BASE}/voice-tools").json()["tools"]] == ["conduit_location"]
+
+
+def test_a_signed_in_calls_briefing_says_where_the_user_is_at_their_detail(voice):
+    client, store = voice
+    _voice_phone(store, fix=fix(), sharing=sharing(voice_readers=["gpt-live"]))
+    context = client.get(f"{BASE}/voice-context", params={"reader": "gpt-live"}).json()["context"]
+    assert context.startswith("Where the user is, from their phone, as of ")
+    assert "in Shoreditch, London, United Kingdom" in context
+    assert "51.53" not in context, "background detail is the area"
+    assert store.reads()[0]["session_title"] == "GPT-Live call"
+    assert client.get(f"{BASE}/voice-context", params={"reader": "qwen-live"}).json()["context"] == ""
+
+
+def test_a_paused_or_old_location_stays_out_of_the_briefing(voice, tmp_path):
+    client, store = voice
+    phone = _voice_phone(store, fix=fix(), sharing=sharing(voice_readers=["gemini-live"]))
+    assert client.get(f"{BASE}/voice-context", params={"reader": "gemini-live"}).json()["context"]
+    later = location.LocationStore(tmp_path, clock=lambda: NOW + tool.VOICE_CONTEXT_MAX_AGE_S + 60)
+    assert tool.voice_context(later, DEVICE, "gemini-live") is None, "too old to say where they are now"
+    store.ingest(phone.seal(phone.batch(sharing=sharing(voice_readers=["gemini-live"],
+                                                        paused_until="2026-10-13T09:00:00+01:00"))))
+    assert client.get(f"{BASE}/voice-context", params={"reader": "gemini-live"}).json()["context"] == ""

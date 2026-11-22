@@ -3496,6 +3496,29 @@ timers Hermes set) and `conduit_contacts` (`people`) joins the list, each once
 a phone shares it; setting an alarm or timer in a call is the phone's own tool
 too.
 
+### Signed-in voice reads (plugin 0.194+)
+
+Conduit for desktop's live calls are signed in to the dashboard but have no
+device key to seal with. So the phone also tells the host, inside each
+store's sealed sharing, which voice modes the user lets read that data: the
+same per-mode choice its own calls follow, as `voice_readers` (Conduit's mode
+ids: `gemini-live`, `qwen-live`, `gpt-live`, `grok-live`, `local-live`) in the
+location and phone stores' `sharing`, and in a health batch (absent means
+unchanged there). A phone that leaves it out lets no signed-in call read
+anything. For a signed-in call the host answers only those modes, from the
+device that allows them, the last one synced:
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| GET | `/api/plugins/conduit_push/voice-tools?reader=<mode>` | The tools that mode may use (the same entries as the sealed list) |
+| POST | `/api/plugins/conduit_push/voice-tools/read` with `{reader, tool, args}` | `{ok, result}`, the tool's answer; 404 when the user doesn't let that mode read it |
+| GET | `/api/plugins/conduit_push/voice-context?reader=<mode>` | `{ok, context}`: lines for the call's start, where the user is (the latest fix of the last 6 hours, at the detail they share, never while paused) and their phone's battery, CarPlay and Focus, as shared; `""` when nothing is allowed or fresh |
+
+Location is read as `conduit_location` reads it, through another profile's
+store when that one shares with this profile, and each read, the briefing's
+included, is logged as that mode's call. A bad `reader` is a 400. The plugin
+reports `voice-readers`.
+
 ## Events from Shortcuts automations (plugin 0.73+)
 
 Conduit's **Log to Hermes** Shortcuts action keeps what an automation hands

@@ -278,6 +278,45 @@ def voice_handle(args: Any, *, device_id: str, store: LocationStore, provider: s
         return {"ok": False, "error": "unavailable", "note": "The location couldn't be read. Tell the user."}
 
 
+# A call's briefing leaves out a fix older than this: by then it says where
+# the user was, which a tool read can still give with its age.
+VOICE_CONTEXT_MAX_AGE_S = 6 * 3600.0
+
+
+def voice_context(store: LocationStore, device_id: str, reader: str) -> str | None:
+    """Where the user is, as one line for the start of a signed-in voice call
+    whose mode the user lets read location (voice_readers): the latest fix of
+    ``device_id`` at the detail they share. None when paused, off, or too old.
+    Logged like any voice read."""
+    try:
+        view = store.snapshot(device_id)
+        if view is None or view["fix"] is None:
+            return None
+        now = store.clock()
+        if sharing_paused(view["sharing"], now) or now - view["fix"]["at"] > VOICE_CONTEXT_MAX_AGE_S:
+            return None
+        _log_voice(store, "now", reader)
+        fix = _fix_view(view, now)
+        parts = []
+        if fix.get("at_saved_place"):
+            parts.append(f"at {fix['at_saved_place']}")
+        if fix.get("area"):
+            parts.append(f"in {fix['area']}")
+        coordinates = fix.get("coordinates")
+        if coordinates and not parts:
+            parts.append(f"near {coordinates['lat']}, {coordinates['lon']}")
+        if not parts:
+            return None
+        if fix.get("moving"):
+            parts.append(f"moving at {fix['moving']}")
+        return (f"Where the user is, from their phone, as of {fix['as_of']}: {', '.join(parts)}. Use it when where "
+                "they are matters (weather, anything near them, travel times); don't say it unless it helps, and "
+                "never say coordinates aloud.")
+    except Exception:  # noqa: BLE001 — a briefing goes on without it
+        logger.warning("conduit_location: no location for a call's briefing", exc_info=True)
+        return None
+
+
 def _spoken(answer: dict[str, Any]) -> dict[str, Any]:
     """A voice answer: no coordinates (the voice provider gets the area,
     saved place and distances, never a point on the map) and notes without

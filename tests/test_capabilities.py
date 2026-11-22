@@ -121,6 +121,7 @@ def test_every_capability_names_a_served_route_family():
         "health-sync": "/health/",
         "shortcut-inbox": "/inbox/",
         "voice-tools": "/voice-tools",
+        "voice-readers": "/voice-context",
         "location-sync": "/location/",
         # A fresh lookup is the location status route's `locate` answer.
         "location-locate": "/location/status",

@@ -792,6 +792,34 @@ def _phone(args: dict[str, Any], store: PhoneStore | None = None, exact: bool = 
 TURN_STATUS_MAX_AGE_S = 30 * 60
 
 
+def _status_parts(state: dict[str, Any], sharing: dict[str, Any], now: float) -> tuple[list[str], list[float]]:
+    """The phone's battery, Low Power Mode, CarPlay and Focus as shared, from
+    the last TURN_STATUS_MAX_AGE_S, and each reading's age."""
+    parts: list[str] = []
+    ages: list[float] = []
+    # A phone's clock may run a little ahead, as the store allows.
+    fresh = lambda at: at is not None and -MAX_CLOCK_SKEW_S <= now - at <= TURN_STATUS_MAX_AGE_S  # noqa: E731
+    status = state["status"] if sharing.get("status") and fresh(state["status_at"]) else None
+    if status:
+        ages.append(max(0.0, now - state["status_at"]))
+        if isinstance(status.get("battery"), (int, float)):
+            parts.append(f"{round(status['battery'] * 100)}% battery" + (", charging" if status.get("charging")
+                                                                         else ""))
+        if status.get("low_power"):
+            parts.append("Low Power Mode on")
+        if status.get("carplay"):
+            parts.append("connected to CarPlay")
+    focus = state["focus"] if sharing.get("focus") and fresh(state["focus_at"]) else None
+    if focus:
+        ages.append(max(0.0, now - state["focus_at"]))
+        if focus.get("active"):
+            label = focus.get("label")
+            parts.append(f"{label} Focus on" if label else "a Focus on")
+        else:
+            parts.append("no Focus on")
+    return parts, ages
+
+
 def turn_note(store: PhoneStore | None = None) -> str | None:
     """The phone's battery, Low Power Mode, CarPlay and Focus, for a turn
     sent from Conduit, when the user lets them go with each message
@@ -807,29 +835,7 @@ def turn_note(store: PhoneStore | None = None) -> str | None:
             if not sharing.get("turn_status"):
                 return None
             state = store.phone_status(db, device["id"])
-        now = store.clock()
-        parts: list[str] = []
-        ages: list[float] = []
-        # A phone's clock may run a little ahead, as the store allows.
-        fresh = lambda at: at is not None and -MAX_CLOCK_SKEW_S <= now - at <= TURN_STATUS_MAX_AGE_S  # noqa: E731
-        status = state["status"] if sharing.get("status") and fresh(state["status_at"]) else None
-        if status:
-            ages.append(max(0.0, now - state["status_at"]))
-            if isinstance(status.get("battery"), (int, float)):
-                parts.append(f"{round(status['battery'] * 100)}% battery" + (", charging" if status.get("charging")
-                                                                             else ""))
-            if status.get("low_power"):
-                parts.append("Low Power Mode on")
-            if status.get("carplay"):
-                parts.append("connected to CarPlay")
-        focus = state["focus"] if sharing.get("focus") and fresh(state["focus_at"]) else None
-        if focus:
-            ages.append(max(0.0, now - state["focus_at"]))
-            if focus.get("active"):
-                label = focus.get("label")
-                parts.append(f"{label} Focus on" if label else "a Focus on")
-            else:
-                parts.append("no Focus on")
+        parts, ages = _status_parts(state, sharing, store.clock())
         if not parts:
             return None
         oldest = max(ages)
@@ -841,6 +847,28 @@ def turn_note(store: PhoneStore | None = None) -> str | None:
                 "low, no reading to do while they drive); don't mention it otherwise.]")
     except Exception:  # noqa: BLE001
         logger.debug("conduit_phone: no phone state for this turn", exc_info=True)
+        return None
+
+
+def voice_context(store: PhoneStore, device_id: str) -> str | None:
+    """The phone's battery, CarPlay and Focus as one line for the start of a
+    signed-in voice call whose mode the user lets read the phone
+    (voice_readers), as they share them. None when nothing is fresh."""
+    try:
+        with store.reader("phone", device_id, exact=True) as opened:
+            if opened is None:
+                return None
+            db, device = opened
+            state = store.phone_status(db, device["id"])
+            parts, ages = _status_parts(state, device["sharing"], store.clock())
+        if not parts:
+            return None
+        oldest = max(ages)
+        when = f" (as of {int(oldest // 60)} min ago)" if oldest >= 120 else ""
+        return (f"The user's phone{when}: {', '.join(parts)}. Let it shape the call only when it matters "
+                "(they may be driving, or busy in a Focus); don't mention it otherwise.")
+    except Exception:  # noqa: BLE001 — a briefing goes on without it
+        logger.debug("conduit_phone: no phone state for a call's briefing", exc_info=True)
         return None
 
 
