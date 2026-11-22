@@ -39,8 +39,11 @@ def store_for(home: str | Path, make: Callable[[Any], LocationStore] = LocationS
             store = make(path)
             if not store.exists():
                 continue
+            # Only its devices that share with this host's other profiles
+            # answer here, each by its own word, as phone and health do.
+            store.shared_only = True
             view = store.snapshot(upgrade=False)  # never another profile's write lock
-            if view is not None and view["sharing"].get("other_profiles") is True and _on(view["sharing"]):
+            if view is not None and _on(view["sharing"]):
                 return store, name
     return own, None
 

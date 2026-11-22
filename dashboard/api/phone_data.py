@@ -327,7 +327,7 @@ def _reader(value: Any) -> str:
     return value
 
 
-def _signed_in_sources(reader: str) -> Dict[str, Tuple[Any, Any, str]]:
+def _signed_in_sources(reader: str) -> Dict[str, Tuple[Any, Any, str, str]]:
     """Per sealed key ("location", "health", "phone"): the store, the module
     that reads it, the device whose user lets ``reader`` read it, and this
     profile's name when the store is another profile's ("" for its own), so
@@ -341,11 +341,13 @@ def _signed_in_sources(reader: str) -> Dict[str, Tuple[Any, Any, str]]:
                 # As the agent's tool reads it: another profile's store when
                 # that one shares with this profile.
                 store, owner = core._plugin_package_module("location_profiles").store_for(home, store_class)
+                # Another profile's store: only a device that shares out answers.
+                device_id = store.voice_reader_device(reader)
             else:
                 # Another profile's health too, when that one shares it with
                 # this host's other profiles, as the agent's tool reads it.
                 store, owner = core._plugin_package_module("health_store").store_for(home)
-            device_id = store.voice_reader_device(reader)
+                device_id = store.voice_reader_device(reader)
         except Exception:  # noqa: BLE001
             logger.warning("Conduit signed-in voice reads: %s unavailable", key, exc_info=True)
             continue
@@ -411,12 +413,15 @@ def signed_in_voice_context(reader: str) -> Dict[str, Any]:
     lines = []
     if "location" in sources:
         store, module, device_id, reading = sources["location"]
-        lines.append(module.voice_context(store, device_id, reader, profile=reading))
+        line = module.voice_context(store, device_id, reader, profile=reading)
+        if line:
+            logger.info("Conduit signed-in voice context: location for %s", reader)
+        lines.append(line)
     if "phone" in sources:
         store, module, device_id, _ = sources["phone"]
         line = module.voice_context(store, device_id)
         if line:
-            # The phone keeps no read log of its own: the host's log records it, as a read does.
+            # The phone keeps no read log of its own: the host's log records it, as every read.
             logger.info("Conduit signed-in voice context: phone status for %s", reader)
         lines.append(line)
     return {"context": "\n".join(line for line in lines if line)}

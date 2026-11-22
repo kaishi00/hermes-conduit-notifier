@@ -362,6 +362,9 @@ class LocationStore:
     def __init__(self, home: Any, clock: Callable[[], float] = time.time) -> None:
         self.path = Path(home) / FILE_NAME
         self.clock = clock
+        # Another profile's store (location_profiles.store_for sets it): only
+        # the devices whose sharing offers this host's other profiles answer.
+        self.shared_only = False
 
     # Connections ---------------------------------------------------------------
 
@@ -708,13 +711,18 @@ class LocationStore:
 
     def voice_reader_device(self, reader: str, upgrade: bool = True) -> str | None:
         """The device whose user lets ``reader`` read its location on a
-        signed-in call, the one that synced last; None when none does."""
+        signed-in call, the one that synced last; None when none does. On
+        another profile's store (``shared_only``) only a device that shares
+        with this host's other profiles counts."""
         with self._read(upgrade) as db:
             if db is None:
                 return None
             for device_id, sharing in db.execute(
                     "SELECT id, sharing FROM devices WHERE last_seen IS NOT NULL ORDER BY last_seen DESC"):
-                if voice_readers.lets(_decode(sharing, None), reader):
+                decoded = _decode(sharing, None)
+                if self.shared_only and not _shares_out(decoded):
+                    continue
+                if voice_readers.lets(decoded, reader):
                     return device_id
             return None
 
@@ -725,7 +733,8 @@ class LocationStore:
         latest word), and when no device has a fix. ``device_id`` (a voice
         read) reads that device alone, matched as an id. ``upgrade=False``
         (another profile looking) leaves a store an older plugin wrote as it
-        is, unread, rather than taking its write lock."""
+        is, unread, rather than taking its write lock. On another profile's
+        store (``shared_only``) only devices that share out are read."""
         with self._read(upgrade) as db:
             if db is None:
                 return None
@@ -735,6 +744,8 @@ class LocationStore:
             else:
                 rows = db.execute("SELECT id, name, last_seen, sharing FROM devices WHERE last_seen IS NOT NULL"
                                   " ORDER BY last_seen DESC").fetchall()
+            if self.shared_only:
+                rows = [item for item in rows if _shares_out(_decode(item[3], None))]
             if not rows:
                 return None
             row = rows[0]
@@ -911,18 +922,23 @@ class LocationStore:
             for device_id, kid, sharing_text in db.execute(
                     "SELECT id, kid, sharing FROM devices WHERE last_seen IS NOT NULL ORDER BY last_seen DESC"):
                 sharing = _decode(sharing_text, None) or {}
+                if self.shared_only and not _shares_out(sharing):
+                    continue
                 if (sharing.get("background") and "maps" in (sharing.get("features") or [])
                         and not sharing_paused(sharing, now)):
                     return {"device_id": device_id, "kid": kid, "sharing": sharing}
         return None
 
     def maps_host_allowed(self) -> bool:
-        """False while any device asks to keep maps lookups on the phone."""
+        """False while any device asks to keep maps lookups on the phone
+        (on another profile's store, any device that shares out)."""
         with self._read() as db:
             if db is None:
                 return True
-            return all((_decode(text, None) or {}).get("maps_host", True) is not False
-                       for (text,) in db.execute("SELECT sharing FROM devices WHERE sharing IS NOT NULL"))
+            words = [_decode(text, None) or {}
+                     for (text,) in db.execute("SELECT sharing FROM devices WHERE sharing IS NOT NULL")]
+            return all(sharing.get("maps_host", True) is not False for sharing in words
+                       if not self.shared_only or _shares_out(sharing))
 
     def start_maps(self, device_id: str, request: dict[str, Any]) -> dict[str, Any]:
         """Stores a lookup for one device. Returns ``{"cached": answer}``
@@ -1555,3 +1571,8 @@ def _prune(db: sqlite3.Connection, device_id: str, retention_days: int, now: flo
         db.execute("DELETE FROM visits WHERE device=? AND at<?", (device_id, now - retention_days * 86400))
     db.execute("DELETE FROM reads WHERE at<?", (now - READS_KEPT_S,))
     db.execute("DELETE FROM locates WHERE requested_at<?", (now - LOCATES_KEPT_S,))
+
+
+def _shares_out(sharing: Any) -> bool:
+    """Whether a device's sharing offers this host's other profiles."""
+    return isinstance(sharing, dict) and sharing.get("other_profiles") is True

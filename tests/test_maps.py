@@ -687,6 +687,27 @@ def test_navigate_from_another_profile_is_logged_under_it(home, monkeypatch):
     assert store.reads()[0]["session_title"] == "default: Trip planning"
 
 
+def test_another_profiles_maps_never_ask_or_heed_a_device_that_doesnt_share_out(tmp_path):
+    # The iPad keeps its location to its own profile, can answer maps and
+    # asks to keep them on the phone; it synced last. Another profile's
+    # lookups go to the iPhone, which shares out, and the host engine
+    # follows the iPhone's word alone.
+    earlier = location.LocationStore(tmp_path, clock=lambda: NOW - 60)
+    iphone = MapsPhone()
+    iphone.accept(earlier.register_key(iphone.key_request()))
+    earlier.ingest(iphone.seal(iphone.batch(sharing=maps_sharing(other_profiles=True), fix=fix("significant"))))
+    store = location.LocationStore(tmp_path, clock=lambda: NOW)
+    ipad = MapsPhone(device_id="ipad-installation-2")
+    ipad.accept(store.register_key(ipad.key_request()))
+    store.ingest(ipad.seal(ipad.batch(batch_id="batch-ipad", fix=fix("significant", id="f_ipad"),
+                                      sharing=maps_sharing(other_profiles=False, maps_host=False))))
+    assert store.maps_device()["device_id"] == "ipad-installation-2", "its own profile asks the iPad"
+    assert store.maps_host_allowed() is False
+    store.shared_only = True  # as location_profiles.store_for opens it for another profile
+    assert store.maps_device()["device_id"] == iphone.device_id
+    assert store.maps_host_allowed() is True
+
+
 def test_navigate_to_a_saved_place_names_it_and_gives_no_link(home, monkeypatch):
     _shared(home, fix=fix("significant"))
     present = _present(home)
