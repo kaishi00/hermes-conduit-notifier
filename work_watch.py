@@ -56,7 +56,8 @@ CALL_TIMEOUT_S = 60.0
 # (notifier issue 848); an answer is a few dozen, and only what's used is paid.
 MAX_TOKENS = 1_000
 # The answer's shape, sent as the reply's JSON schema, never json_mode (see
-# pulse.structured_args). Loose, since Hermes checks the reply against it:
+# pulse.structured_args), closed for Claude (pulse.closed_schema, issue 1001).
+# Loose, since Hermes checks the reply against it:
 # nothing required and no field typed, so a missing or mistyped value is
 # check()'s to read as no flag, as before; the instructions give the types.
 SCHEMA = {"type": "object", "properties": {"flag": {}, "between": {}, "why": {}}}
@@ -165,9 +166,10 @@ def _ask(instructions: str, text: str) -> tuple[Any, int]:
     llm = getattr(_ctx, "llm", None)
     if llm is None:
         raise RuntimeError("this Hermes gives plugins no model access")
+    from .pulse import closed_schema  # a failure's text is logged by _run
     with _profile_scope():
         result = llm.complete_structured(
-            instructions=instructions, input=[{"type": "text", "text": text}], json_schema=SCHEMA,
+            instructions=instructions, input=[{"type": "text", "text": text}], json_schema=closed_schema(SCHEMA),
             task=TASK if _task else None, purpose="conduit work watch", timeout=CALL_TIMEOUT_S,
             max_tokens=MAX_TOKENS)
     usage = getattr(result, "usage", None)

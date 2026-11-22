@@ -142,9 +142,12 @@ NEWS_LIMIT = 600
 WHY_LIMIT = 300
 # (instructions, text, schema=the reply's shape) -> (the parsed reply, tokens).
 Llm = Callable[..., tuple[Any, int]]
-# The replies' shapes (pulse_memory.SCHEMA says why they're loose).
+# The replies' shapes (pulse_memory.SCHEMA says why they're loose). Each
+# names every key its parser reads, the pick's included (PICK_INSTRUCTION):
+# sent closed (pulse.closed_schema), a key it leaves out can't come back.
 CHECK_SCHEMA = {"type": "object", "properties": {
-    key: {} for key in ("decision", "news", "why", "check_again_hours", "when", "urgent")}}
+    key: {} for key in ("decision", "news", "why", "check_again_hours", "when", "urgent",
+                        "line", "detail", "shape", "facts", "actions")}}
 ACT_SCHEMA = {"type": "object", "properties": {"done": {}, "why": {}}}
 STALE_SCHEMA = {"type": "object", "properties": {"stale": {}, "why": {}}}
 
