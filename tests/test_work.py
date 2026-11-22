@@ -187,6 +187,8 @@ def hermes(home, monkeypatch):
     for timer in list(work._held_timers.values()):
         timer.cancel()
     work._held_timers.clear()
+    work._peer_sources.clear()
+    work.work_coord.forget_open_questions()
     return fake
 
 
@@ -2706,8 +2708,10 @@ def test_an_ordinary_chats_tool_calls_read_the_registry_only_when_it_changes(on,
     assert work._workstream("ordinary-chat")[1].ref == ref
     # An unload forgets them, so a reload starts from the registry (#964's review).
     work._not_work[("x", "y")] = ()
+    work._not_compacted.add("s-checked")
     work.stop()
     assert not work._not_work
+    assert not work._not_compacted
 
 
 def test_an_unreadable_registry_keeps_a_turns_hooks_quiet_except_the_bot_chats(on, hermes, monkeypatch):

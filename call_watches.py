@@ -782,7 +782,9 @@ NESTED_FIELDS = ("arguments", "parameters", "args", "input")
 
 def _report_fields(args: dict[str, Any]) -> dict[str, Any]:
     """The report's fields, also when a model wrapped them one level down
-    ({"parameters": {"happening": false}}), as text or not."""
+    ({"parameters": {"happening": false}}), as text or not. The wrapped
+    fields go over the top-level ones, so a `saw` left beside the wrapper
+    still says what the run saw (notifier#996)."""
     if "happening" in args:
         return args
     for key in NESTED_FIELDS:
@@ -793,7 +795,7 @@ def _report_fields(args: dict[str, Any]) -> dict[str, Any]:
             except ValueError:
                 continue
         if isinstance(inner, dict) and "happening" in inner:
-            return inner
+            return {**{k: v for k, v in args.items() if k != key}, **inner}
     return args
 
 

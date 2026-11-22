@@ -790,10 +790,12 @@ def test_status_names_a_loop_on_an_older_build(live, db, capsys, monkeypatch):
     live.store.set("enabled", True)
     live.store.set("last_tick_at", time.time())
     status = lambda: cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
-    live.store.claim_leader("Hermes:16293", pulse.LEADER_TTL_S, time.time())  # an old build writes no stamp
+    # A leader that is surely alive (this process), whatever the host is called (notifier#966).
+    owner = f"{socket.gethostname()}:{os.getpid()}"
+    live.store.claim_leader(owner, pulse.LEADER_TTL_S, time.time())  # an old build writes no stamp
     status()
-    assert "run by process Hermes:16293, which loaded an older build" in capsys.readouterr().out
-    live.store.claim_leader("Hermes:16293", pulse.LEADER_TTL_S, time.time(), build=pulse.build_stamp())
+    assert f"run by process {owner}, which loaded an older build" in capsys.readouterr().out
+    live.store.claim_leader(owner, pulse.LEADER_TTL_S, time.time(), build=pulse.build_stamp())
     status()
     assert "older build" not in capsys.readouterr().out
     if os.name == "nt":

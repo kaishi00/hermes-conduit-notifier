@@ -291,6 +291,19 @@ def test_a_room_someone_just_joined_is_withheld_from_search_at_once(tmp_path):
     assert rules._hidden_from_search(("s-local",), "bot_room", home)  # search: at once
 
 
+def test_a_room_lifted_over_own_links_is_read_afresh_for_search(tmp_path, monkeypatch):
+    # notifier#969: a member from a Hermes no Link covers changes only the roster, so
+    # search reads whether the room is still all the owner's own, not the kept verdict.
+    home = tmp_path / "hermes"
+    _room(home / "state.db", "room-c", [FURINA, LAIFU])
+    _room_session(home, "s-local", "room-c")
+    verdicts = iter([(True, None), (False, None)])
+    monkeypatch.setattr(rules, "_own_verdict", lambda turn, home: next(verdicts))
+    assert not rules.room_turn("s-local", home).with_others  # lifted, and kept for a moment
+    assert rules._hidden_from_search(("s-local",), "bot_room", home)  # search reads it again
+    assert rules.room_turn("s-local", home).with_others  # and what it read is kept
+
+
 def test_a_room_of_your_own_agents_is_kept_for_seconds_while_its_files_are_unchanged(tmp_path, monkeypatch):
     # Notifier issue 961: each tool, model call and reply of a turn in it read
     # the session store, the room stores and rooms.json again.

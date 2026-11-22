@@ -71,7 +71,7 @@ def _open_questions(home: Any) -> list:
             return []
         work_coord = core._plugin_package_module("work_coord")
         store = work_store.Store(Path(home))
-        rows = work_coord.open_questions(store)
+        rows = work_coord.open_questions_kept(store)
         # Each card names the work it's about, as the Work panel's do.
         titles = store.titles([ref for row in rows for ref in work_store.proposal_refs(row)])
         cards = [work_coord.question_card(row, titles) for row in rows]

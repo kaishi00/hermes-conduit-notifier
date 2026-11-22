@@ -990,11 +990,40 @@ def test_a_spoken_note_stays_small_and_a_no_said_elsewhere_to_a_bot_chat_questio
     tight = coord.asked_spoken_note([{"id": "P1", "text": "x" * 300, "created_at": 0, "chat": "c1",
                                       "choices": json.dumps(["a" * 60] * 4)}], lambda at: "now", {"c1": "T" * 500}, 900)
     assert len(tight) <= 900 and "- P1, asked now in the chat «TTT" in tight
+    # The question is cut inside its quotes, so its choices stay to be read out (notifier#980).
+    long_first = coord.asked_spoken_note([{"id": "P1", "text": "y" * 400, "created_at": 0, "chat": "c1",
+                                           "choices": json.dumps(["left", "right"])}], lambda at: "now", {"c1": "T" * 80}, 900)
+    assert len(long_first) <= 900 and "» Choices: «left», «right»." in long_first and "y…»" in long_first
+    # Choices too long for the room: the line is cut whole and points at work_read.
+    assert coord.ASKED_CUT_TAIL in tight
     call_chat = "voice-call-chat"
     _chat_db(home, [(call_chat, "user", "No, not tonight.", None)])
     out = call("work_propose", {"id": own, "answer": "declined"}, session_id=call_chat)
     assert out["ok"] and out["status"] == "declined" and "stays on your Bot Chat's board" in out["note"], out
     assert not batched()
+
+
+def test_the_note_before_each_model_call_reads_the_questions_once_while_nothing_changes(on, hermes, home, monkeypatch):
+    # notifier#983: every model call of every turn asked state.db and the registry again.
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    monkeypatch.setattr(work, "_home", lambda: on.home)
+    monkeypatch.setattr(work, "_chat_title", lambda chat: "")
+    monkeypatch.setattr(work.stamps, "SETTLED_NS", 0)  # the files were written a moment ago
+    asked(home)
+    call("work_propose", {"text": "Ship the beta tonight?"}, session_id=OTHER_CHAT)
+    reads = {"questions": 0, "sources": 0}
+    real_open, clarify = coord.open_questions, sys.modules[work.__package__ + ".clarify_loop"]
+    real_source = clarify._session_source
+    monkeypatch.setattr(coord, "open_questions", lambda store: reads.__setitem__("questions", reads["questions"] + 1) or real_open(store))
+    monkeypatch.setattr(clarify, "_session_source", lambda sid: reads.__setitem__("sources", reads["sources"] + 1) or real_source(sid))
+    for _ in range(5):
+        assert "Ship the beta tonight?" in work.asked_note(OTHER_CHAT)
+    assert reads["questions"] == 1 and reads["sources"] <= 1
+    # A new question writes the registry: read again at once.
+    call("work_propose", {"text": "And the docs?"}, session_id=OTHER_CHAT)
+    before = reads["questions"]
+    assert "And the docs?" in work.asked_note(OTHER_CHAT)
+    assert reads["questions"] == before + 1
 
 
 def test_a_chats_turns_list_its_own_questions_and_an_answer_said_elsewhere_reaches_it(on, hermes, home, monkeypatch):

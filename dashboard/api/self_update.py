@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import importlib.util
 import inspect
@@ -1310,9 +1311,16 @@ def _notify_self_update(job: Dict[str, Any]) -> None:
                 return
             events = sys.modules[f"{client.__package__}.events"]
             # Per outcome: a failure the restarted dashboard corrects isn't a
-            # duplicate of the push the dying one sent, and a pull that comes
-            # back after the stall push sends its own (its code differs).
+            # duplicate of the push the dying one sent. A failure's own words
+            # are part of it too, so two that both have no code ("the gateway
+            # didn't restart" from the dying dashboard, "restarted before the
+            # update finished" from the new one) send both, while the same
+            # words twice send once. So a stalled pull that later fails sends a
+            # second push with Hermes' real error: kept on purpose, since the
+            # first only said it was taking too long (notifier#988).
             parts = (job["id"], job.get("step")) + ((job["code"],) if job.get("code") else ())
+            if job.get("step") == "failed":
+                parts += (hashlib.sha256(str(job.get("detail") or "").encode()).hexdigest()[:12],)
             event = events.push_event("background_task.finished", identifier=events.event_id("plugin-update", *parts),
                                       profile=profile or "default", profile_name=_bot_name(client), title=title, body=body)
             client.send_now(event)

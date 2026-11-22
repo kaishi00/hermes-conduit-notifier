@@ -507,6 +507,10 @@ def test_a_report_whose_fields_went_astray_hears_the_call_to_copy(home, hermes, 
         quiet = json.loads(watches.report(nested, session_id=session))
         assert quiet["ok"] is True and quiet["status"] == "quiet", (nested, quiet)
     assert watches.PROMPT_VERSION == 4, "the new wording reaches existing watches on their next run"
+    # Fields split across the two levels: the wrapped ones count, and a top-level saw isn't dropped (notifier#996).
+    assert watches._report_fields({"parameters": {"happening": True}, "saw": "Disk at 99%."}) == {
+        "happening": True, "saw": "Disk at 99%."}
+    assert watches._report_fields({"saw": "outer", "arguments": '{"happening": true, "saw": "inner"}'})["saw"] == "inner"
 
 
 def test_conduit_call_user_sends_a_watch_run_to_its_report(home, hermes, clock, monkeypatch):

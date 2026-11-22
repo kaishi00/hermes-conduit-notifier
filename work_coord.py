@@ -23,11 +23,12 @@ import json
 import logging
 import re
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from . import work_store
+from . import stamps, work_store
 
 logger = logging.getLogger(__name__)
 
@@ -524,6 +525,42 @@ def open_questions(store: work_store.Store) -> list[dict]:
     return [row for row in rows if row["id"] not in gone]
 
 
+# What open_questions found, per registry, while the registry is unchanged and
+# for OPEN_QUESTIONS_KEPT_S at most: the note before every model call and the
+# waiting poll read it without opening the registry and Hermes' state.db each
+# time (notifier#983). An answer or a new question writes the registry and is
+# read at once; a chat deleted meanwhile drops its question within the window,
+# the poll cadence the screens already have.
+OPEN_QUESTIONS_KEPT_S = 2.0
+_open_kept: dict[str, tuple[float, tuple, list[dict]]] = {}
+_open_kept_lock = threading.Lock()
+
+
+def open_questions_kept(store: work_store.Store) -> list[dict]:
+    """``open_questions``, as read a moment ago while the registry is unchanged."""
+    key = str(store.path)
+    stamp = stamps.sqlite_store(store.path)
+    now = time.monotonic()
+    with _open_kept_lock:
+        known = _open_kept.get(key)
+    if stamp is not None and known is not None and known[0] > now and known[1] == stamp:
+        return [dict(row) for row in known[2]]
+    rows = open_questions(store)
+    # After its withdrawals, which write the registry too.
+    after = stamps.sqlite_store(store.path)
+    if after is not None:
+        with _open_kept_lock:
+            _open_kept[key] = (now + OPEN_QUESTIONS_KEPT_S, after, [dict(row) for row in rows])
+            if len(_open_kept) > 32:
+                _open_kept.pop(next(iter(_open_kept)))
+    return rows
+
+
+def forget_open_questions() -> None:
+    with _open_kept_lock:
+        _open_kept.clear()
+
+
 def proposals_lines(store: work_store.Store, ago: Callable[[float], str]) -> list[str]:
     """What the Bot Chat asked the user and hasn't heard back on, and what
     they answered lately, so a later turn doesn't ask the same again."""
@@ -789,15 +826,18 @@ def asked_here_note(rows: list[dict], ago: Callable[[float], str]) -> str:
     return _asked_lines(rows, ago, None, ASKED_HERE_HEAD, ASKED_HERE_RULE, ASKED_CHARS)
 
 
+# A first question cut to fit keeps at least this much of its words; past
+# that the line is cut whole and says where the rest is.
+ASKED_QUESTION_MIN_CHARS = 40
+ASKED_CUT_TAIL = " (Cut to fit: work_read has its full wording and choices.)"
+
+
 def _asked_lines(rows: list[dict], ago: Callable[[float], str], chat_titles: Optional[dict[str, str]],
                  head: str, rule: str, budget: int) -> str:
     lines: list[str] = []
     room = budget - len(head) - len(rule) - len(ASKED_MORE) - 8
     for index, row in enumerate(rows):
-        text = _short(row["text"], PROPOSAL_CHARS)
         choices = work_store.proposal_choices(row)
-        if choices:
-            text += "» Choices: «" + "», «".join(choices)
         ahead = (f" You're going ahead with «{row.get('recommended') or 'it'}» meanwhile."
                  if row.get("going_ahead") else
                  f" You recommended «{row['recommended']}»." if row.get("recommended") else "")
@@ -806,9 +846,21 @@ def _asked_lines(rows: list[dict], ago: Callable[[float], str], chat_titles: Opt
             where = (f" in the chat «{_short(chat_titles.get(row['chat']), CHAT_TITLE_CHARS) or 'untitled'}»"
                      if row.get("chat")
                      else " in your Bot Chat")
-        line = f"- {row['id']}, asked {ago(row['created_at'])}{where}: «{text}».{ahead}"
+
+        def asked_line(question: str) -> str:
+            text = question + ("» Choices: «" + "», «".join(choices) if choices else "")
+            return f"- {row['id']}, asked {ago(row['created_at'])}{where}: «{text}».{ahead}"
+
+        question = _short(row["text"], PROPOSAL_CHARS)
+        line = asked_line(question)
         if not lines and len(line) + 1 > room:
-            line = _short(line, max(room - 1, 1))  # the first is heard, cut to the room
+            # The first is heard, cut to the room: its question first, inside its quotes, so
+            # the choices the rule says to read out stay (notifier#980).
+            keep = len(question) - (len(line) + 1 - room)
+            if keep >= ASKED_QUESTION_MIN_CHARS:
+                line = asked_line(_short(row["text"], keep))
+            if len(line) + 1 > room:
+                line = _short(line, max(room - 1 - len(ASKED_CUT_TAIL), 1)) + ASKED_CUT_TAIL
         if len(line) + 1 > room:
             lines.append(ASKED_MORE.format(count=len(rows) - index))
             break

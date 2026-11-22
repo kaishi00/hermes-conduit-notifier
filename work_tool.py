@@ -4218,7 +4218,8 @@ def _lookup(session_id: Any, home: Optional[Path] = None) -> tuple[Optional[Path
             return home, work, False
         found = _compacted_from(home, session_id, store)
         if found is False:
-            _not_compacted.add(session_id)
+            with _not_work_lock:
+                _not_compacted.add(session_id)
             return home, None, False
         if found is None:
             return home, None, False
@@ -6019,7 +6020,7 @@ def asked_note(session_id: Any, spoken: bool = False) -> Optional[str]:
     if _workstream(chat, home)[1] is not None or _from_a_peer(chat):
         return None
     store = work_store.Store(home)
-    every = work_coord.open_questions(store)
+    every = work_coord.open_questions_kept(store)
     if spoken and every:
         # In the Bot Chat it shares the room with the digest, which may have
         # left some of the Bot Chat's own out: all of them stay, in less room.
@@ -6977,8 +6978,13 @@ def stop() -> None:
         _wait_wakes.clear()
         _wait_turns.clear()
     with _not_work_lock:
-        # A reload starts from the registry again (#964's review).
+        # A reload starts from the registry again (#964's review), and asks again
+        # whether a session came from a compaction (#969's review).
         _not_work.clear()
+        _not_compacted.clear()
+    with _peer_sources_lock:
+        _peer_sources.clear()
+    work_coord.forget_open_questions()
     with _wake_lock:
         pending = list(_wakes.values())
         _wakes.clear()
@@ -6997,7 +7003,6 @@ def stop() -> None:
         _unjournaled.clear()
         _turn_began.clear()
         _turn_gateways.clear()
-        _not_compacted.clear()
         _replies.clear()
         _redirecting.clear()
         _agents.clear()
@@ -7963,13 +7968,32 @@ def forward_review(session_id: Any, ref: str, text: str) -> dict:
     return _handle("work_send", {"ref": ref, "text": text, "how": "after"}, session_id)
 
 
+# A chat's source as read a moment ago (notifier#983): the note before every
+# model call asks it, and a fresh state.db connection each time adds up.
+PEER_SOURCE_KEPT_S = 2.0
+_peer_sources: "OrderedDict[str, tuple[float, bool]]" = OrderedDict()
+_peer_sources_lock = threading.Lock()
+
+
 def _from_a_peer(session_id: str) -> bool:
     """Whether the chat is a peer's conversation forwarded over A2A: its
     author is another person, so its questions aren't the owner's to answer
-    (as clarify_loop's card, which isn't offered there either)."""
+    (as clarify_loop's card, which isn't offered there either). Kept for
+    PEER_SOURCE_KEPT_S, as ``policy`` is."""
+    now = time.monotonic()
+    with _peer_sources_lock:
+        known = _peer_sources.get(session_id)
+    if known is not None and known[0] > now:
+        return known[1]
     try:
         from . import clarify_loop
 
-        return clarify_loop._session_source(session_id) == clarify_loop.A2A_SOURCE
+        peer = clarify_loop._session_source(session_id) == clarify_loop.A2A_SOURCE
     except Exception:  # noqa: BLE001 — unreadable: a chat's, as before
-        return False
+        peer = False
+    with _peer_sources_lock:
+        _peer_sources[session_id] = (now + PEER_SOURCE_KEPT_S, peer)
+        _peer_sources.move_to_end(session_id)
+        while len(_peer_sources) > NOT_WORK_KEPT:
+            _peer_sources.popitem(last=False)
+    return peer

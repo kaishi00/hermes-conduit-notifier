@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.193.1 (2026-11-22)
+
+### Fixes
+
+- A plugin update that fails twice in different ways sends both notifications. Before, the second one, with the corrected reason, could be dropped as a repeat.
+- A call watch whose run puts some of its report one level down still rings with what the run saw, not the fallback sentence.
+- A long question read out on a call keeps its choices. Before, cutting it to fit could drop them.
+- Past-chat search hides a room of your own agents as soon as someone from another Hermes joins it, not up to two seconds later.
+- Each model call no longer opens Hermes' session store and the work registry again to check for waiting questions, which saves a little time on every turn.
+
 ## 0.193.0 (2026-11-22)
 
 ### New and improved
