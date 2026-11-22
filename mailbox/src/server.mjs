@@ -410,21 +410,21 @@ function clientAddress(request, proxyHops) {
 // address, so a neighbor's guesses never turn an owner away.
 export function registrationNetwork(address) {
   const bare = String(address).replace(/%.*$/, '');
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(bare);
-  const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(bare);
-  const fromHex = mappedHex && [mappedHex[1], mappedHex[2]].flatMap((group) => {
-    const value = parseInt(group, 16);
-    return [value >> 8, value & 0xff];
-  }).join('.');
-  const v4 = mapped ? mapped[1] : fromHex || bare;
-  if (isIP(v4) === 4) return `${v4.split('.').slice(0, 3).join('.')}.0/24`;
+  if (isIP(bare) === 4) return `${bare.split('.').slice(0, 3).join('.')}.0/24`;
   if (isIP(bare) !== 6) return bare;
-  const [head, tail = ''] = bare.toLowerCase().split('::');
+  // Eight groups, with an embedded dotted IPv4 as its two.
+  const hex = bare.toLowerCase().replace(/(\d+)\.(\d+)\.(\d+)\.(\d+)$/,
+    (_, a, b, c, d) => `${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`);
+  const [head, tail] = hex.split('::');
   const groups = (part) => (part ? part.split(':') : []);
-  const headGroups = groups(head);
-  const missing = 8 - headGroups.length - groups(tail).length;
-  const full = bare.includes('::') ? [...headGroups, ...Array(Math.max(missing, 0)).fill('0')] : headGroups;
-  return `${full.slice(0, 3).map((group) => group.replace(/^0+(?=.)/, '')).join(':')}::/48`;
+  const full = tail === undefined ? groups(head)
+    : [...groups(head), ...Array(8 - groups(head).length - groups(tail).length).fill('0'), ...groups(tail)];
+  const values = full.map((group) => parseInt(group, 16));
+  // An IPv4-mapped address (::ffff:a.b.c.d) is the IPv4 client it maps.
+  if (values.slice(0, 5).every((value) => value === 0) && values[5] === 0xffff) {
+    return `${values[6] >> 8}.${values[6] & 0xff}.${values[7] >> 8}.0/24`;
+  }
+  return `${values.slice(0, 3).map((value) => value.toString(16)).join(':')}::/48`;
 }
 
 export function readConfig(env = process.env) {

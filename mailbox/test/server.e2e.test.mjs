@@ -440,6 +440,9 @@ test('a registration network is the IPv4 /24 or IPv6 /48 its address is in', () 
   assert.equal(registrationNetwork('203.0.113.77'), '203.0.113.0/24');
   assert.equal(registrationNetwork('::ffff:203.0.113.77'), '203.0.113.0/24');
   assert.equal(registrationNetwork('::ffff:cb00:714d'), '203.0.113.0/24');
+  assert.equal(registrationNetwork('0:0:0:0:0:ffff:203.0.113.77'), '203.0.113.0/24');
+  assert.equal(registrationNetwork('2001::1:2:3:4:5:6'), '2001:0:1::/48');
+  assert.equal(registrationNetwork('2001:0:1::1'), '2001:0:1::/48');
   assert.equal(registrationNetwork('2001:DB8:0001:abcd::1'), '2001:db8:1::/48');
   assert.equal(registrationNetwork('2001:db8::'), '2001:db8:0::/48');
   assert.equal(registrationNetwork('::1'), '0:0:0::/48');
