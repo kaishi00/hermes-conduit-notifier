@@ -1117,7 +1117,9 @@ def test_a_harmless_non_zero_exit_is_left_out_of_failed_calls(recording):
 @pytest.mark.parametrize("output", [
     ('time="2026-11-17T08:05:06Z" level=error msg="invalid internal status, try resetting the pause '
      'process with \\"podman system migrate\\": cannot re-exec process to join the existing user namespace"'),
-    "Error: cannot set up namespace using \"/usr/bin/newuidmap\": newuidmap: write to uid_map failed: Operation not permitted",
+    'Error: cannot set up namespace using "/usr/bin/newuidmap": newuidmap: write to uid_map failed: Operation not permitted',
+    ('newuidmap: write to uid_map failed: Operation not permitted\n'
+     'Error: cannot set up namespace using "/usr/bin/newuidmap": exit status 1'),
 ])
 def test_a_command_the_sandbox_blocked_is_left_out_of_failed_calls(recording, output):
     """Rootless Podman in a sandbox that denies a multi-ID user namespace stops
@@ -1130,12 +1132,19 @@ def test_a_command_the_sandbox_blocked_is_left_out_of_failed_calls(recording, ou
     assert ledger.blocked_by_sandbox(row) and _failed(recording) == ""
 
 
-def test_a_real_podman_failure_stays_in_failed_calls(recording):
-    """Only the sandbox's own words go: a container that isn't there is the
-    work's failure, and the user's to hear about."""
-    _terminal(pulse.get_hermes_home(), "podman start hindsight", "Error: no such container hindsight", 125, DAY)
+@pytest.mark.parametrize("command, output, expected_snippet", [
+    ("podman start hindsight", "Error: no such container hindsight", "no such container"),
+    ("podman ps",
+     'time="2026-11-17T08:05:06Z" level=error msg="invalid internal status, try resetting the pause '
+     'process with \\"podman system migrate\\": could not find any running process: no such process"',
+     "could not find any running process"),
+])
+def test_a_real_podman_failure_stays_in_failed_calls(recording, command, output, expected_snippet):
+    """Only namespace-denial sandbox errors go: a missing container or a real
+    stale pause process is the work's failure, and the user's to hear about."""
+    _terminal(pulse.get_hermes_home(), command, output, 125, DAY)
     [row] = recording.store.recent_outcomes()
-    assert not ledger.blocked_by_sandbox(row) and "no such container" in _failed(recording)
+    assert not ledger.blocked_by_sandbox(row) and expected_snippet in _failed(recording)
 
 
 def test_a_traceback_stays_in_failed_calls_with_its_exception(recording):
