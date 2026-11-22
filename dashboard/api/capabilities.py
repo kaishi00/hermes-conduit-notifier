@@ -424,7 +424,51 @@ async def get_capabilities(response: Response) -> Dict[str, Any]:
     degraded = _degraded()
     if degraded:
         body["degraded"] = degraded
+    if sign_in_ends_on_restart():
+        body["sign_in_ends_on_restart"] = True
     return body
+
+
+# Hermes' password sign-in (its `basic` dashboard auth provider) signs sessions
+# with dashboard.basic_auth.secret (or HERMES_DASHBOARD_BASIC_AUTH_SECRET).
+# Without one, or with unexpanded shell text in its place, it signs them with
+# a key made for each dashboard process, so every restart (an update, a
+# plugin update) signs everyone out. Conduit says why on its sign-in screen.
+_BASIC_SECRET_ENV = "HERMES_DASHBOARD_BASIC_AUTH_SECRET"
+_UNEXPANDED_SHELL_MARKERS = ("$(", "`", "openssl rand")
+# Read once per process: Hermes reads the secret only as the dashboard starts,
+# so a config edited since takes effect at the next restart, as here.
+_sign_in_ends_on_restart: Optional[bool] = None
+
+
+def sign_in_ends_on_restart() -> bool:
+    """Whether this dashboard's password sign-ins end when it restarts: Hermes'
+    basic provider is serving and has no stable signing secret. No when that
+    can't be read (an older Hermes, no provider registry)."""
+    global _sign_in_ends_on_restart
+    if _sign_in_ends_on_restart is None:
+        try:
+            _sign_in_ends_on_restart = _basic_secret_missing()
+        except Exception:  # noqa: BLE001 - never worth the capabilities answer
+            core.logger.debug("Conduit plugin: couldn't read the password sign-in's secret", exc_info=True)
+            return False
+    return _sign_in_ends_on_restart
+
+
+def _basic_secret_missing() -> bool:
+    try:
+        from hermes_cli.dashboard_auth import registry
+    except ImportError:  # a Hermes from before dashboard sign-in providers
+        return False
+    if registry.get_provider("basic") is None:
+        return False
+    raw = (os.environ.get(_BASIC_SECRET_ENV) or "").strip()
+    if not raw:
+        from hermes_cli.config import load_config
+        dashboard = (load_config() or {}).get("dashboard")
+        basic = dashboard.get("basic_auth") if isinstance(dashboard, dict) else None
+        raw = str((basic or {}).get("secret") or "").strip() if isinstance(basic, dict) else ""
+    return not raw or any(marker in raw for marker in _UNEXPANDED_SHELL_MARKERS)
 
 
 def instance_name() -> str:

@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.193.6 (2026-11-22)
+
+### New and improved
+
+- Conduit can tell you when your dashboard signs everyone out each time it restarts: password sign-in with no `dashboard.basic_auth.secret` set. It says so where it asks you to sign in again, with the line to add.
+
 ## 0.193.5 (2026-11-22)
 
 ### Fixes
