@@ -1,6 +1,11 @@
 # Hermes Conduit Notifier
 
-Hermes Conduit Notifier is the open-source Hermes plugin that connects a Hermes host to the [Hermes Conduit](https://github.com/kaishi00/hermes-conduit) iPhone, iPad and Apple Watch app. It started as the notification sender and now carries most of what Conduit needs from the host:
+[![iPhone app](https://img.shields.io/badge/iPhone-Hermes_Conduit-blue)](https://github.com/kaishi00/hermes-conduit)
+[![Desktop](https://img.shields.io/badge/Desktop-Mac_%C2%B7_Windows_%C2%B7_Linux-blue)](https://github.com/kaishi00/hermes-conduit-desktop)
+[![Website](https://img.shields.io/badge/Website-hermesconduit.app-blue)](https://hermesconduit.app)
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/agrias)
+
+Hermes Conduit Notifier is the open-source Hermes plugin that connects a Hermes host to the [Hermes Conduit](https://github.com/kaishi00/hermes-conduit) iPhone, iPad and Apple Watch app. [Conduit for desktop](https://github.com/kaishi00/hermes-conduit-desktop) on Mac, Windows and Linux uses it too. It started as the notification sender and now carries most of what Conduit needs from the host:
 
 - **Notifications and calls**: approval, input, reply, failure and background-task notifications, Hermes calling you (CallKit on the phone and Watch), and Lock Screen progress while a turn runs, all delivered through the Conduit push relay in [`relay/`](relay/), end-to-end encrypted where APNs allows.
 - **Live voice**: single-use Gemini Live tokens, temporary Qwen Live credentials, GPT-Live sessions on the host's ChatGPT subscription or API key, Grok Live relayed with the host's xAI sign-in, Local Live and Classic voice through your own speech server, voice web lookups, memory and personality for voice, and saved call transcripts.
