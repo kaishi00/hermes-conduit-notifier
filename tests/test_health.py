@@ -527,3 +527,21 @@ def test_other_profiles_must_be_true_or_false(store, phone):
     with pytest.raises(health.HealthError) as error:
         store.ingest(phone.seal(_batch(other_profiles="yes")))
     assert error.value.code == "malformed"
+
+
+def test_another_profile_sees_only_the_devices_that_share_with_it(home):
+    store, _ = _work_shares(home)
+    # The iPad synced later and keeps the switch off: the reading profile
+    # never sees it, and a read naming no device comes from the iPhone.
+    later = health.HealthStore(home / "profiles" / "work", clock=lambda: NOW + 60)
+    ipad = Phone(device_id="ipad-installation-2")
+    ipad.accept(later.register_key(ipad.key_request()))
+    batch = _batch(batch_id="batch-ipad", other_profiles=False)
+    batch["device"]["name"] = "Eric's iPad"
+    later.ingest(ipad.seal(batch))
+    reader, owner = health.store_for(home)
+    assert owner == "work"
+    assert [device["id"] for device in reader.overview()["devices"]] == [DEVICE]
+    with reader._read() as db:
+        assert reader.latest_device(db)[0] == DEVICE
+    assert {device["id"] for device in store.overview()["devices"]} == {DEVICE, "ipad-installation-2"}

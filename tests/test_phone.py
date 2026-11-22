@@ -2652,3 +2652,13 @@ def test_another_profile_looking_never_upgrades_or_locks_the_sharing_store(home,
     monkeypatch.setattr(phone.PhoneStore, "_write", lambda self: (_ for _ in ()).throw(AssertionError("locked")))
     found, owner = phone.store_for(home.path)
     assert owner == "work" and found.path == store.path and found.shared_only is True
+
+
+def test_a_newer_plugins_store_in_another_profile_isnt_read(home):
+    import sqlite3
+
+    store, _ = _work_shares(home)
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE meta SET value='99' WHERE key='schema'")
+    assert phone.store_for(home.path)[1] is None
+    assert tool.calendar_available() is False

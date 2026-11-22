@@ -57,7 +57,7 @@ dashboard routes (dashboard process) write it and the ``conduit_calendar`` /
 ``conduit_phone`` tools (agent process) read it and add changes: the
 dashboard loads this file as a private package
 (``conduit_push_dashboard_pkg``), so it imports nothing from the plugin but
-sealing.py.
+sealing.py and profile_sharing.py (standard library only).
 """
 
 from __future__ import annotations
@@ -1768,6 +1768,11 @@ def _synced(path: Path, *, shared_out: bool = False) -> bool:
     except sqlite3.DatabaseError:
         return False
     try:
+        # A newer plugin's file reads as nothing here (_read), so it isn't
+        # a store to read; an older one is upgraded when it's read.
+        version = _meta(connection, "schema")
+        if not (version or "").isdigit() or int(version) > SCHEMA_VERSION:
+            return False
         rows = connection.execute("SELECT sharing FROM devices WHERE last_seen IS NOT NULL").fetchall()
     except sqlite3.DatabaseError:
         return False
