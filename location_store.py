@@ -922,18 +922,23 @@ class LocationStore:
             for device_id, kid, sharing_text in db.execute(
                     "SELECT id, kid, sharing FROM devices WHERE last_seen IS NOT NULL ORDER BY last_seen DESC"):
                 sharing = _decode(sharing_text, None) or {}
+                if self.shared_only and not _shares_out(sharing):
+                    continue
                 if (sharing.get("background") and "maps" in (sharing.get("features") or [])
                         and not sharing_paused(sharing, now)):
                     return {"device_id": device_id, "kid": kid, "sharing": sharing}
         return None
 
     def maps_host_allowed(self) -> bool:
-        """False while any device asks to keep maps lookups on the phone."""
+        """False while any device asks to keep maps lookups on the phone
+        (on another profile's store, any device that shares out)."""
         with self._read() as db:
             if db is None:
                 return True
-            return all((_decode(text, None) or {}).get("maps_host", True) is not False
-                       for (text,) in db.execute("SELECT sharing FROM devices WHERE sharing IS NOT NULL"))
+            words = [_decode(text, None) or {}
+                     for (text,) in db.execute("SELECT sharing FROM devices WHERE sharing IS NOT NULL")]
+            return all(sharing.get("maps_host", True) is not False for sharing in words
+                       if not self.shared_only or _shares_out(sharing))
 
     def start_maps(self, device_id: str, request: dict[str, Any]) -> dict[str, Any]:
         """Stores a lookup for one device. Returns ``{"cached": answer}``
