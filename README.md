@@ -3328,8 +3328,10 @@ It's a mockup review in the chat, not a code review.
   as a follow-up (reopening it if it was resolved); every later round
   stays with it, and a round for another workstream is refused.
 - **Where.** Typed chats and the Bot Chat only: a group room (votes come
-  later), a workstream's own chat and a call get a note to describe the
-  options instead. Desktop and messaging apps get the decisions' Markdown.
+  later), a workstream's own chat and a live call get a note to describe the
+  options instead. A spoken turn with no call live (a call's job that ends
+  after the hang-up) shows it in the chat, like a typed one (0.193.5+).
+  Desktop and messaging apps get the decisions' Markdown.
 
 ### Diff cards (plugin 0.133+)
 

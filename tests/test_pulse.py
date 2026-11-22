@@ -3122,7 +3122,7 @@ def test_pulse_calls_send_their_replys_shape_never_json_mode(remembering):
     remembering.ctx.llm = Llm()
     pulse._memory_llm("instructions", "text", schema=memory.INBOX_SCHEMA)
     pulse._memory_llm("instructions", "text")
-    assert [call["json_schema"] for call in calls] == [memory.INBOX_SCHEMA, {"type": "object"}]
+    assert [call["json_schema"] for call in calls] == [pulse.closed_schema(memory.INBOX_SCHEMA), {"type": "object"}]
     assert not any("json_mode" in call for call in calls)
 
 
@@ -3145,7 +3145,13 @@ def test_pulse_reply_schemas_take_the_replies_the_parsers_take():
         (memory.SCHEMA, {"items": [], "closed": None, "claims": "none"}),
         (ahead.SCHEMA, {"dates": [{"ref": "D1", "bring_up": True}], "ahead": []}),
         (followup.CHECK_SCHEMA, {"decision": "tell", "news": "x", "why": "y", "check_again_hours": None,
-                                 "when": None, "urgent": False, "pick": None}),
+                                 "when": None, "urgent": False}),
+        # The pick's keys too (PICK_INSTRUCTION): sent closed, a key left out couldn't come (issue 1001).
+        (followup.CHECK_SCHEMA, {"decision": "tell", "news": "x", "line": "Headline", "detail": "More",
+                                 "shape": "plain", "facts": [], "actions": []}),
+        # PICK_RULES describes subject and incident (check() overrides them): one given isn't a failed check.
+        (followup.CHECK_SCHEMA, {"decision": "tell", "news": "x", "line": "Headline", "subject": "#41",
+                                 "incident": {"card": "new"}, "event": None}),
         (followup.CHECK_SCHEMA, {"decision": "wait", "check_again_hours": "24"}),
         (followup.ACT_SCHEMA, {"done": True, "why": "sent"}),
         (followup.ACT_SCHEMA, {"done": None}),
@@ -3153,7 +3159,66 @@ def test_pulse_reply_schemas_take_the_replies_the_parsers_take():
         (followup.STALE_SCHEMA, {}),
     ]
     for schema, reply in taken:
-        jsonschema.validate(reply, schema)
+        jsonschema.validate(reply, pulse.structured_args(schema)["json_schema"])  # as sent (issue 1001)
+
+
+def _pulse_schemas():
+    followup = sys.modules["conduit_push.pulse_followup"]
+    ahead = sys.modules["conduit_push.pulse_ahead"]
+    watch = sys.modules["conduit_push.work_watch"]
+    return {f"{module.__name__}.{name}": value for module in (memory, candidates, ahead, followup, watch)
+            for name, value in vars(module).items() if name.endswith("SCHEMA") and isinstance(value, dict)}
+
+
+def _open_objects(schema, where="$"):
+    if isinstance(schema, list):
+        return [found for index, item in enumerate(schema) for found in _open_objects(item, f"{where}[{index}]")]
+    if not isinstance(schema, dict):
+        return []
+    found = [where] if isinstance(schema.get("properties"), dict) and schema.get("additionalProperties") is not False else []
+    return found + [hit for key, value in schema.items() for hit in _open_objects(value, f"{where}.{key}")]
+
+
+def test_every_schema_pulse_sends_closes_its_objects():
+    # Claude's structured output refuses an object that names its properties
+    # without additionalProperties false, and Hermes passes the schema on
+    # unchanged: no report was made on a Claude route (issue 1001).
+    schemas = _pulse_schemas()
+    assert len(schemas) >= 8, schemas  # memory's two, the candidates', the look ahead's, follow-up's three, the watch's
+    for name, schema in schemas.items():
+        assert _open_objects(schema), name  # loose in the source; closed only as sent
+        assert _open_objects(pulse.structured_args(schema)["json_schema"]) == [], name
+
+
+def test_closing_a_schema_keeps_what_it_says():
+    schema = {"type": "object", "properties": {"items": {"type": ["array", "null"], "items": {
+        "type": "object", "properties": {"text": {}}}}, "any": {"type": "object"}},
+        "anyOf": [{"type": "object", "properties": {"a": {}}}]}
+    closed = pulse.closed_schema(schema)
+    assert closed["additionalProperties"] is False
+    assert closed["properties"]["items"]["items"]["additionalProperties"] is False  # nested, type list
+    assert closed["anyOf"][0]["additionalProperties"] is False
+    assert "additionalProperties" not in closed["properties"]["any"]  # a bare object stays open
+    assert "additionalProperties" not in schema  # the source is left alone
+    said = {"type": "object", "properties": {}, "additionalProperties": {"type": "string"}}
+    assert pulse.closed_schema(said) == said
+    assert pulse.structured_args(None) == {"json_schema": {"type": "object"}}
+
+
+def test_a_failed_pulse_call_logs_what_the_provider_said(remembering, caplog):
+    # Callers record only the class (ClaudeAPIError), which hid the cause (issue 1001).
+    class Llm:
+        def complete_structured(self, **kwargs):
+            raise RuntimeError("status 400: output_config.format.schema: For 'object' type, "
+                               "'additionalProperties' must be explicitly set to false " + "x" * 900)
+
+    remembering.ctx.llm = Llm()
+    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError):
+        pulse._memory_llm("instructions", "text", purpose="pulse report", schema=candidates.SCHEMA)
+    [line] = [r.getMessage() for r in caplog.records if "call failed" in r.getMessage()]
+    assert line.startswith("conduit_push: Pulse: the pulse report call failed: RuntimeError: status 400")
+    assert "'additionalProperties' must be explicitly set to false" in line
+    assert len(line) < 700 and line.endswith("…")
 
 
 def test_the_chats_model_is_read_where_hermes_reads_it(db, tmp_path):
@@ -3322,7 +3387,7 @@ def test_the_loop_runs_memory_on_its_own_thread(remembering, db, monkeypatch):
     remembering.store.set("memory_requested", True)
     pulse.tick(start + 120)
     pulse._memory_thread.join(5)
-    assert [(c["task"], c["json_schema"]) for c in calls] == [(memory.TASK, memory.SCHEMA)]
+    assert [(c["task"], c["json_schema"]) for c in calls] == [(memory.TASK, pulse.closed_schema(memory.SCHEMA))]
     assert not any("json_mode" in c for c in calls)  # issue 848
     assert remembering.store.get("memory_usage") == {"chunks": 1, "tokens": 7, "failed": 0, "skipped": 0}
     pulse._stop.set()  # an unloaded plugin's run makes no more calls

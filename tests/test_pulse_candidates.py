@@ -564,7 +564,7 @@ def test_a_report_lists_its_candidates_then_says_what_code_picked(reporting):
     [call] = live.llm.calls
     # The reply's shape goes as a schema, never json_mode (issue 848).
     assert (call["purpose"], call["max_tokens"], call["json_schema"]) == (
-        "pulse report", candidates.REPLY_TOKENS, candidates.SCHEMA) and "json_mode" not in call
+        "pulse report", candidates.REPLY_TOKENS, pulse.closed_schema(candidates.SCHEMA)) and "json_mode" not in call
     asked = call["input"][0]["text"]
     assert f"#{item_id} [commitment]" in asked and "### Deploy (c1)" in asked and "flaky deploy" in asked
     pulse.tick(now + 1)
