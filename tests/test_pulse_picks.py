@@ -88,7 +88,8 @@ def test_a_failing_status_is_refused_when_the_report_saw_the_job_running_fine():
 
 
 def test_the_picks_are_told_not_to_read_a_failed_tool_call_as_a_failing_thing():
-    assert "never because a chat shows a tool call that failed" in picks.PICK_RULES
+    assert "never because a tool call failed inside a chat" in picks.PICK_RULES
+    assert "the failed tool calls it lists" in picks.PICK_RULES, "the report's own failed calls still count"
     assert "never by its key" in picks.PICK_RULES
 
 
