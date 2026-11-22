@@ -510,14 +510,30 @@ def test_send_puts_the_chat_on_pulses_model_first(monkeypatch):
     assert host.send(SID, "x", model=model).ok and fake.calls[-1][0] == host.SUBMIT
 
 
+def test_send_puts_a_bracketed_claude_model_in_the_flag_value(monkeypatch):
+    fake = FakeHost().install(monkeypatch)
+    sys.modules["tui_gateway.server"]._methods[host.CONFIG_SET] = \
+        lambda rid, params: fake.calls.append((host.CONFIG_SET, params)) or {"result": {"value": "m"}}
+    model = {"provider": "claude-subscription-directsdk-experimental", "model": "claude-haiku-5-5[1m]"}
+    assert host.send(SID, "x", model=model).ok
+    assert fake.calls[1][1] == {"key": "model", "session_id": "ui-1", "confirm_expensive_model": True,
+                                "value": "claude-haiku-5-5[1m] --provider claude-subscription-directsdk-experimental --session"}
+
+
 def test_the_pulse_model_setting(pulse_store, tmp_path):
     store_ = pulse_store
     control.update(store_, {"model": {"provider": "openrouter", "model": "google/gemini-flash"}})
     assert store_.get(pulse.MODEL) == {"provider": "openrouter", "model": "google/gemini-flash"}
+    claude = {"provider": "claude-subscription-directsdk-experimental", "model": "claude-haiku-5-5[1m]"}
+    control.update(store_, {"model": claude})
+    assert store_.get(pulse.MODEL) == claude
+    assert pulse.turn_model(store_) == claude and control.state(store_, tmp_path)["model"] == claude
     for bad in ({"model": "flash"}, {"model": {"model": ""}}, {"model": {"model": "a b"}},
                 {"model": {"model": "--provider"}}, {"model": {"model": "m", "provider": "-x"}},
                 {"model": {"model": 'x"'}}, {"model": {"model": "x\x00"}},
-                {"model": {"model": "m", "base_url": "x"}}):
+                {"model": {"model": "m", "base_url": "x"}},
+                {"model": {"model": "[1m]x y"}}, {"model": {"model": "-[1m]"}},
+                {"model": {"model": '[1m]"'}}):
         with pytest.raises(control.Refused):
             control.update(store_, bad)
     control.update(store_, {"model": None})

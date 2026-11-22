@@ -188,12 +188,14 @@ def send(chat_id: str, text: str, *, profile: str = "", model: Optional[dict] = 
     return Sent(True, "streaming" if status == "streaming" else "queued", status)
 
 
-_FLAG_VALUE = re.compile(r"[A-Za-z0-9._:/@+][A-Za-z0-9._:/@+-]*")
+_FLAG_VALUE = re.compile(r"[A-Za-z0-9._:/@+][A-Za-z0-9._:/@+\[\]-]*")
 
 
 def plain_flag_value(value: str) -> bool:
     """A model or provider name that reads as one plain word, never a flag or
-    a quote, in config.set's value string."""
+    a quote, in config.set's value string. A Claude subscription model ends
+    in a context size like ``[1m]``, so ``[`` and ``]`` pass after the first
+    character."""
     return bool(_FLAG_VALUE.fullmatch(value))
 
 
