@@ -13,6 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.195.0 (2026-11-22)
+
+### Fixes
+
+- Writing a message while a question card waits no longer leaves the chat stuck until Stop: the question is withdrawn and your message goes through, as Hermes does in other chats.
+- A question you answered from a notification or on a call no longer stays answerable in the chat, where your next message could be taken as its answer.
+
+### New and improved
+
+- A question that waits on your Needs you list can be dismissed without an answer, and the bot is told you dismissed it rather than picked something.
+
 ## 0.194.5 (2026-11-22)
 
 ### Fixes

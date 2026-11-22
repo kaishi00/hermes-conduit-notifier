@@ -937,7 +937,7 @@ class Store:
         next work update), the line is in the outbox in the same write, as
         ``outbox`` on the row: an answer a restart catches before its update
         is queued still goes out (``line_answer``)."""
-        if status not in ("approved", "declined", "answered"):
+        if status not in ("approved", "declined", "answered", "dismissed"):
             raise ValueError(f"unknown answer {status}")
         with self._db() as con:
             changed = con.execute("UPDATE proposals SET status = ?, answer = ?, answered_at = ? WHERE id = ? AND "
