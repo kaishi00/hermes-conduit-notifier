@@ -1114,6 +1114,43 @@ def test_a_harmless_non_zero_exit_is_left_out_of_failed_calls(recording):
     assert ledger.harmless_exit(row) and _failed(recording) == ""
 
 
+@pytest.mark.parametrize("output", [
+    ('time="2026-11-17T08:05:06Z" level=error msg="invalid internal status, try resetting the pause '
+     'process with \\"podman system migrate\\": cannot re-exec process to join the existing user namespace"'),
+    'Error: cannot set up namespace using "/usr/bin/newuidmap": newuidmap: write to uid_map failed: Operation not permitted',
+    ('newuidmap: write to uid_map failed: Operation not permitted\n'
+     'Error: cannot set up namespace using "/usr/bin/newuidmap": exit status 1'),
+])
+def test_a_command_the_sandbox_blocked_is_left_out_of_failed_calls(recording, output):
+    """Rootless Podman in a sandbox that denies a multi-ID user namespace stops
+    before it reaches what it was for, and says so in its own words: nothing
+    came of the call, so it isn't brought up."""
+    home = pulse.get_hermes_home()
+    _terminal(home, "podman ps -a --format '{{.Names}}'", output, 125, DAY)
+    [row] = recording.store.recent_outcomes()
+    assert row["status"] == "error"
+    assert ledger.blocked_by_sandbox(row) and _failed(recording) == ""
+
+
+@pytest.mark.parametrize("command, output, expected_snippet", [
+    ("podman start hindsight", "Error: no such container hindsight", "no such container"),
+    # The sandbox stopped one part, and the part after it failed on its own.
+    ("podman info; ./deploy.sh",
+     "newuidmap: write to uid_map failed: Operation not permitted\nError: deploy failed: disk full",
+     "deploy failed"),
+    ("podman ps",
+     'time="2026-11-17T08:05:06Z" level=error msg="invalid internal status, try resetting the pause '
+     'process with \\"podman system migrate\\": could not find any running process: no such process"',
+     "could not find any running process"),
+])
+def test_a_real_podman_failure_stays_in_failed_calls(recording, command, output, expected_snippet):
+    """Only namespace-denial sandbox errors go: a missing container or a real
+    stale pause process is the work's failure, and the user's to hear about."""
+    _terminal(pulse.get_hermes_home(), command, output, 125, DAY)
+    [row] = recording.store.recent_outcomes()
+    assert not ledger.blocked_by_sandbox(row) and expected_snippet in _failed(recording)
+
+
 def test_a_traceback_stays_in_failed_calls_with_its_exception(recording):
     home = pulse.get_hermes_home()
     output = ("fetching listings\nTraceback (most recent call last):\n  File \"scrape.py\", line 12, in <module>\n"
@@ -1505,6 +1542,32 @@ def test_the_report_lists_active_cron_jobs(tmp_path):
     for broken in ("{broken", '{"jobs": null}', '{"jobs": 5}'):
         (tmp_path / "cron" / "jobs.json").write_text(broken)
         assert report.cron_jobs(tmp_path) == ""
+
+
+def test_the_job_list_says_which_of_its_jobs_are_failing(tmp_path):
+    # So a pick naming a job as failing is checked against the same record the
+    # report read (pulse_picks.unbacked_failing).
+    (tmp_path / "cron").mkdir()
+    jobs = [
+        {"id": "a1", "name": "Check the build", "prompt": "x", "schedule_display": "once at 09:00",
+         "next_run_at": "2026-10-21T09:00:00+00:00", "last_status": "ok"},
+        {"id": "b2", "name": "Nightly backup", "prompt": "y", "schedule_display": "daily at 10:00",
+         "next_run_at": "2026-10-21T10:00:00+00:00", "last_status": "failed", "failure_streak": 3,
+         "last_error": "disk full"},
+        # Never run yet: the list can't vouch for it, so it isn't in health.
+        {"id": "c3", "name": "New watcher", "prompt": "z", "schedule_display": "every 1h"},
+    ]
+    (tmp_path / "cron" / "jobs.json").write_text(json.dumps({"jobs": jobs}))
+    keys, health = {}, {}
+    text = report.cron_jobs(tmp_path, keys=keys, health=health)
+    assert keys == {"j1": "job::a1", "j2": "job::b2", "j3": "job::c3"}
+    assert health == {"job::a1": "", "job::b2": "failed its last 3 runs: disk full"}
+    assert text.splitlines()[2] == ("- j2 Nightly backup (daily at 10:00, next 2026-10-21T10:00:00+00:00)"
+                                    " [failing: failed its last 3 runs: disk full]: y")
+    # Passing health without keys still records every listed job's health.
+    health_only = {}
+    report.cron_jobs(tmp_path, health=health_only)
+    assert health_only == health
 
 
 def test_the_report_context_stays_within_its_budget(db, tmp_path):

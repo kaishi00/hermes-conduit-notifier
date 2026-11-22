@@ -79,10 +79,10 @@ CLOSE = "close"
 PICK_RULES = """Each thing you bring up is a pick:
 {{"line": "...", "detail": "...", "subject": "#41", "incident": {{"card": "new"}}, "shape": "plain", "facts": {{}}, "actions": [{{"label": "...", "does": "ask", "say": "..."}}]}}
 - "line": the headline, written to the user, at most one sentence, short (under 15 words), saying the thing itself, never a reason or advice the context doesn't give ("so you can plan around it"). "detail": one more sentence that adds what the line doesn't say (what to do, a number, a name), or "", never the line said again. The card draws the shape's facts under them, so neither needs to repeat them.
-- "subject": the key of what it's about, as the context gives it: a remembered thing (#41), a reminder (r2), a calendar entry (v1), a scheduled job (j3); "" when it has none.
+- "subject": the key of what it's about, as the context gives it: a remembered thing (#41), a reminder (r2), a calendar entry (v1), a scheduled job (j3); "" when it has none. The key is for "subject" alone: in the line, detail and button words, name the thing by its own name ("the PR watcher"), never by its key.
 - "incident": {{"card": "new"}} for something new. When a card under "What Pulse brought up lately" is still open and this is more about that same occurrence (another failed run, a new step), {{"card": "pc_1834"}} with that card's id updates it. When that occurrence is over (the job recovered, it arrived), {{"close": "pc_1834"}} closes it. Something that happened again after it was over is new, not an update.
 - "shape" and its "facts", only what the context states, else "plain" with {{}}:
-  "date" {{"day": "YYYY-MM-DD", "what": "birthday", "whose": "Kwan"}} ("whose": a person's name, or "" for the user's own); "due" {{"due": "YYYY-MM-DD", "noticed": "YYYY-MM-DD"}} (something to get done by a day; "noticed": the earlier day it first came up, left out when that's the due day); "runs" {{"job": "name", "results": ["ok", "fail"]}} (a scheduled job's recent runs, oldest first, at most 10: use it rather than "status" when the context shows its runs); "promise" {{"person": "Mara", "said": "their words, quoted", "where": "chat title", "when": "Fri"}}; "status" {{"label": "what", "state": "ok" | "warn" | "fail"}} ("label": the thing in two to four words, like "Nightly backup"); "steps" {{"names": ["Ordered", "Shipped", "Out today", "Delivered"], "at": 2}} (at = the current step, counted from 0). Pick the shape the facts support: a next step after something done is "steps" (what's done, then what's next); something the user or Hermes said they'd do, or the user asked to be reminded of, with no day, is "promise" in the words they said; something that went wrong is "status" or "runs". Never make up a fact to fit a shape.
+  "date" {{"day": "YYYY-MM-DD", "what": "birthday", "whose": "Kwan"}} ("whose": a person's name, or "" for the user's own); "due" {{"due": "YYYY-MM-DD", "noticed": "YYYY-MM-DD"}} (something to get done by a day; "noticed": the earlier day it first came up, left out when that's the due day); "runs" {{"job": "name", "results": ["ok", "fail"]}} (a scheduled job's recent runs, oldest first, at most 10: use it rather than "status" when the context shows its runs); "promise" {{"person": "Mara", "said": "their words, quoted", "where": "chat title", "when": "Fri"}}; "status" {{"label": "what", "state": "ok" | "warn" | "fail"}} ("label": the thing in two to four words, like "Nightly backup"); "steps" {{"names": ["Ordered", "Shipped", "Out today", "Delivered"], "at": 2}} (at = the current step, counted from 0). Pick the shape the facts support: a next step after something done is "steps" (what's done, then what's next); something the user or Hermes said they'd do, or the user asked to be reminded of, with no day, is "promise" in the words they said; something that went wrong is "status" or "runs". Never make up a fact to fit a shape. Something is missing or failing only when the context's own record says so (a job list that marks it failing, a check that came back absent, the failed tool calls it lists), never because a tool call failed inside a chat: a read at a wrong path fails while the file sits there.
 - "actions": at most 2 buttons, each with a short "label" (a few words, like "Restart it") and "does": "ask" with "say" (words for the user to send Hermes in that thing's chat; they can edit them first), "open" with "url" (an https link the context gives), "draft" with "text" (a message for the user to send someone), "done" or "later". Give the one most useful step first, named for what it does ("Verify ID", "Plan the day"), never a bare "Do it". For something that went wrong (a failing job, an error, a "warn" or "fail" status), that first step is an "ask" whose "say" has Hermes find out what's wrong and fix it, never only ask how it stands. A calendar entry is already on the user's calendar, with its own alerts: never offer to add it, block time for it, remind about it or check it again; give a step only for preparation the context names, else just "done". An entry on a holiday calendar for another country ("Holidays in Japan") isn't a day off the user keeps. Every step is one Hermes can actually take: it can't change the Conduit app or what its cards can show. [] when there's nothing to do."""
 
 
@@ -317,6 +317,42 @@ def off_calendar(actions: Any) -> list:
     it was read from."""
     return [action for action in actions if not (isinstance(action, Mapping) and _onto_calendar(action))] \
         if isinstance(actions, list) else []
+
+
+JOB_SUBJECT = "job:"
+FAILING_STATES = ("warn", "fail")
+
+
+def unbacked_failing(subject: Any, pick: Any, health: Mapping[str, str]) -> str:
+    """Why a pick's failing status or runs can't stand, "" when it can.
+
+    ``health`` is what the report's job list said of each job it showed, by
+    the job's lasting subject ("job:<profile>:<id>", pulse_report.cron_jobs):
+    "" for one running fine, its ``job_health`` words for one that fails, and
+    nothing for a job the list didn't show. A pick that names one as "warn" or
+    "fail" while the list shows it fine read a failed tool call in a chat as a
+    failing job — a read at a wrong path fails while the file is there.
+    """
+    if not isinstance(pick, Mapping):
+        return ""
+    facts = pick.get("facts")
+    if not isinstance(facts, Mapping):
+        return ""
+    if pick.get("shape") == "status":
+        failing = facts.get("state") in FAILING_STATES
+    elif pick.get("shape") == "runs":
+        # Runs that end in a failure say the job is failing now; ones that
+        # end "ok" (a recovery) are fine against a healthy list.
+        results = facts.get("results")
+        failing = isinstance(results, list) and bool(results) and results[-1] == "fail"
+    else:
+        return ""
+    if not failing:
+        return ""
+    key = str(subject or "")
+    if not key.startswith(JOB_SUBJECT) or key not in health:
+        return ""  # not a job the report listed: nothing to check it against
+    return "" if health[key] else "unbacked_status"
 
 
 def _actions(value: Any) -> list[dict]:

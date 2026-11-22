@@ -70,6 +70,35 @@ def test_a_calendar_entry_gets_no_button_to_put_it_on_the_calendar():
     assert "never a reason or advice the context doesn't give" in picks.PICK_RULES
 
 
+def test_a_failing_status_is_refused_when_the_report_saw_the_job_running_fine():
+    # A read_file at a wrong path failed in a chat transcript, and a notice
+    # called a healthy scheduled job's script missing while the job list showed
+    # it running fine.
+    pick = {"shape": "status", "facts": {"label": "PR watcher script", "state": "fail"}}
+    assert picks.unbacked_failing("job::c13b9adf75df", pick, {"job::c13b9adf75df": ""}) == "unbacked_status"
+    # The list showing the job failing backs the claim.
+    assert picks.unbacked_failing("job::x", pick, {"job::x": "failed its last 3 runs"}) == ""
+    # A job the report never listed, something that isn't a job, and a status
+    # that isn't failing: nothing to hold against the record.
+    assert picks.unbacked_failing("job::y", pick, {"job::x": ""}) == ""
+    assert picks.unbacked_failing("#41", pick, {"#41": ""}) == ""
+    assert picks.unbacked_failing("job::x", {**pick, "facts": {"label": "x", "state": "ok"}}, {"job::x": ""}) == ""
+    # A pick with no shape of its own (a plain one) never carries a status.
+    assert picks.unbacked_failing("job::x", {"line": "x"}, {"job::x": ""}) == ""
+    # Runs that end in a failure are a failing claim too; a recovery isn't.
+    runs = {"shape": "runs", "facts": {"job": "PR watcher", "results": ["ok", "fail"]}}
+    assert picks.unbacked_failing("job::x", runs, {"job::x": ""}) == "unbacked_status"
+    assert picks.unbacked_failing("job::x", runs, {"job::x": "failed its last run"}) == ""
+    recovered = {"shape": "runs", "facts": {"job": "PR watcher", "results": ["fail", "ok"]}}
+    assert picks.unbacked_failing("job::x", recovered, {"job::x": ""}) == ""
+
+
+def test_the_picks_are_told_not_to_read_a_failed_tool_call_as_a_failing_thing():
+    assert "never because a tool call failed inside a chat" in picks.PICK_RULES
+    assert "the failed tool calls it lists" in picks.PICK_RULES, "the report's own failed calls still count"
+    assert "never by its key" in picks.PICK_RULES
+
+
 def test_a_calendar_entry_loses_the_button_however_it_is_named_or_kept():
     block = {"label": "Block calendar time", "does": "ask", "say": "Block the day for work"}
     check = {"label": "Check work schedule", "does": "ask", "say": "Look over my schedule that week"}
