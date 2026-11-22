@@ -825,6 +825,8 @@ def test_a_question_dismissed_without_an_answer_is_told_as_no_answer(on, hermes,
     assert done == {"ok": True, "id": item, "status": "dismissed"}
     line, = batched()
     assert line.startswith(f"- {item}: the user dismissed it just now without answering")
+    # The answers' wake tells the bot a dismissed one asks nothing of it, not to act on it.
+    assert "one they dismissed asks nothing of you, so leave its work as it is" in coord.ANSWER_TAIL
     assert "isn't their yes, no or pick" in line and line.endswith("You asked: «Dinner earlier or later?»")
     row = on.proposal(item)
     assert row["status"] == "dismissed" and row["answer"] == ""

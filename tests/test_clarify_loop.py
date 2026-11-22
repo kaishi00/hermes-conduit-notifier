@@ -1743,3 +1743,20 @@ def test_a_relay_answer_cancels_the_messaging_gateways_own_question(monkeypatch)
     assert json.loads(result)["user_response"] == "Red"
     # Only the question this call registered: one open before it is another's.
     assert resolved == [("new", "\x00cancelled")]
+
+
+def test_two_new_questions_with_the_same_wording_are_left_alone(monkeypatch):
+    """Two chats asking the same thing at once: which card is this call's
+    can't be told, so neither is cancelled."""
+    gateway = types.ModuleType("tools.clarify_gateway")
+    gateway.CANCELLED = "\x00cancelled"
+    gateway._entries = {"a": types.SimpleNamespace(question="Which color?"),
+                        "b": types.SimpleNamespace(question="Which color?"),
+                        "c": types.SimpleNamespace(question="Which size?")}
+    resolved = []
+    gateway.get_pending = lambda clarify_id: gateway._entries.get(clarify_id)
+    gateway.resolve_gateway_clarify = lambda clarify_id, response: resolved.append(clarify_id) or True
+    monkeypatch.setitem(sys.modules, "tools.clarify_gateway", gateway)
+    batch = [{"question": "Which color?"}, {"question": "Which size?"}]
+    loop._close_hermes_prompt(None, frozenset(), batch, loop.RESOLVED)
+    assert resolved == ["c"]

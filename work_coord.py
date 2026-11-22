@@ -125,7 +125,8 @@ ANSWER_HEAD = ("Work update from Conduit: the user answered what you asked them,
                "or in another of your chats (a call's, said aloud). "
                "This is their own answer, already recorded (no work_propose call is needed):\n{lines}\n")
 ANSWER_TAIL = ("Act on it now: do what they said yes to or picked, and undo what you went ahead with that they "
-               "didn't pick or said no to. Then tell them in a line what you did, with its link when it has one.")
+               "didn't pick or said no to; one they dismissed asks nothing of you, so leave its work as it is. "
+               "Then tell them in a line what you did, with its link when it has one.")
 ANSWER_LINE = "- {id}{about}, approved by the user just now: «{text}»"
 ANSWER_PICKED = "- {id}{about}: the user picked «{choice}» just now. You asked: «{text}»"
 ANSWER_SAID = "- {id}{about}: the user answered «{choice}» just now. You asked: «{text}»"
@@ -697,8 +698,8 @@ def _asked_before(store: work_store.Store, refs: list[str], new: str, *, besides
                   text: str = "", chat: str = "") -> Optional[dict]:
     """Why a question about ``refs`` isn't asked now, or None: another open
     question covers some of that work (or, about no workstream, asks nearly
-    the same as ``text`` in the same chat), or the user said no to it in the
-    last day and nothing new came up."""
+    the same as ``text`` in the same chat), or the user said no to it or
+    dismissed it in the last day and nothing new came up."""
     # One open question per workstream: a second would ask the user twice.
     pending = store.proposal_about(refs, status="open", besides=besides)
     if pending is None and not refs:

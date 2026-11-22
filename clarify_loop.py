@@ -710,11 +710,12 @@ SUPERSEDED = "superseded"
 # answered elsewhere (on the phone's card or a call): Conduit for desktop
 # drops a card cancelled so, and the phone says it was answered elsewhere.
 RESOLVED = "resolved"
-SUPERSEDED_NOTICE = ("[the user wrote a message instead of answering, so the question was withdrawn and nothing "
-                     "was answered. Their message comes right after this: go by it, and don't guess the answer.]")
-SUPERSEDED_QUEUED_NOTICE = ("[the user wrote a message instead of answering, so the question was withdrawn and "
-                            "nothing was answered. Their message runs as soon as this turn ends: end it now in a "
-                            "line, without guessing the answer.]")
+SUPERSEDED_NOTICE = ("[the user wrote a message instead of answering, so the question was withdrawn: only an "
+                     "answer shown here stands, and nothing else was answered. Their message comes right after "
+                     "this: go by it, and don't guess the rest.]")
+SUPERSEDED_QUEUED_NOTICE = ("[the user wrote a message instead of answering, so the question was withdrawn: only an "
+                            "answer shown here stands, and nothing else was answered. Their message runs as soon "
+                            "as this turn ends: end it now in a line, without guessing the rest.]")
 
 
 class _UserWrites:
@@ -767,8 +768,8 @@ class _UserWrites:
 
 def _hidden_send(envelope: Any) -> bool:
     """A queued prompt the user didn't write: a plugin's hidden send (a
-    workstream's wake, Pulse) carries ``display_kind`` "hidden" on its
-    envelope once Hermes has staged its row."""
+    workstream's wake, Pulse) carries its ``display_kind`` "hidden" on its
+    envelope as ``_queued_display_kind`` once Hermes has staged its row."""
     return isinstance(envelope, dict) and envelope.get("_queued_display_kind") == "hidden"
 
 
@@ -785,9 +786,10 @@ def _withdrawn(request_id: str, relay_won: bool, writes: _UserWrites, before: An
                batch: list[dict[str, Any]], locked: dict[str, Any], wrote: str) -> str:
     """The question's result once the user wrote in the chat instead of
     answering: every card for it goes (the phone's and Hermes' own, so no
-    later message is taken as its answer), and the model is told nothing was
-    answered and that their message comes next. A batch's answers locked
-    before still stand."""
+    later message is taken as its answer), and the model is told that only
+    the answers shown stand and that their message comes next. A batch's
+    answers locked before still stand. The result has the batch shape for a
+    single question too, as Hermes' own clarify returns every outcome."""
     calls.forget_waiting_card(request_id)
     _release_decision(request_id, relay_won)
     _close_hermes_prompt(writes.session, before, batch, SUPERSEDED)
