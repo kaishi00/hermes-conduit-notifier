@@ -4218,7 +4218,8 @@ def _lookup(session_id: Any, home: Optional[Path] = None) -> tuple[Optional[Path
             return home, work, False
         found = _compacted_from(home, session_id, store)
         if found is False:
-            _not_compacted.add(session_id)
+            with _not_work_lock:
+                _not_compacted.add(session_id)
             return home, None, False
         if found is None:
             return home, None, False
@@ -6981,6 +6982,9 @@ def stop() -> None:
         _not_work.clear()
         _not_compacted.clear()
     work_coord.forget_open_questions()
+    from . import clarify_loop  # imported where it's used: it imports far more
+
+    clarify_loop.forget_sources()
     with _wake_lock:
         pending = list(_wakes.values())
         _wakes.clear()

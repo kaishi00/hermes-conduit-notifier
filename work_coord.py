@@ -505,7 +505,8 @@ def _event_line(event: dict, ago: Callable[[float], str], states: dict, work: wo
 # the Work panel on each poll (notifier issue 983). Any write to the
 # registry ends it. Questions asked in chats are kept OPEN_QUESTIONS_TTL_S at
 # most besides, so a chat the user deleted lets go of its questions within
-# seconds, as the 2 s policy read does; none waiting is kept until a write.
+# seconds, as the 2 s policy read does; the Bot Chat's own, which only a
+# write can change, and none waiting are kept until a write (#997's review).
 OPEN_QUESTIONS_TTL_S = 2.0
 OPEN_QUESTIONS_KEPT = 64
 _open_kept: "OrderedDict[str, tuple[tuple, float, list[dict]]]" = OrderedDict()
@@ -524,7 +525,7 @@ def open_questions(store: work_store.Store) -> list[dict]:
     if stamp is not None:
         with _open_lock:
             known = _open_kept.get(key)
-            if known is not None and known[0] == stamp and (not known[2] or known[1] > now):
+            if known is not None and known[0] == stamp and (not any(row.get("chat") for row in known[2]) or known[1] > now):
                 _open_kept.move_to_end(key)
                 return [dict(row) for row in known[2]]
     found = _open_questions(store)
@@ -532,7 +533,8 @@ def open_questions(store: work_store.Store) -> list[dict]:
         with _open_lock:
             # Kept with the stamp read before: a withdrawal just now changes
             # the registry, so the next call reads it again.
-            _open_kept[key] = (stamp, now + OPEN_QUESTIONS_TTL_S, [dict(row) for row in found])
+            # Its seconds count from the end of the read: a slow one still keeps.
+            _open_kept[key] = (stamp, time.monotonic() + OPEN_QUESTIONS_TTL_S, [dict(row) for row in found])
             _open_kept.move_to_end(key)
             while len(_open_kept) > OPEN_QUESTIONS_KEPT:
                 _open_kept.popitem(last=False)

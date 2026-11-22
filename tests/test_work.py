@@ -2707,8 +2707,10 @@ def test_an_ordinary_chats_tool_calls_read_the_registry_only_when_it_changes(on,
     # An unload forgets them, so a reload starts from the registry (#964's review).
     work._not_work[("x", "y")] = ()
     work._not_compacted.add("x")
+    clarify_loop_mod = sys.modules["conduit_push.clarify_loop"]
+    clarify_loop_mod._sources[("db", "s")] = "a2a"
     work.stop()
-    assert not work._not_work and not work._not_compacted
+    assert not work._not_work and not work._not_compacted and not clarify_loop_mod._sources
 
 
 def test_an_unreadable_registry_keeps_a_turns_hooks_quiet_except_the_bot_chats(on, hermes, monkeypatch):
