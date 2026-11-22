@@ -106,8 +106,11 @@ removing any. The note is their go-ahead for the rest, so don't ask again.
    through `tool_call`:
    `tool_call {"calls": [{"name": "conduit_watch_report", "arguments":
    {"happening": false, "saw": "One short sentence of what you saw"}}]}`.
-   If its answer says an argument is missing, send the same call once more
-   with it filled in.
+   Copy that shape exactly: the wrapper is `tool_call` (never `call` or
+   `call_tool`), the inner name is exactly `conduit_watch_report`, and the
+   fields sit under `arguments`, never `parameters`. If its answer says an
+   argument is missing, the shape was wrong, not the value: don't resend the
+   same call. Send it again with the fields under `arguments`, exactly as above.
 3. Then reply exactly as its answer says. Usually that's `[SILENT]`, which tells
    Hermes there's nothing to send.
 
