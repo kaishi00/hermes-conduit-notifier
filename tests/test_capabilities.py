@@ -126,6 +126,7 @@ def test_every_capability_names_a_served_route_family():
         "location-locate": "/location/status",
         # Sharing with the host's other profiles rides the ingest route.
         "location-profiles": "/location/ingest",
+        "phone-health-profiles": "/phone/ingest",
         "phone-sync": "/phone/",
         "phone-alarms": "/phone/",
         "phone-contacts": "/phone/",

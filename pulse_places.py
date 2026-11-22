@@ -325,9 +325,9 @@ def today_events(home: Path, zone: tzinfo, now: float) -> list[dict]:
     day, soonest first: not all-day, cancelled or declined ones. None when
     Conduit shares no calendar or it can't be read."""
     try:
-        from .phone_store import PhoneStore
+        from .phone_store import store_for
 
-        phone = PhoneStore(home)
+        phone = store_for(home)[0]
         if not phone.exists():
             return []
         end = datetime.combine(datetime.fromtimestamp(now, zone).date(), clock.max, tzinfo=zone).timestamp()

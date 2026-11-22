@@ -3447,6 +3447,17 @@ workouts, body, vitals, fitness), with how far back to start.
   has synced data, and subagents can't use it. What it returns goes to your
   agent's model like any tool result, which Conduit tells the user before
   they turn sharing on.
+- **Other profiles on this host** (plugin 0.194+, capability
+  `phone-health-profiles`). With "Share with this host's other profiles"
+  on in Conduit's Settings > Health (a batch's `other_profiles: true`, kept
+  per device; absent leaves it as it was), every other profile on the same
+  host that is paired with the same iPhone (the same relay installation in
+  its `conduit-push.json`) reads that device's data with `conduit_health`,
+  and its overview names the sharing profile. A profile that a phone syncs
+  health to itself always reads its own, and if several profiles share
+  with the others the first wins (default, then named ones
+  alphabetically). Voice reads stay with the sharing profile, whose key
+  they're sealed with.
 
 Limits: 4 devices per profile, 6,000 items and 4 MiB per batch, 120 uploads
 a minute per profile.
@@ -3781,6 +3792,23 @@ whether notes and attendees are included (off by default).
   wake that didn't go doesn't count);
   the rest is the usual status. iOS may hold a background wake back, so the tool says so rather
   than guess.
+- **Other profiles on this host (plugin 0.194+).** With "Share with this
+  host's other profiles" on in Conduit's Settings > Calendar & phone
+  (`sharing.other_profiles: true`, capability `phone-health-profiles`),
+  every other profile on the same host that is paired with the same iPhone
+  (the same relay installation in its `conduit-push.json`) reads that
+  device's calendar, reminders, status, alarms, shortcuts, people and
+  photos as its own: `conduit_calendar`, `conduit_phone`,
+  `conduit_contacts`, `conduit_photos`, the phone line with each message,
+  Pulse and free/busy in rooms. Its changes queue in the sharing profile's
+  store, and the nudge goes through the asking profile's own pairing, so the
+  phone picks them up on its next exchange as usual. The two profiles share
+  one queue for that device, so `pending` in either lists the other's
+  changes too, and only the first to ask sees them as `new`. Devices that
+  left the switch off stay out of its reads and changes. A profile that a phone
+  syncs to itself always reads its own, and if several profiles share with
+  the others the first wins (default, then named ones alphabetically).
+  Voice reads stay with the sharing profile, whose key they're sealed with.
 - **With each message (plugin 0.167+).** When the user turns on "With each
   message" under Focus and phone status (`sharing.turn_status`, capability
   `phone-turn-status`; only with the status or Focus shared), a turn whose

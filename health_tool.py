@@ -18,7 +18,7 @@ from typing import Any, Callable
 from hermes_constants import get_hermes_home
 
 from .conduit_first import HEALTH_FIRST
-from .health_store import CATEGORIES, METRICS, HealthError, HealthStore, parse_day
+from .health_store import CATEGORIES, METRICS, HealthError, HealthStore, parse_day, store_for
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -104,7 +104,9 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool], skill_path: Any) -> N
 
 
 def _store() -> HealthStore:
-    return HealthStore(get_hermes_home())
+    """This profile's store, or the one another profile on this host shares
+    with it ("Share with this host's other profiles", health_store.store_for)."""
+    return store_for(get_hermes_home())[0]
 
 
 def available() -> bool:
@@ -246,15 +248,19 @@ def _overview(store: HealthStore, only: str | None = None) -> dict[str, Any]:
             "detailed_readings": device["detailed_readings"],
             "metrics": device["metrics"],
         })
-    return {"ok": True, "devices": devices,
-            "note": "The phone syncs in the background when iOS lets it (often hourly, sooner when Conduit is "
-                    "open), so today's numbers can lag. Say how fresh the data is when it matters."}
+    note = ("The phone syncs in the background when iOS lets it (often hourly, sooner when Conduit is open), so "
+            "today's numbers can lag. Say how fresh the data is when it matters.")
+    if store.owner is not None:
+        note += (f" The user shares it with this profile through the {store.owner} profile (Share with this host's "
+                 "other profiles in Conduit).")
+    return {"ok": True, "devices": devices, "note": note}
 
 
 def _nothing_shared() -> dict[str, Any]:
     return {"ok": False, "error": "nothing_shared",
             "note": "No health data has been shared with this Hermes profile. The user can turn it on in "
-                    f"Conduit's {SETTINGS_LINK} (leave the link out of anything spoken)."}
+                    f"Conduit's {SETTINGS_LINK}, or, if they share it with another profile on this host, turn on "
+                    "Share with this host's other profiles there (leave the link out of anything spoken)."}
 
 
 def _metrics(value: Any, *, default: list[str]) -> list[str]:

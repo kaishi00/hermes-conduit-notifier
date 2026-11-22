@@ -2575,3 +2575,80 @@ def test_the_photos_tool_searches_and_asks_for_one(home):
     assert pending["changes"][0]["kind"] == "send_photo" and "vision_analyze" in pending["note"]
     refused = json.loads(tool.handle_photos({"action": "search"}, session_id="child", is_child=lambda s: True))
     assert refused["error"] == "subagent"
+
+
+# --- Shared with the host's other profiles ---------------------------------------
+
+
+def _paired(path, installation="installation-1"):
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "conduit-push.json").write_text(json.dumps({"credential": "c", "installation_id": installation}))
+
+
+def _work_shares(home, other_profiles=True, installation="installation-1", handset=None, **sharing):
+    """The `work` profile beside `home` (the default profile) holds the
+    calendar, both paired with the same iPhone unless told otherwise."""
+    work = home.path / "profiles" / "work"
+    _paired(home.path)
+    _paired(work, installation)
+    store = phone.PhoneStore(work, clock=lambda: NOW)
+    handset = handset or Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_batch(sharing=_sharing(other_profiles=other_profiles, **sharing))))
+    return store, handset
+
+
+def test_another_profile_on_the_host_reads_the_calendar_shared_with_it(home):
+    store, _ = _work_shares(home, auto_add=True)
+    assert tool.calendar_available() is True and tool.phone_available() is True
+    overview = _cal({"action": "overview"})
+    assert overview["ok"] is True and "through the work profile" in overview["note"]
+    assert any(event["id"] == "e_dentist" for event in _cal({"action": "events", "from": "2026-10-16"})["events"])
+    # A change queues in the sharing profile's store, for its device.
+    added = _cal({"action": "add_reminder", "title": "Call the bank"}, session_id="s1")
+    assert added["ok"] is True
+    assert [change["id"] for change in store.changes(mark_reported=False)] == [added["change_id"]]
+    assert home.sent and home.sent[0]["type"] == "phone.changes"
+
+
+def test_the_calendar_stays_with_its_profile_unless_shared_with_the_others(home):
+    _work_shares(home, other_profiles=False)
+    assert tool.calendar_available() is False
+    answer = _cal({"action": "overview"})
+    assert answer["error"] == "nothing_shared" and "other profiles" in answer["note"]
+
+
+def test_a_profile_paired_with_another_iphone_reads_no_calendar(home):
+    _work_shares(home, installation="installation-2")
+    assert _cal({"action": "overview"})["error"] == "nothing_shared"
+
+
+def test_a_profile_a_phone_syncs_to_reads_its_own_calendar(home):
+    _work_shares(home)
+    _shared(home, reminders=False)
+    overview = _cal({"action": "overview"})
+    assert overview["devices"][0]["reminders"] == "not shared" and "through" not in overview["note"]
+
+
+def test_another_profile_sees_only_the_devices_that_share_with_it(home):
+    store, _ = _work_shares(home)
+    ipad = Phone(device_id="ipad-installation-2", name="Eric's iPad")
+    ipad.accept(store.register_key(ipad.key_request()))
+    store.ingest(ipad.seal(_batch(batch_id="batch-ipad", sharing=_sharing(other_profiles=False))))
+    assert [device["name"] for device in tool._store().devices()] == ["Eric's iPhone"]
+    assert _cal({"action": "events", "device": "Eric's iPad"})["error"] == "unknown_device"
+    assert {device["name"] for device in store.devices()} == {"Eric's iPhone", "Eric's iPad"}
+
+
+def test_turning_other_profiles_off_takes_the_calendar_back(home):
+    store, handset = _work_shares(home)
+    assert _cal({"action": "overview"})["ok"] is True
+    store.ingest(handset.seal(_batch(batch_id="batch-0002", sharing=_sharing(other_profiles=False))))
+    assert _cal({"action": "overview"})["error"] == "nothing_shared"
+
+
+def test_another_profile_looking_never_upgrades_or_locks_the_sharing_store(home, monkeypatch):
+    store, _ = _work_shares(home)
+    monkeypatch.setattr(phone.PhoneStore, "_write", lambda self: (_ for _ in ()).throw(AssertionError("locked")))
+    found, owner = phone.store_for(home.path)
+    assert owner == "work" and found.path == store.path and found.shared_only is True

@@ -459,3 +459,71 @@ def test_ingest_refuses_an_oversized_body(client):
                            headers={"content-type": "application/json"})
     assert response.status_code == 413
     assert "code" not in response.json()  # not a store refusal: the body is as before
+
+
+# --- Shared with the host's other profiles ---------------------------------------
+
+
+def _paired(path, installation="installation-1"):
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "conduit-push.json").write_text(json.dumps({"credential": "c", "installation_id": installation}))
+
+
+def _work_shares(home, installation="installation-1", **batch):
+    """The `work` profile beside `home` (the default profile) holds the
+    health data, both paired with the same iPhone unless told otherwise."""
+    work = home / "profiles" / "work"
+    _paired(home)
+    _paired(work, installation)
+    store = health.HealthStore(work, clock=lambda: NOW)
+    phone = Phone()
+    phone.accept(store.register_key(phone.key_request()))
+    batch.setdefault("other_profiles", True)
+    store.ingest(phone.seal(_batch(**batch)))
+    return store, phone
+
+
+def test_another_profile_on_the_host_reads_health_shared_with_it(home):
+    _work_shares(home)
+    assert tool.available() is True
+    overview = _call({"action": "overview"})
+    assert overview["ok"] is True and "through the work profile" in overview["note"]
+    assert _call({"action": "sleep"})["nights"][0]["deep"] == 71
+
+
+def test_health_stays_with_its_profile_unless_shared_with_the_others(home):
+    _work_shares(home, other_profiles=False)
+    assert tool.available() is False
+    answer = _call({"action": "overview"})
+    assert answer["error"] == "nothing_shared" and "other profiles" in answer["note"]
+
+
+def test_a_batch_without_other_profiles_keeps_the_choice_and_false_takes_it_back(home):
+    store, phone = _work_shares(home)
+    store.ingest(phone.seal(_batch(batch_id="batch-0002")))  # says nothing about it
+    assert tool.available() is True
+    store.ingest(phone.seal(_batch(batch_id="batch-0003", other_profiles=False)))
+    assert tool.available() is False
+
+
+def test_a_profile_paired_with_another_iphone_reads_no_health(home):
+    _work_shares(home, installation="installation-2")
+    assert _call({"action": "overview"})["error"] == "nothing_shared"
+
+
+def test_a_new_key_or_a_wipe_forgets_sharing_with_the_others(home):
+    store, phone = _work_shares(home)
+    other = Phone()
+    other.accept(store.register_key(other.key_request()))  # same device id, new key
+    store.ingest(other.seal(_batch(batch_id="batch-0002", other_profiles=None)))
+    assert tool.available() is False
+    store.ingest(other.seal(_batch(batch_id="batch-0003", other_profiles=True)))
+    assert tool.available() is True
+    store.wipe(DEVICE)
+    assert tool.available() is False
+
+
+def test_other_profiles_must_be_true_or_false(store, phone):
+    with pytest.raises(health.HealthError) as error:
+        store.ingest(phone.seal(_batch(other_profiles="yes")))
+    assert error.value.code == "malformed"

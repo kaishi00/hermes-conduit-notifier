@@ -37,7 +37,7 @@ from .conduit_first import CALENDAR_FIRST, CONTACTS_FIRST, PHONE_FIRST
 from .events import push_event
 from .phone_store import (ALARM_CHANGE_KINDS, CALENDAR_CHANGE_KINDS, MAX_CLOCK_SKEW_S, MAX_PHOTO_RESULTS,
                           PHOTO_KEPT_S, SHORTCUT_CHANGE_KINDS, WEEKDAYS, PhoneError, PhoneStore, alarm_summary, change_need,
-                          clean_text, parse_day, parse_time, shares)
+                          clean_text, parse_day, parse_time, shares, store_for)
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -333,13 +333,15 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool], profile: Callable[[],
     # Sent pictures go after a week even when the phone stops syncing:
     # each load sweeps them too (status checks and photo reads do as well).
     try:
-        _store().sweep_sent_photos()
+        PhoneStore(get_hermes_home()).sweep_sent_photos()
     except Exception:  # noqa: BLE001 — never holds up the plugin's load
         logger.warning("conduit_push: couldn't sweep sent photos", exc_info=True)
 
 
 def _store() -> PhoneStore:
-    return PhoneStore(get_hermes_home())
+    """This profile's store, or the one another profile on this host shares
+    with it ("Share with this host's other profiles", phone_store.store_for)."""
+    return store_for(get_hermes_home())[0]
 
 
 def calendar_available() -> bool:
@@ -454,7 +456,11 @@ def handle_photos(args: Any, *, session_id: Any = None, is_child: Callable[[Any]
 
 
 def _error_note(error: PhoneError) -> str:
-    if error.code in ("nothing_shared", "not_shared"):
+    if error.code == "nothing_shared":
+        return (f"{error} The user can turn it on in Conduit's {SETTINGS_LINK}, or, if they share it with another "
+                "profile on this host, turn on Share with this host's other profiles there (leave the link out of "
+                "anything spoken).")
+    if error.code == "not_shared":
         return (f"{error} The user can turn it on in Conduit's {SETTINGS_LINK} (leave the link out of anything "
                 "spoken).")
     if error.code == "shared_read_only":
@@ -563,8 +569,11 @@ def _overview(store: PhoneStore, only: str | None = None) -> dict[str, Any]:
         if sharing.get("reminders"):
             entry["open_reminders"] = device["reminders"]
         found.append(entry)
-    return {"ok": True, "devices": found, "note": FRESHNESS_NOTE + " Changes to a shared calendar or list notify "
-                                                                  "the other people on it."}
+    note = FRESHNESS_NOTE + " Changes to a shared calendar or list notify the other people on it."
+    if store.owner is not None:
+        note += (f" The user shares these with this profile through the {store.owner} profile (Share with this "
+                 "host's other profiles in Conduit).")
+    return {"ok": True, "devices": found, "note": note}
 
 
 def _calendar_level(sharing: dict[str, Any]) -> str:

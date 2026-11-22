@@ -186,6 +186,10 @@ ROUTE_CAPABILITIES = (
     # sharing.other_profiles: the host's other profiles paired with the
     # same iPhone read the location (location_profiles).
     "location-profiles",
+    # sharing.other_profiles in a phone batch and "other_profiles" in a
+    # health batch: the host's other profiles paired with the same iPhone
+    # read that device's calendar, phone data and health (profile_sharing).
+    "phone-health-profiles",
     # /inbox: events the user's Shortcuts automations log (Log to Hermes).
     "shortcut-inbox",
     "pairing",

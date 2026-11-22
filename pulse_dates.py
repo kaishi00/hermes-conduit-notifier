@@ -175,10 +175,10 @@ def people(home: Path) -> list[Yearly]:
     """The picked people's birthdays, from the phone that synced last
     sharing them; none when nothing is shared or the store can't be read."""
     try:
-        from .phone_store import PhoneStore
+        from .phone_store import store_for as phone_store_for
     except Exception:  # noqa: BLE001 — no phone store in this build
         return []
-    phone = PhoneStore(home)
+    phone = phone_store_for(home)[0]
     if not phone.exists():
         return []
     try:
