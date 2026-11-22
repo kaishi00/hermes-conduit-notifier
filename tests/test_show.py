@@ -947,3 +947,16 @@ def test_a_broken_string_beside_a_good_card_names_its_place(tool_home):
     [where] = [problem for problem in answer["problems"] if tool.CARDS_NOT_JSON_MARK in problem]
     assert where.startswith("cards[1]: sent as a JSON string") and "its cards left out" in where
     assert "nothing shown" not in where
+
+
+def test_cards_not_json_only_from_a_string_that_doesnt_parse(tool_home):
+    """Review on #1010: a card's own text carrying the note's words is
+    still invalid_cards, and a lone surrogate near the break can't break
+    the answer's UTF-8."""
+    _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
+    table = {"type": "table", "table": {"columns": ["A", "B"],
+                                        "rows": [[tool.CARDS_NOT_JSON_MARK]]}}
+    assert _call({"title": "Today", "cards": [table]})["error"] == "invalid_cards"
+    answer = _call({"title": "Today", "cards": "[{\"type\": \"\ud800\""})
+    assert answer["error"] == "cards_not_json"
+    json.dumps(answer, ensure_ascii=False).encode("utf-8")
