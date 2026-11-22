@@ -1205,8 +1205,8 @@ def test_a_call_answer_wins_and_formats_like_a_device_answer(monkeypatch):
     assert fake.cancelled_ids == [request_id]
 
 
-def test_a_form_question_left_blank_on_a_call_comes_back_skipped():
-    # "Skip" on a call leaves a form's question blank (calls_store.is_skip):
+def test_a_question_left_blank_on_a_call_comes_back_skipped():
+    # "Skip" on a call leaves a question blank (calls_store.is_skip):
     # Hermes reads it as skipped, as a field left empty on the card.
     batch = [{"qid": "q0", "question": "Leaving from?", "choices": [], "multi_select": False},
              {"qid": "q1", "question": "Your kind of escape?", "choices": ["Beach", "City"], "multi_select": False}]
