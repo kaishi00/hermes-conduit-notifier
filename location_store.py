@@ -706,15 +706,20 @@ class LocationStore:
 
     # The agent's view -------------------------------------------------------------------
 
-    def voice_reader_device(self, reader: str, upgrade: bool = True) -> str | None:
+    def voice_reader_device(self, reader: str, upgrade: bool = True, shared_only: bool = False) -> str | None:
         """The device whose user lets ``reader`` read its location on a
-        signed-in call, the one that synced last; None when none does."""
+        signed-in call, the one that synced last; None when none does.
+        ``shared_only``: the store is another profile's, which offers only
+        the devices that share with this host's other profiles."""
         with self._read(upgrade) as db:
             if db is None:
                 return None
             for device_id, sharing in db.execute(
                     "SELECT id, sharing FROM devices WHERE last_seen IS NOT NULL ORDER BY last_seen DESC"):
-                if voice_readers.lets(_decode(sharing, None), reader):
+                decoded = _decode(sharing, None)
+                if shared_only and not (isinstance(decoded, dict) and decoded.get("other_profiles") is True):
+                    continue
+                if voice_readers.lets(decoded, reader):
                     return device_id
             return None
 

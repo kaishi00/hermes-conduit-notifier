@@ -1434,6 +1434,21 @@ def test_a_signed_in_read_of_another_profiles_location_names_the_reading_profile
     assert len(store.reads()) == 2
 
 
+def test_another_profiles_location_answers_a_signed_in_call_only_from_a_device_sharing_out(voice, tmp_path):
+    client, _ = voice
+    work = tmp_path / "profiles" / "work"
+    _paired(tmp_path)
+    _paired(work)
+    store, _ = _shared(work, fix=fix(), sharing=sharing(other_profiles=True))  # shares out, no voice mode
+    ipad = Phone(device_id="ipad-installation-2")
+    ipad.accept(store.register_key(ipad.key_request()))
+    store.ingest(ipad.seal(ipad.batch(batch_id="batch-ipad", fix=fix(),
+                                      sharing=sharing(other_profiles=False, voice_readers=["gpt-live"]))))
+    assert store.voice_reader_device("gpt-live") == "ipad-installation-2", "its own profile reads the iPad"
+    assert store.voice_reader_device("gpt-live", shared_only=True) is None
+    assert client.get(f"{BASE}/voice-context", params={"reader": "gpt-live"}).json()["context"] == ""
+
+
 def test_a_fix_with_no_place_or_area_gives_the_briefing_no_point_on_the_map(voice):
     client, store = voice
     _voice_phone(store, fix=fix(area=None), sharing=sharing(background_precision="precise", voice_readers=["gpt-live"]))

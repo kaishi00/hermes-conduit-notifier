@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.194.5 (2026-11-22)
+
+### Fixes
+
+- A computer call reading another profile's location now reads only a device that shares with other profiles, as calendar and health already did.
+
 ## 0.194.4 (2026-11-22)
 
 ### Fixes
