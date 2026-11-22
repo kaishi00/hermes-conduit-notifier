@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.194.1 (2026-11-22)
+
+### Fixes
+
+- In a group chat, a bot on another of your dashboards whose model provider ran out of credit, rate limited it or refused its key only said "The turn failed on this agent's Hermes." It now says which.
+
 ## 0.194.0 (2026-11-22)
 
 ### New and improved

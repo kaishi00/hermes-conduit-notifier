@@ -58,6 +58,9 @@ SCOPE = {"home_install_id": "gw-furina", "room_id": "room-zoo", "member_id": "m-
 PASS = "(pass)"
 NOTICE = "I've used all my turns in this room for today, so I'll sit out until tomorrow."
 FAILED = "The turn failed on this agent's Hermes."
+OUT_OF_CREDIT = "This agent's model provider is out of credit, so it can't answer until its owner tops it up."
+RATE_LIMITED = "This agent's model provider is rate limiting it. Try again in a little while."
+KEY_REFUSED = "This agent's model provider refused its API key."
 CAPPED = "This agent's Hermes stopped the turn after 10 minutes."
 RESTARTED = "This agent's Hermes restarted during the turn."
 STOPPED = "The turn was stopped on this agent's Hermes."
@@ -697,6 +700,25 @@ def test_a_failure_goes_back_as_a_fixed_sentence(laifu, hermes):
     laifu.member.tick()
 
     assert laifu.link.statuses() == [{"v": 1, "run_id": run_id, "seq": 1, "status": "failed", "error": FAILED}]
+
+
+@pytest.mark.parametrize(("error", "sentence"), [
+    # Z.AI's spent coding plan, as Hermes writes it into the failed run (2026-11-22).
+    ("HTTP 429: Insufficient balance or no resource package. Please recharge.", OUT_OF_CREDIT),
+    ("HTTP 402: Payment Required", OUT_OF_CREDIT),
+    ("You exceeded your current quota, please check your plan and billing details.", OUT_OF_CREDIT),
+    ("HTTP 429: Rate limit reached for requests", RATE_LIMITED),
+    ("HTTP 401: Invalid API key provided: sk-****", KEY_REFUSED),
+    ("Traceback (most recent call last)", FAILED),
+    (None, FAILED),
+])
+def test_a_providers_refusal_goes_back_as_why_never_its_text(laifu, hermes, error, sentence):
+    run_id = admit(laifu)
+    hermes.run(run_id, status="failed", **({} if error is None else {"error": error}))
+
+    laifu.member.tick()
+
+    assert laifu.link.statuses() == [{"v": 1, "run_id": run_id, "seq": 1, "status": "failed", "error": sentence}]
 
 
 def test_a_turn_past_10_minutes_is_stopped_and_sent_interrupted(laifu, hermes):
