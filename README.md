@@ -2057,8 +2057,17 @@ lock, and Conduit's next send claims the chat.
   gateway whose turns can't be seen, or the gateway's ledger holds work on
   it; ask again shortly, nothing
   is interrupted; a marker that can't be read counts as running, and only a marker whose writer is provably dead, or a gone owner's marker that names no writer, is ignored) or
-  `same_host` (this dashboard process still holds it, for example Conduit on
-  another device; that claim is left alone).
+  `same_host` (this dashboard process still holds it with a client attached,
+  for example Conduit on another device or the web chat, or with work still
+  running on a runtime nobody is attached to; that claim is left alone).
+- A claim this dashboard process holds for a chat runtime no client is
+  attached to any more (Conduit's own earlier connection, after its socket
+  closed) and that runs nothing (no turn running or marked, no question
+  waiting, no delegated work) is let go through Hermes' own release, and the
+  route answers `taken_over`: Hermes usually reaps such a runtime or hands its
+  claim on by itself, but one it kept refused that device's sends with no way
+  out (plugin 0.195.1+). The runtime stays and its next turn claims the chat
+  again.
 - Hermes' gateway can also hold a chat with no claim at all: work it queued
   in its durable ledger (`session_admissions` and `worker_executions` in the
   profile's state.db), such as another bot's message (message_agent) running

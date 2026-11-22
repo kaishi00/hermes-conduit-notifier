@@ -34,10 +34,14 @@ router = core.router
 # turn marker (tui_gateway.turn_marker) answers "busy" and Conduit asks again.
 #
 # Only another process's claim is dropped. A claim held by this dashboard
-# process (Conduit on another device, or the web chat) is left alone: Hermes
-# already hands those over itself once their client is gone. "This process"
-# is its pid: Hermes serves the dashboard as one process (its chat runtimes
-# and turn leases live in that process's memory), as the voice routes assume.
+# process (Conduit on another device, or the web chat) is left alone while a
+# client is attached to it. "This process" is its pid: Hermes serves the
+# dashboard as one process (its chat runtimes and turn leases live in that
+# process's memory), as the voice routes assume. One whose runtime nobody is
+# attached to any more (the device's own earlier connection) and that runs
+# nothing is let go through Hermes' own release: Hermes normally reaps such a
+# runtime or hands its claim on, but one it keeps alive refused that device's
+# sends with no way out (#3125; chat_takeover.release_detached_claims).
 #
 # The owner writes its turn marker without the registry lock, so a turn it
 # starts in the instant between the marker check and the write can still lose
@@ -112,10 +116,11 @@ def _owner_pid(entry: Dict[str, Any]) -> int:
 
 def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, home: Any,
                       own_pid: Optional[int] = None,
-                      abandoned: Optional[threading.Event] = None) -> Dict[str, Any]:
+                      abandoned: Optional[threading.Event] = None, server: Any = None) -> Dict[str, Any]:
     """chat_takeover.take_over_session, its refusals as TokenError."""
     return _takeover_call(lambda module: module.take_over_session(
-        session_ids, registry=registry, turn_marker=turn_marker, home=home, own_pid=own_pid, abandoned=abandoned))
+        session_ids, registry=registry, turn_marker=turn_marker, home=home, own_pid=own_pid, abandoned=abandoned,
+        server=server))
 
 
 def _take_over_scoped(session_ids: list, abandoned: Optional[threading.Event] = None) -> Dict[str, Any]:
