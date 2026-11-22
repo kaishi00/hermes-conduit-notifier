@@ -39,7 +39,7 @@ from typing import Any, Callable
 
 from hermes_constants import get_hermes_home
 
-from . import card_schema, card_templates, client, reply_sources, review_store, turn_surface
+from . import calls, card_schema, card_templates, client, reply_sources, review_store, turn_surface
 from .present_store import (CHAT_CARDS_FEATURE, MAX_CARD_MARKDOWN_CHARS, MAX_CARD_TITLE_CHARS, PresentError,
                             PresentStore, clip_markdown)
 
@@ -146,8 +146,8 @@ SHOWN_NOTE = ("On the user's screen. Say in a sentence that it's there and give 
               "repeat it in your reply.")
 IN_CHAT_NOTE = ("The cards are shown in the chat; Markdown isn't, so put anything else in your reply. Give the "
                 "gist in a sentence or two; don't repeat the cards' details.")
-TYPED_CHAT_NOTE = ("This message was typed in the chat, which shows cards but not Markdown, so nothing was shown: "
-                   "write it in your reply instead.")
+TYPED_CHAT_NOTE = ("No call screen is open, only the chat, which shows cards but not Markdown, so nothing was "
+                   "shown: write it in your reply instead.")
 CHAT_NO_CARDS_NOTE = ("This version of Conduit draws no cards in a chat. Put the markdown below in your reply "
                       "instead, as it is or tidied up.")
 NOT_CONDUIT_NOTE = ("This conversation isn't open in Conduit, so cards can't be drawn. Put the markdown below in "
@@ -906,11 +906,13 @@ def _handle_cards(args: dict[str, Any], session: str, cards: list[dict[str, Any]
     fallback = bool(cards) and not given_markdown
     if fallback:
         markdown = _fallback(cards)
-    if woken or turn_surface.turn_entry(session) == "typed":
+    if woken or turn_surface.turn_entry(session) == "typed" or not calls.in_call():
         # A typed message's chat is open, not a call's screen: the card would
         # wait unclaimed for a screen that isn't there, and Hermes would tell
-        # the user to look at it (hermes-conduit#1808). The chat draws the
-        # cards from this answer; Markdown goes in the reply.
+        # the user to look at it (hermes-conduit#1808). So with no call live,
+        # whatever the turn: a message sent with an attachment, a Shortcut, a
+        # call's job that ends after the hang-up (notifier#1002). The chat
+        # draws the cards from this answer; Markdown goes in the reply.
         if cards and store.has_feature(CHAT_CARDS_FEATURE):
             return _board({"ok": True}, cards, layout, follow_ups, problems,
                           _with_left_out(IN_CHAT_NOTE, left_out, no_texts))
