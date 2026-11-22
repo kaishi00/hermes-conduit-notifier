@@ -2058,8 +2058,9 @@ lock, and Conduit's next send claims the chat.
   it; ask again shortly, nothing
   is interrupted; a marker that can't be read counts as running, and only a marker whose writer is provably dead, or a gone owner's marker that names no writer, is ignored) or
   `same_host` (this dashboard process still holds it with a client attached,
-  for example Conduit on another device or the web chat, or with work still
-  running on a runtime nobody is attached to; that claim is left alone).
+  for example Conduit on another device or the web chat, or on a runtime
+  nobody is attached to that still runs work or is closing; that claim is
+  left alone).
 - A claim this dashboard process holds for a chat runtime no client is
   attached to any more (Conduit's own earlier connection, after its socket
   closed) and that runs nothing (no turn running or marked, no question

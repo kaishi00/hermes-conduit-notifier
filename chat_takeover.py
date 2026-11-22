@@ -331,8 +331,10 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
     claim whose surface writes no turn marker holds the chat, or the
     gateway's ledger holds work on it (surface ``bot`` for another bot's
     message, ``gateway`` otherwise; ask again shortly); ``same_host``:
-    this dashboard process still holds one of the ids, with a client on its
-    runtime or work running on it (other processes' claims may have been dropped). Marker reads happen under the registry lock on purpose:
+    this dashboard process still holds one of the ids, on a runtime that
+    isn't both detached and idle (release_detached_claims): a client on it,
+    work running, or a runtime closing (other processes' claims may have
+    been dropped). Marker reads happen under the registry lock on purpose:
     the decision and the write must be atomic against other claimers; the
     reads are bounded by the caller's ids (at most TAKEOVER_MAX_IDS) per owner.
 
