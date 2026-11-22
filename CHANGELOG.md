@@ -19,6 +19,16 @@ checks it). The format is fixed, because Conduit reads it:
 
 - Mute a chat's notifications in Conduit for 15 minutes, an hour, a day or until you unmute it. Its replies and failures stay quiet on every device; approvals and questions still come through.
 
+## 0.192.3 (2026-11-22)
+
+### Fixes
+
+- On an older Hermes, chat history and the Watch's chat reading work again. Before, chat history didn't load there.
+
+### New and improved
+
+- Your host's log now follows each notification from start to finish, and a relay outage shows once instead of every few seconds, so a notification that never arrived can be traced.
+
 ## 0.192.2 (2026-11-22)
 
 ### Fixes

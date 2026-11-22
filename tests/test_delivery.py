@@ -618,13 +618,17 @@ def test_a_relay_that_refuses_the_read_takes_none_and_nothing_is_paused_or_marke
 
 
 @pytest.mark.parametrize("failure", [503, 429])
-def test_a_read_that_fails_on_the_way_is_tried_again(paired, failure):
+def test_a_read_that_fails_on_the_way_is_tried_again(paired, failure, caplog):
     relay = paired([], meta=[failure, ["room-invites"]])
 
-    _deliver(_invite())
+    with caplog.at_level("INFO", logger="hermes.plugins.conduit_push"):
+        _deliver(_invite())
 
     assert relay.meta_reads == [True, True]
     assert relay.event_ids == [_invite()["event_id"]]
+    # The failed read was a round trip to the relay too: the trace counts it.
+    assert "will be retried (try 1)" in caplog.text
+    assert "try 2" in [r.getMessage() for r in caplog.records if "Conduit relay took" in r.getMessage()][0]
 
 
 def test_what_the_relay_takes_is_held_for_an_hour(paired):
@@ -739,6 +743,8 @@ def test_an_approval_goes_out_ahead_of_finished_turn_notices_queued_before_it(pa
     ({"accepted": True, "delivered": True}, "INFO", "delivered=True"),
     ({"accepted": True, "duplicate": True}, "INFO", "as a duplicate, no new push"),
     ({"accepted": True, "delivered": False}, "WARNING", "did not push it: the phone's delivery preferences"),
+    # A relay that doesn't say whether it pushed: a plain "took", not delivered=None.
+    ({"accepted": True}, "INFO", "took "),
 ])
 def test_each_accepted_event_logs_what_the_relay_did_with_it(paired, caplog, answer, level, words):
     relay = paired([])
@@ -752,6 +758,7 @@ def test_each_accepted_event_logs_what_the_relay_did_with_it(paired, caplog, ans
     line = lines[0].getMessage()
     assert lines[0].levelname == level and words in line
     assert client._log_tag(_event()) in line and "try 1" in line and "s queued" in line
+    assert "None" not in line
     # Never the content, nor the event id itself.
     assert "Done." not in caplog.text and "0123456789abcdef" not in caplog.text
 
