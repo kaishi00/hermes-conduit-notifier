@@ -493,6 +493,8 @@ def look(card: Mapping[str, Any]) -> dict:
 HOLD_S = 86400.0
 HOLD = "hold"
 DROP = "drop"
+# Why a "new" pick updates the open card about its subject (resolve).
+OPEN_SUBJECT = "open_subject"
 CARD_KINDS = ("followup", "noticed")
 # A remembered item's subject (pulse_candidates.subject_of).
 ITEM_SUBJECT = "item:"
@@ -520,10 +522,13 @@ def resolve(pulse_store: Any, pick: Mapping[str, Any], subject: str, now: float,
             closing: Collection[int] = ()) -> tuple[str, Optional[int], str]:
     """What a pick does, checked against the store: (NEW, None, why),
     (UPDATE, card, ""), (CLOSE, card, "") or (DROP, card or None, why). An
-    update to a card that's gone, closed or about something else is a new
-    card; a close of one is nothing; a new incident about a ``subject`` that
+    update to a card that's gone, closed or about something else is read as
+    a new incident (below: held, folded into its subject's open card, or a
+    new card); a close of one is nothing; a new incident about a ``subject`` that
     has a card open from the last HOLD_S is held for that card (DROP, HOLD):
-    only an update by the card's id changes it. ``closing``: cards a pick
+    only an update by the card's id changes it. One about a subject whose
+    open card is older updates that card (UPDATE, card, OPEN_SUBJECT), so a
+    subject has one open card whatever its kind. ``closing``: cards a pick
     in the same batch closes (``closed_in``), which hold nothing back (a job
     that recovered and failed again since the last report) and take no
     update."""
@@ -550,11 +555,20 @@ def resolve(pulse_store: Any, pick: Mapping[str, Any], subject: str, now: float,
     said_by = float(said_by) if isinstance(said_by, (int, float)) and not isinstance(said_by, bool) else None
     if subject and not subject.startswith(DATE_SUBJECTS):
         last = lambda card: max(float(card["created_at"]), float(card.get("updated_at") or 0))
-        open_now = [card for card in pulse_store.open_cards_with([subject], now - HOLD_S)
-                    if int(card["id"]) not in closing and (said_by is None or last(card) > said_by)]
+        open_cards = [card for card in pulse_store.open_cards_with([subject], 0.0) if int(card["id"]) not in closing]
+        open_now = [card for card in open_cards
+                    if last(card) >= now - HOLD_S and (said_by is None or last(card) > said_by)]
         if open_now:
             # Its card says it still: no second card (Pulse's open-card rule).
             return DROP, int(open_now[0]["id"]), HOLD
+        if open_cards:
+            # An open card about it from before then, whatever kind the pick
+            # gives it now (Eric, 2026-11-22: one phone reminder as a
+            # Reminder card on Thursday and a Commitment card on Saturday):
+            # that card is updated, its words brought up to date, never a
+            # second card beside it. Not a deliberate update: the open-card
+            # rules still keep out one with nothing new (decide).
+            return UPDATE, int(open_cards[0]["id"]), OPEN_SUBJECT
     return NEW, None, why
 
 

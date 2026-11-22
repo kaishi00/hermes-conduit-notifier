@@ -211,10 +211,11 @@ def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> s
     cards = [card for card in pulse_store.touched_cards(RECENT_CARDS)
              if card["kind"] in RECENT_KINDS and max(card["created_at"], card.get("updated_at") or 0) >= now - RECENT_S]
     marks = pulse_store.done_marks([card["id"] for card in cards])
-    # A card that can hold a new pick about its subject (pulse_picks.resolve)
-    # is always listed, past the budget, so a pick can always name it.
+    # A card listed here that a new pick about its subject would go to
+    # (pulse_picks.resolve: held, or updated once past the hold) is kept
+    # past the budget, so a pick can name it.
     subjects = sorted({str(card.get("subject") or "") for card in cards} - {""})
-    holding = {int(card["id"]) for card in pulse_store.open_cards_with(subjects, now - pulse_picks.HOLD_S)}
+    holding = {int(card["id"]) for card in pulse_store.open_cards_with(subjects, 0.0)}
     lines, used, extra = [], 0, 0
     for card in pulse_store.moment_cards():
         if card["done"]:
@@ -652,7 +653,7 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
         if pick is None:
             continue
         action, target, why = pulse_picks.resolve(pulse_store, pick, str(row.get("subject") or ""), now, closing)
-        if action in (pulse_picks.UPDATE, pulse_picks.CLOSE):
+        if action == pulse_picks.CLOSE or (action == pulse_picks.UPDATE and why != pulse_picks.OPEN_SUBJECT):
             deliberate.add(id(row))
         elif action == pulse_picks.DROP and why == pulse_picks.HOLD and target is not None and (
                 said := _due_today(pulse_store, row, target, now)) is not None:

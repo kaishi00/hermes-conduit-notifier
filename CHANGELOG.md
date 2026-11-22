@@ -13,13 +13,19 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.192.4 (2026-11-22)
+## 0.192.5 (2026-11-22)
 
 ### Fixes
 
 - Pulse no longer says a scheduled job is failing or its script is missing when the job runs fine. Before, a failed file read in a chat could turn into a card asking you to fix a healthy job.
 - Pulse is told to name a scheduled job, reminder or event by its name on its cards. Before, a card could say "j6" in its text or in the message its button sends.
 - Pulse no longer lists Podman commands that Hermes' sandbox stopped before they ran among the failed tool calls.
+
+## 0.192.4 (2026-11-22)
+
+### Fixes
+
+- Pulse no longer shows the same thing twice under different headings, such as one reminder as both a Reminder and a Commitment card. When it comes up again while its card is still open, that card is brought up to date instead, so it doesn't keep saying "due tomorrow" after the day has passed.
 
 ## 0.192.3 (2026-11-22)
 
