@@ -907,6 +907,25 @@ def test_a_profile_that_shares_itself_reads_its_own(home):
     assert _call({"action": "now"})["area"].startswith("Soho")
 
 
+def test_another_profile_never_reads_a_device_that_doesnt_share_out(home):
+    # An iPad keeping its location to its own profile has the newest fix;
+    # the default profile reads the iPhone's place, which shares out, and
+    # the iPad's newer fix neither answers nor hides it.
+    work = home / "profiles" / "work"
+    _paired(work)
+    earlier = location.LocationStore(work, clock=lambda: NOW - 60)
+    ipad = Phone(device_id="ipad-installation-2")
+    ipad.accept(earlier.register_key(ipad.key_request()))
+    soho = {"name": "Soho", "locality": "London", "country": "United Kingdom", "country_code": "GB"}
+    earlier.ingest(ipad.seal(ipad.batch(batch_id="batch-ipad", sharing=sharing(other_profiles=False),
+                                        fix=fix(id="f_ipad", at="2026-10-13T07:00:00+01:00", area=soho))))
+    _work_shares(home)
+    answer = _call({"action": "now"}, session_id="s1", profile="default")
+    assert answer["ok"] is True and answer["area"].startswith("Shoreditch"), answer
+    assert location.LocationStore(work, clock=lambda: NOW).snapshot()["fix"]["id"] == "f_ipad", \
+        "its own profile still reads the iPad's newer fix"
+
+
 def test_place_rules_stay_with_the_sharing_profile(home):
     _work_shares(home)
     for action in ("rules", "set_rule", "remove_rule"):
@@ -1407,15 +1426,20 @@ def test_a_phone_that_doesnt_say_lets_no_signed_in_call_read(voice):
     assert [item["name"] for item in client.get(f"{BASE}/voice-tools").json()["tools"]] == ["conduit_location"]
 
 
-def test_a_signed_in_calls_briefing_says_where_the_user_is_at_their_detail(voice):
+def test_a_signed_in_calls_briefing_says_where_the_user_is_at_their_detail(voice, caplog):
     client, store = voice
     _voice_phone(store, fix=fix(), sharing=sharing(voice_readers=["gpt-live"]))
-    context = client.get(f"{BASE}/voice-context", params={"reader": "gpt-live"}).json()["context"]
+    with caplog.at_level("INFO"):
+        context = client.get(f"{BASE}/voice-context", params={"reader": "gpt-live"}).json()["context"]
+    assert "Conduit signed-in voice context: location for gpt-live" in caplog.text, "in the host's log too"
     assert context.startswith("Where the user is, from their phone, as of ")
     assert "in Shoreditch, London, United Kingdom" in context
     assert "51.53" not in context, "background detail is the area"
     assert store.reads()[0]["session_title"] == "GPT-Live call"
-    assert client.get(f"{BASE}/voice-context", params={"reader": "qwen-live"}).json()["context"] == ""
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        assert client.get(f"{BASE}/voice-context", params={"reader": "qwen-live"}).json()["context"] == ""
+    assert "signed-in voice context" not in caplog.text, "nothing said, nothing logged"
 
 
 def test_a_signed_in_read_of_another_profiles_location_names_the_reading_profile(voice, tmp_path):
@@ -1445,7 +1469,8 @@ def test_another_profiles_location_answers_a_signed_in_call_only_from_a_device_s
     store.ingest(ipad.seal(ipad.batch(batch_id="batch-ipad", fix=fix(),
                                       sharing=sharing(other_profiles=False, voice_readers=["gpt-live"]))))
     assert store.voice_reader_device("gpt-live") == "ipad-installation-2", "its own profile reads the iPad"
-    assert store.voice_reader_device("gpt-live", shared_only=True) is None
+    store.shared_only = True  # as location_profiles.store_for opens it for another profile
+    assert store.voice_reader_device("gpt-live") is None
     assert client.get(f"{BASE}/voice-context", params={"reader": "gpt-live"}).json()["context"] == ""
 
 

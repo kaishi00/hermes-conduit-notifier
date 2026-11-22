@@ -3660,7 +3660,10 @@ marked private is reported only as "at a private place".
   this host's other profiles" on (`sharing.other_profiles: true`), every
   other profile on the same host that is paired with the same iPhone (the
   same relay installation in its `conduit-push.json`) reads that store:
-  `now`, `places`, `history`, `distance_to`, `locate` and maps lookups. A
+  `now`, `places`, `history`, `distance_to`, `locate` and maps lookups.
+  They read only the devices whose own sharing says so (0.194.5+), so an
+  iPad that keeps its location to its profile never answers another one,
+  nor does its newer fix hide an iPhone that shares out. A
   locate or phone maps lookup goes through the asking profile's own pairing
   and names the sharing profile, so the phone answers it as that profile's.
   Reads are logged in the sharing profile's store as `<profile>: <chat>`.

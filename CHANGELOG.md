@@ -17,7 +17,11 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### Fixes
 
-- A computer call reading another profile's location now reads only a device that shares with other profiles, as calendar and health already did.
+- Another profile reading your location, in a chat, Maps, Pulse or a computer call, now reads only a device that shares with other profiles, as calendar and health already did; a newer place from a device that doesn't share no longer hides one that does.
+
+### New and improved
+
+- A computer call's briefing on where you are is now recorded in the host's log.
 
 ## 0.194.4 (2026-11-22)
 

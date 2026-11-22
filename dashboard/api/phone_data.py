@@ -342,7 +342,7 @@ def _signed_in_sources(reader: str) -> Dict[str, Tuple[Any, Any, str, str]]:
                 # that one shares with this profile.
                 store, owner = core._plugin_package_module("location_profiles").store_for(home, store_class)
                 # Another profile's store: only a device that shares out answers.
-                device_id = store.voice_reader_device(reader, shared_only=owner is not None)
+                device_id = store.voice_reader_device(reader)
             else:
                 # Another profile's health too, when that one shares it with
                 # this host's other profiles, as the agent's tool reads it.
