@@ -17,7 +17,7 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### Fixes
 
-- On an older Hermes, chat history and the Watch's chat reading work again. Before, every page of an older chat's history failed to load.
+- On an older Hermes, chat history and the Watch's chat reading work again. Before, chat history didn't load there.
 
 ### New and improved
 
