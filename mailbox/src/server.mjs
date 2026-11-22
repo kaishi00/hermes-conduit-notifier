@@ -5,7 +5,7 @@ import { isIP } from 'node:net';
 import { dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ReplayCache, inboxIdFor, parseKey, tokenHash, verifyOwnerSignature } from './auth.mjs';
-import { limitsFromEnv } from './limits.mjs';
+import { inboxesRegistrationCanFill, limitsFromEnv } from './limits.mjs';
 import { RateLimits } from './rates.mjs';
 import { MailboxError, MailboxStore } from './store.mjs';
 
@@ -141,7 +141,7 @@ export function createMailbox({
     if (store.inboxKey(inbox)) {
       // Confirming an inbox is an owner request like any other.
       admitOwner(inbox, signed, now);
-    } else if (!clientRates.take(`register:${client}`, limits.registrationsPerHourPerClient, HOUR_MS)
+    } else if (!clientRates.take(`register:${registrationNetwork(client)}`, limits.registrationsPerHourPerClient, HOUR_MS)
       || !rates.take('register', limits.registrationsPerMinute, MINUTE_MS)
       // A new key's signature is claimed only once the registration rates
       // let it through, so fresh keys can't take room faster than inboxes
@@ -403,6 +403,25 @@ function clientAddress(request, proxyHops) {
   return request.socket.remoteAddress ?? 'unknown';
 }
 
+// The network a registration is counted against: one IPv6 host is usually
+// given a /64 and often a /48, and an IPv4 /24 is one hosting block, so
+// counting each address alone would let one party register from as many
+// addresses as it holds (notifier#1014). Failed authentications stay per
+// address, so a neighbor's guesses never turn an owner away.
+export function registrationNetwork(address) {
+  const bare = String(address).replace(/%.*$/, '');
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(bare);
+  const v4 = mapped ? mapped[1] : bare;
+  if (isIP(v4) === 4) return `${v4.split('.').slice(0, 3).join('.')}.0/24`;
+  if (isIP(bare) !== 6) return bare;
+  const [head, tail = ''] = bare.toLowerCase().split('::');
+  const groups = (part) => (part ? part.split(':') : []);
+  const headGroups = groups(head);
+  const missing = 8 - headGroups.length - groups(tail).length;
+  const full = bare.includes('::') ? [...headGroups, ...Array(Math.max(missing, 0)).fill('0')] : headGroups;
+  return `${full.slice(0, 3).map((group) => group.replace(/^0+(?=.)/, '')).join(':')}::/48`;
+}
+
 export function readConfig(env = process.env) {
   if (!env.DATA_PATH) throw new Error('DATA_PATH is required.');
   if (!env.PUBLIC_URL) throw new Error('PUBLIC_URL is required: the URL owners reach the mailbox at, such as https://rooms.example.com.');
@@ -461,6 +480,13 @@ function main() {
   mailbox.server.listen(config.port, config.host, () => {
     jsonLog.info({ message: 'Rooms mailbox listening', host: config.host, port: config.port, publicHost: config.publicHost,
       registration: config.registrationToken ? 'token' : 'open' });
+    const fillable = inboxesRegistrationCanFill(config.limits);
+    if (!config.registrationToken && config.limits.maxInboxes < fillable) {
+      jsonLog.error({ message: `Registration is open and MAILBOX_MAX_INBOXES is under the ${fillable} inboxes the registration rates `
+        + 'can make before an untouched one goes idle, so someone with enough addresses could fill the mailbox and block new '
+        + 'registrations. Set MAILBOX_REGISTRATION_TOKEN, raise MAILBOX_MAX_INBOXES, or lower MAILBOX_REGISTRATIONS_PER_MINUTE '
+        + 'or MAILBOX_INBOX_IDLE_DAYS.' });
+    }
   });
   const shutdown = async () => {
     try {

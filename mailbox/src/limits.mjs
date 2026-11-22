@@ -8,7 +8,12 @@ export const DEFAULT_LIMITS = Object.freeze({
   ttlSeconds: 604_800,
   // Longest a poll waits for an envelope, under common proxy timeouts (60 s).
   maxWaitSeconds: 25,
-  maxInboxes: 10_000,
+  // Far more than the registration rate can make before an untouched inbox
+  // is deleted as idle (6 a minute for 90 days is 777,600), so with open
+  // registration nobody can fill it just by registering: they would have to
+  // keep hundreds of thousands of inboxes in use for months (notifier#1014).
+  // An inbox row is about 200 bytes, so a full mailbox holds about 200 MB of them.
+  maxInboxes: 1_000_000,
   // One sender per link the inbox's owner made.
   maxSendersPerInbox: 64,
   maxPendingPerInbox: 2_000,
@@ -19,8 +24,9 @@ export const DEFAULT_LIMITS = Object.freeze({
   // A RoomLink turn is dozens of small envelopes each way.
   sendsPerMinutePerSender: 600,
   ownerRequestsPerMinutePerInbox: 600,
-  // New inboxes, mailbox-wide; one client can make a few an hour.
-  registrationsPerMinute: 24,
+  // New inboxes, mailbox-wide; one network (an IPv4 /24 or an IPv6 /48)
+  // can make a few an hour. An installation registers once, and retries a 429.
+  registrationsPerMinute: 6,
   registrationsPerHourPerClient: 10,
   // Requests that fail to authenticate, per client address, before it is
   // turned away for the rest of the minute.
@@ -65,4 +71,11 @@ export function limitsFromEnv(env = process.env) {
     values[key] = value;
   }
   return values;
+}
+
+// How many inboxes the registration rate can make before the first of them
+// would be deleted as idle. With open registration, `maxInboxes` below this
+// lets one party with enough addresses fill the mailbox by registering alone.
+export function inboxesRegistrationCanFill(limits) {
+  return limits.registrationsPerMinute * 60 * 24 * limits.inboxIdleDays;
 }

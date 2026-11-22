@@ -12,7 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { ReplayCache } from '../src/auth.mjs';
 import { DEFAULT_LIMITS } from '../src/limits.mjs';
-import { createMailbox, readConfig } from '../src/server.mjs';
+import { createMailbox, readConfig, registrationNetwork } from '../src/server.mjs';
 import { MailboxStore } from '../src/store.mjs';
 
 const LAIFU_TOKEN = 'laifu-send-token-0123456789';
@@ -421,8 +421,30 @@ test('new inboxes are limited per client and across the mailbox', async (t) => {
   assert.equal(again.status, 429, 'the same client');
   assert.deepEqual(await again.json(), { error: 'rate_limited' });
   assert.equal((await first.register(from('203.0.113.1'))).status, 200, 'an inbox that exists still answers');
-  assert.equal((await owner(base).register(from('203.0.113.2'))).status, 201);
-  assert.equal((await owner(base).register(from('203.0.113.3'))).status, 429, 'past the mailbox-wide rate');
+  assert.equal((await owner(base).register(from('198.51.100.2'))).status, 201);
+  assert.equal((await owner(base).register(from('192.0.2.3'))).status, 429, 'past the mailbox-wide rate');
+});
+
+test('new inboxes are counted per network, so more addresses from one network make no more', async (t) => {
+  const { base } = await start(t, { proxyHops: 1, limits: { registrationsPerHourPerClient: 1 } });
+  const from = (address) => ({ 'x-forwarded-for': address });
+
+  assert.equal((await owner(base).register(from('203.0.113.1'))).status, 201);
+  assert.equal((await owner(base).register(from('203.0.113.250'))).status, 429, 'the same IPv4 /24');
+  assert.equal((await owner(base).register(from('2001:db8:1::1'))).status, 201);
+  assert.equal((await owner(base).register(from('2001:db8:1:ffff:1234::9'))).status, 429, 'the same IPv6 /48');
+  assert.equal((await owner(base).register(from('2001:db8:2::1'))).status, 201, 'another /48');
+});
+
+test('a registration network is the IPv4 /24 or IPv6 /48 its address is in', () => {
+  assert.equal(registrationNetwork('203.0.113.77'), '203.0.113.0/24');
+  assert.equal(registrationNetwork('::ffff:203.0.113.77'), '203.0.113.0/24');
+  assert.equal(registrationNetwork('2001:DB8:0001:abcd::1'), '2001:db8:1::/48');
+  assert.equal(registrationNetwork('2001:db8::'), '2001:db8:0::/48');
+  assert.equal(registrationNetwork('::1'), '0:0:0::/48');
+  assert.equal(registrationNetwork('fe80::1%eth0'), 'fe80:0:0::/48');
+  assert.equal(registrationNetwork('2001:0db8:0001:0002:0003:0004:0005:0006'), '2001:db8:1::/48');
+  assert.equal(registrationNetwork('unknown'), 'unknown');
 });
 
 test('a sender past its rate is told to slow down', async (t) => {
@@ -600,4 +622,15 @@ test('SIGTERM stops the mailbox cleanly', async (t) => {
   const { code, signal } = await mailbox.closed;
   assert.equal(signal, null);
   assert.equal(code, 0);
+});
+
+test('an open mailbox with room for fewer inboxes than registering can fill says so at boot (notifier#1014)', async (t) => {
+  const stderrOf = async (env) => {
+    const mailbox = spawnMailbox(t, { PORT: String(await freePort()), MAILBOX_MAX_INBOXES: '10', ...env });
+    await mailbox.listening;
+    mailbox.child.kill('SIGTERM');
+    return (await mailbox.closed).stderr;
+  };
+  assert.match(await stderrOf({}), /Registration is open and MAILBOX_MAX_INBOXES is under the 777600 inboxes/);
+  assert.doesNotMatch(await stderrOf({ MAILBOX_REGISTRATION_TOKEN: 'operator-registration-secret' }), /Registration is open/);
 });
