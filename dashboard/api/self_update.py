@@ -324,7 +324,7 @@ SELF_UPDATE_FRESH_PULL_LIMIT_S = 900.0
 # timeout of its own): the job reads as failed, so Conduit stops showing "Downloading" for good.
 SELF_UPDATE_PULL_STALL_S = SELF_UPDATE_FRESH_PULL_LIMIT_S + 60.0
 SELF_UPDATE_PULL_STALLED = (f"Hermes' download of the plugin hasn't finished after "
-                            f"{int(SELF_UPDATE_FRESH_PULL_LIMIT_S // 60)} minutes. Run hermes plugins update "
+                            f"{int(SELF_UPDATE_PULL_STALL_S // 60)} minutes. Run hermes plugins update "
                             f"{core.PLUGIN_NAME} on the host to see why.")
 _FRESH_PULL_MARK = "conduit-self-update-result:"
 # A scan refusal's findings a job keeps for Conduit to show: the worst few, not hundreds.
@@ -1310,8 +1310,10 @@ def _notify_self_update(job: Dict[str, Any]) -> None:
                 return
             events = sys.modules[f"{client.__package__}.events"]
             # Per outcome: a failure the restarted dashboard corrects isn't a
-            # duplicate of the push the dying one sent.
-            event = events.push_event("background_task.finished", identifier=events.event_id("plugin-update", job["id"], job.get("step")),
+            # duplicate of the push the dying one sent, and a pull that comes
+            # back after the stall push sends its own (its code differs).
+            parts = (job["id"], job.get("step")) + ((job["code"],) if job.get("code") else ())
+            event = events.push_event("background_task.finished", identifier=events.event_id("plugin-update", *parts),
                                       profile=profile or "default", profile_name=_bot_name(client), title=title, body=body)
             client.send_now(event)
     except Exception as exc:  # noqa: BLE001 — a notification is a courtesy; the job file has the outcome
