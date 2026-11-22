@@ -19,6 +19,12 @@ checks it). The format is fixed, because Conduit reads it:
 
 - Mute a chat's notifications in Conduit for 15 minutes, an hour, a day or until you unmute it. Its replies and failures stay quiet on every device; approvals and questions still come through.
 
+## 0.192.4 (2026-11-22)
+
+### Fixes
+
+- Pulse no longer shows the same thing twice under different headings, such as one reminder as both a Reminder and a Commitment card. When it comes up again while its card is still open, that card is brought up to date instead, so it doesn't keep saying "due tomorrow" after the day has passed.
+
 ## 0.192.3 (2026-11-22)
 
 ### Fixes
