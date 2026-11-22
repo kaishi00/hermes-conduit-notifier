@@ -908,7 +908,7 @@ def test_local_live_on_the_watch_answers_the_call_from_hermes_with_the_users_wor
         "I can't approve that one by voice. Say no to deny it, or approve it in Conduit on your iPhone."
 
 
-def test_local_live_on_the_watch_leaves_a_forms_question_blank(tmp_path, monkeypatch):
+def test_local_live_on_the_watch_leaves_a_question_blank(tmp_path, monkeypatch):
     monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
     monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
     store = api.hermes_calls._calls_store().CallStore(tmp_path)
@@ -928,10 +928,10 @@ def test_local_live_on_the_watch_leaves_a_forms_question_blank(tmp_path, monkeyp
     assert api.watch_local_live._local_live_call_answer(grant, "the beach") == "Got it: Beach. Hermes has your answer."
     assert store.take_answers("conduit-push-f") == {"q0": "Toronto", "q1": "", "q2": "Beach"}
 
-    # Choices only: no form, so nothing may be left blank and "skip" is an answer.
+    # Choices only may be skipped too, as the card's Skip leaves them (hermes-conduit#3080).
     batch = [{"qid": "q0", "question": "Which environment?", "choices": ["staging", "prod"], "multi_select": False},
              {"qid": "q1", "question": "Which tests?", "choices": ["unit", "ui"], "multi_select": False}]
     store.note_waiting("st-1", "question", request_id="conduit-push-b", questions=batch)
     line = api.watch_local_live._local_live_call_answer(grant, "prod")
-    assert line.endswith("Say the number of your choice, or answer in your own words."), line
-    assert api.watch_local_live._local_live_call_answer(grant, "skip") == "Got it: skip. Hermes has your answer."
+    assert line.endswith("Say the number of your choice, or answer in your own words. Or say skip to leave it blank."), line
+    assert api.watch_local_live._local_live_call_answer(grant, "skip") == "Okay, I'll leave that blank."

@@ -19,6 +19,16 @@ checks it). The format is fixed, because Conduit reads it:
 
 - Live voice calls in Conduit on your computer can now know where you are and read your phone's calendar, reminders, status and health, for the voice modes you allow on your iPhone. A call starts knowing where you are, so it no longer has to ask.
 
+## 0.193.10 (2026-11-22)
+
+### Fixes
+
+- A card whose own text happened to read like the broken-JSON note could be reported as broken JSON. Only text that really doesn't parse is now.
+
+### New and improved
+
+- On a call, saying "skip" now leaves any question Hermes asks blank, as the new Skip on its card in Conduit does, so Hermes goes on without it. Before, only a form's questions could be skipped.
+
 ## 0.193.9 (2026-11-22)
 
 ### Fixes

@@ -369,8 +369,14 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     templates = card_templates.TemplateStore(get_hermes_home())
     if args.get("save_templates") is not None:
         saved = templates.save(args["save_templates"], problems)
+    # Only unwrapping writes a cards_not_json note: told apart there, so a
+    # card's own text carrying the same words can't pass for one (#1010).
+    not_json = False
     if args.get("cards") is not None:
-        args = {**args, "cards": _cards_unwrapped(args["cards"], problems)}
+        unwrapping: list[str] = []
+        args = {**args, "cards": _cards_unwrapped(args["cards"], unwrapping)}
+        not_json = any(CARDS_NOT_JSON_MARK in problem for problem in unwrapping)
+        problems.extend(unwrapping)
     given = _filled_templates(args.get("cards"), templates, problems)
     given = _reviews_kept(given, session, problems, reviews, is_room)
     # Every round kept above, however the card spelled its type.
@@ -379,7 +385,7 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     cards = card_schema.normalize_cards(given, problems)
     if args.get("cards") not in (None, []) and not cards:
         _drop_unshown(reviews, kept, [])
-        if any(CARDS_NOT_JSON_MARK in problem for problem in problems):
+        if not_json:
             return {"ok": False, "error": "cards_not_json", "note": CARDS_NOT_JSON_ERROR_NOTE,
                     "problems": problems[:20], **({"saved": saved} if saved else {})}
         return {"ok": False, "error": "invalid_cards", "note": INVALID_CARDS_NOTE, "problems": problems[:20],
@@ -722,6 +728,8 @@ def _not_json_note(text: str, error: json.JSONDecodeError, where: str) -> str:
     instead of guessing: Angelos blamed French quotes and stripped every
     apostrophe and accent, when a } was missing (2026-11-22)."""
     near = text[max(0, error.pos - _NEAR_CHARS):error.pos + _NEAR_CHARS].replace("\n", " ")
+    # A lone surrogate in the model's text would break the answer's UTF-8.
+    near = near.encode("utf-8", "replace").decode("utf-8")
     return CARDS_NOT_JSON_NOTE.format(where=where, error=f"{error.msg} at character {error.pos}", near=json.dumps(near, ensure_ascii=False))
 
 

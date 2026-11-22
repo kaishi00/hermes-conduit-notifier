@@ -235,16 +235,17 @@ def test_words_that_leave_it_blank_win_over_a_choice_named_inside_them(store):
     assert store.take_answers("conduit-push-g") == {"q0": "blank", "q1": "", "q2": ""}
 
 
-def test_skip_is_only_an_answer_where_nothing_may_be_left_blank(store):
-    # A batch of choices only, and a question on its own, show as today's
-    # card, which has no blank: "skip" goes to Hermes as their words.
+def test_any_question_may_be_left_blank_as_its_cards_skip_does(store):
+    # A batch of choices only, and a question on its own, may be skipped too,
+    # as the card's Skip leaves them (hermes-conduit#3080): each has its qid.
     store.note_waiting("s1", "question", request_id="conduit-push-a", questions=BATCH)
-    assert [question["may_leave_blank"] for question in store.waiting_for("s1")["questions"]] == [False, False]
-    assert store.answer_waiting("s1", answer="skip")["answer"] == "skip"
+    assert [question["may_leave_blank"] for question in store.waiting_for("s1")["questions"]] == [True, True]
+    assert store.answer_waiting("s1", answer="skip")["skipped"] is True
     store.note_waiting("s2", "question", request_id="conduit-push-b", questions=FORM[:1])
-    assert store.waiting_for("s2")["questions"][0]["may_leave_blank"] is False
-    assert store.answer_waiting("s2", answer="skip")["answer"] == "skip"
-    assert store.take_answers("conduit-push-b") == {"q0": "skip"}
+    assert store.waiting_for("s2")["questions"][0]["may_leave_blank"] is True
+    assert store.answer_waiting("s2", answer="skip") == {"status": "answered", "question": 1, "answer": "left blank",
+                                                         "skipped": True}
+    assert store.take_answers("conduit-push-b") == {"q0": ""}
 
 
 # Conduit reads the same words the same way (HermesCallWaitingTests'

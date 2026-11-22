@@ -226,8 +226,8 @@ _ONE_LEADS = frozenset({"option", "choice", "number", "and", "or", "with", "take
 # A spoken request for Hermes to say more before the user chooses: sent as
 # the answer, so Hermes explains and asks again.
 ASKS_FIRST_LEAD = "Before I choose:"
-# A question of a batch Conduit shows as a form may be left blank, as the
-# form's fields may: by these words, as Conduit reads them
+# Any question of a batch may be left blank, as its card's Skip leaves it
+# (hermes-conduit#3080; before, only a form's): by these words, as Conduit reads them
 # (HermesCallWaiting.isSkip), in the app's languages. The two move together.
 # What the call says back for one left blank.
 SKIPPED_ANSWER = "left blank"
@@ -686,7 +686,7 @@ class CallStore:
         ``session_id``. A question takes ``answer`` (a choice's number or
         label, "the recommended one", or their own words) for ``question``
         (its number in the batch; the first unanswered one by default); one
-        of a form (``may_leave_blank``) is left blank by "skip". An
+        is left blank by "skip", as its card's Skip leaves it. An
         approval takes ``choice`` (once or deny) and, for a deny, ``reason``.
         The agent's process passes it on (``take_answers``,
         ``take_approval``): ``{"status": "answered", ...}`` says it's on
@@ -737,13 +737,12 @@ class CallStore:
             entry = item["questions"][index]
             if entry["answer"] is not None:
                 return {"status": "answered", "message": f"Question {index + 1} is answered already."}
-            form = may_leave_blank(item["questions"])
             result: dict[str, Any] = {"status": "answered", "question": index + 1}
             # A choice named whole ("Pass") is picked; other words that
             # leave it blank do, even with a choice's name in them ("leave
             # it blank" beside a choice called Blank).
-            if form and is_skip(answer) and not names_one_choice(answer, entry["choices"]):
-                # Blank, as a form's field left empty: Hermes reads it as skipped.
+            if is_skip(answer) and not names_one_choice(answer, entry["choices"]):
+                # Blank, as the card's Skip sends it: Hermes reads it as skipped.
                 entry["answer"] = ""
                 result.update(answer=SKIPPED_ANSWER, skipped=True)
             else:
@@ -752,7 +751,7 @@ class CallStore:
                 result["answer"] = ", ".join(labels) if labels else value
             following = next((number for number in open_numbers if number != index), None)
             if following is not None:
-                result["next"] = _public_question(item["questions"][following], following, form)
+                result["next"] = _public_question(item["questions"][following], following)
             return result
 
     def answer_in_writing(self, session_id: Any, words: Any, *, asked_before: float | None = None) -> bool:
@@ -1599,17 +1598,13 @@ def _complete(item: dict[str, Any], request_id: str) -> bool:
             and all(entry["answer"] is not None for entry in item["questions"]))
 
 
-def may_leave_blank(questions: list[dict[str, Any]]) -> bool:
-    """Whether Conduit shows the batch as a form, whose fields may be left
-    blank: several questions, at least one with no choices
-    (ClarifyActivity.isForm). Each of its questions may then be skipped."""
-    return len(questions) > 1 and any(not entry["choices"] for entry in questions)
-
-
-def _public_question(entry: dict[str, Any], index: int, form: bool) -> dict[str, Any]:
+def _public_question(entry: dict[str, Any], index: int) -> dict[str, Any]:
     return {"number": index + 1, "question": entry["question"], "choices": list(entry["choices"]),
             "multi_select": entry["multi_select"], "answered": entry["answer"] is not None,
-            "may_leave_blank": form}
+            # Every question here has its qid, so each may go blank, as
+            # ClarifyActivity.mayLeaveBlank reads one Hermes named
+            # (hermes-conduit#3080); older Conduits read only a form's.
+            "may_leave_blank": True}
 
 
 def _listed_waiting(item: dict[str, Any]) -> dict[str, Any]:
@@ -1634,9 +1629,8 @@ def _public_waiting(item: dict[str, Any]) -> dict[str, Any]:
     if item["kind"] == "approval":
         return {"kind": "approval", "description": item["description"], "command": item["command"],
                 "command_cut": item["cut"], "answered": item["choice"] is not None}
-    form = may_leave_blank(item["questions"])
     return {"kind": "question",
-            "questions": [_public_question(entry, index, form) for index, entry in enumerate(item["questions"])]}
+            "questions": [_public_question(entry, index) for index, entry in enumerate(item["questions"])]}
 
 
 def map_answer(answer: str, choices: list[str], multi_select: bool) -> tuple[str, list[str]]:
