@@ -1589,3 +1589,21 @@ def test_a_last_look_that_finds_no_card_still_ends_as_timed_out(monkeypatch):
     parsed = json.loads(loop.middleware(**_kwargs(_undelivered_original(returned), _batch_args())))
     assert parsed["outcome"] == "timed_out"
     assert [row["user_response"] for row in parsed["responses"]] == ["staging", None]
+
+
+def test_a_sessions_source_is_read_once(monkeypatch, tmp_path):
+    # Notifier issue 983: the asked note asks before every model call. Hermes
+    # never changes a session's source, so what was found is kept; a session
+    # not there yet is read again.
+    import sqlite3
+    db = tmp_path / "state.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT)")
+        conn.execute("INSERT INTO sessions VALUES ('sess-1', 'a2a', '')")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: str(tmp_path), raising=False)
+    assert loop._session_source("sess-1") == "a2a" and loop._session_source("sess-2") == ""
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE sessions SET source = 'cli'")
+        conn.execute("INSERT INTO sessions VALUES ('sess-2', 'a2a', '')")
+    assert loop._session_source("sess-1") == "a2a", "kept"
+    assert loop._session_source("sess-2") == "a2a", "one not found is read again"

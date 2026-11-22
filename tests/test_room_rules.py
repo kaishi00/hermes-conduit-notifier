@@ -291,6 +291,22 @@ def test_a_room_someone_just_joined_is_withheld_from_search_at_once(tmp_path):
     assert rules._hidden_from_search(("s-local",), "bot_room", home)  # search: at once
 
 
+def test_a_lifted_room_someone_just_joined_is_withheld_from_search_at_once(tmp_path, monkeypatch):
+    # Notifier #969: a room lifted over own Links that gains a member from a
+    # Hermes no Link covers changes only its roster, so the kept verdict
+    # can't vouch for it in search.
+    peer_id = _own(monkeypatch, {"own-link"})
+    home = tmp_path / "hermes"
+    laifu = {**LAIFU, "target": {**LAIFU["target"], "peer_id": peer_id("own-link")}}
+    _room(home / "state.db", "room-own", [FURINA, laifu])
+    _room_session(home, "s-own", "room-own")
+    assert not rules.room_turn("s-own", home).with_others
+    assert not rules._hidden_from_search(("s-own",), "bot_room", home)
+    _members(home / "state.db", "room-own", [FURINA, laifu, LAIFU])
+    assert not rules.room_turn("s-own", home).with_others  # tool calls: kept for a moment
+    assert rules._hidden_from_search(("s-own",), "bot_room", home)  # search: at once
+
+
 def test_a_room_of_your_own_agents_is_kept_for_seconds_while_its_files_are_unchanged(tmp_path, monkeypatch):
     # Notifier issue 961: each tool, model call and reply of a turn in it read
     # the session store, the room stores and rooms.json again.

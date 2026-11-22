@@ -519,7 +519,7 @@ def test_a_pull_that_never_comes_back_reads_as_failed(monkeypatch, tmp_path):
         path.write_text(json.dumps({**base, "pull_started_at": now - api.self_update.SELF_UPDATE_PULL_STALL_S - 1}))
         job = api.self_update.self_update_status(path, notify=notified.append)
         assert (job["step"], job["code"], job["failed_step"]) == ("failed", "pull_stalled", "downloading")
-        assert "hermes plugins update conduit_push" in job["detail"]
+        assert "hermes plugins update conduit_push" in job["detail"] and "16 minutes" in job["detail"]
         assert json.loads(path.read_text())["step"] == "failed"
         api.self_update.time.sleep(0.2)
         assert [n["id"] for n in notified] == ["j1"]
@@ -736,6 +736,14 @@ def test_the_corrected_push_isnt_a_duplicate_of_the_failed_one(monkeypatch):
     api.self_update._notify_self_update({"id": "j4", "step": "failed", "code": "scan_blocked", "scan_verdict": "caution",
                                          "detail": "BLOCKED"})
     assert sent[4]["identifier"] != sent[5]["identifier"]
+    # So does one that fails with a plain error, and two failures without a
+    # code (the dying dashboard's, then the new one's correction) (#988).
+    api.self_update._notify_self_update({"id": "j4", "step": "failed", "detail": "git: could not resolve host"})
+    api.self_update._notify_self_update({"id": "j5", "step": "failed", "detail": "the gateway didn't restart"})
+    api.self_update._notify_self_update({"id": "j5", "step": "failed", "detail": "restarted before the update finished"})
+    api.self_update._notify_self_update({"id": "j5", "step": "failed", "detail": "restarted before the update finished"})
+    ids = [push["identifier"] for push in sent]
+    assert len(set(ids[4:7])) == 3 and ids[7] != ids[8] and ids[8] == ids[9], ids
 
 
 def test_an_update_points_every_profile_at_it_before_the_gateway_restarts(monkeypatch, tmp_path):

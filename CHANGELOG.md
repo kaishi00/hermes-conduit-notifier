@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.193.1 (2026-11-22)
+
+### Fixes
+
+- A call watch rings with what its run saw when the run's model put some of the report's fields one level down and left the rest at the top. Before, the call said only "Your call watch went off".
+- A very long question read out on a call keeps its choices. Before, the question could be cut short before them, and the call couldn't offer them.
+- A corrected "plugin update didn't finish" notification reaches you. Before, it could be dropped as a repeat of the first one, which said something else.
+- Past-chat search hides a room of only your own agents as soon as someone else's agent joins it. Before, search could still find it for a couple of seconds.
+- The questions waiting on you are no longer read from disk again before every model call of every chat, which slowed each step of a reply a little.
+
 ## 0.193.0 (2026-11-22)
 
 ### New and improved

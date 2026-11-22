@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import importlib.util
 import inspect
@@ -1310,9 +1311,14 @@ def _notify_self_update(job: Dict[str, Any]) -> None:
                 return
             events = sys.modules[f"{client.__package__}.events"]
             # Per outcome: a failure the restarted dashboard corrects isn't a
-            # duplicate of the push the dying one sent, and a pull that comes
-            # back after the stall push sends its own (its code differs).
+            # duplicate of the push the dying one sent, even when neither has
+            # a code (the detail differs), and a pull that comes back after
+            # the stall push sends its own, a plain error included: that push
+            # carries what went wrong, which the stall push couldn't say.
+            # The same outcome sent twice keeps one id.
             parts = (job["id"], job.get("step")) + ((job["code"],) if job.get("code") else ())
+            if job.get("step") != "done":
+                parts += (hashlib.sha256(str(job.get("detail") or "").encode("utf-8")).hexdigest()[:8],)
             event = events.push_event("background_task.finished", identifier=events.event_id("plugin-update", *parts),
                                       profile=profile or "default", profile_name=_bot_name(client), title=title, body=body)
             client.send_now(event)

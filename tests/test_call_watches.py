@@ -506,6 +506,9 @@ def test_a_report_whose_fields_went_astray_hears_the_call_to_copy(home, hermes, 
                    {"arguments": '{"happening": false}'}):
         quiet = json.loads(watches.report(nested, session_id=session))
         assert quiet["ok"] is True and quiet["status"] == "quiet", (nested, quiet)
+    split = json.loads(watches.report({"parameters": {"happening": True}, "saw": "Disk at 99%."}, session_id=session))
+    assert split["ok"] is True and split["status"] == "calling", split
+    assert _rang(home)[-1]["reason"] == "Disk at 99%.", "a field left beside the wrapper still counts (#996)"
     assert watches.PROMPT_VERSION == 4, "the new wording reaches existing watches on their next run"
 
 
