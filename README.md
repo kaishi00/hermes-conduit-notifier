@@ -5637,7 +5637,10 @@ while it runs:
   loaded_version}`. `job.step` is `downloading`, `restarting_gateway`,
   `waiting_for_chats` (with `running_chats`), `restarting_dashboard`, `done`
   or `failed` (with `detail`, `failed_step` naming the step it failed in,
-  and `code` for `consent_required`, `scan_blocked` or `restart_needed`).
+  and `code` for `consent_required`, `scan_blocked`, `pull_stalled` or
+  `restart_needed`). `pull_stalled` (0.192.1+): Hermes' pull hadn't come
+  back 16 minutes after it began, so the job stops reading as
+  `downloading`.
   A `scan_blocked` job also has `scan_verdict` (`caution` can be accepted
   with `force=true`), `scan_findings` (the worst five: `severity`,
   `category`, `file`, `line`, `description`) and `scan_finding_count`.

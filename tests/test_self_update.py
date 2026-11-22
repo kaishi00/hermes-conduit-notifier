@@ -494,6 +494,36 @@ def test_status_fails_a_job_nobody_runs_and_says_so(tmp_path):
     assert [n["id"] for n in notified] == ["j1", "j2"]
 
 
+def test_a_pull_that_never_comes_back_reads_as_failed(monkeypatch, tmp_path):
+    import threading
+    path = tmp_path / api.self_update.SELF_UPDATE_FILE
+    hold = threading.Event()
+    thread = threading.Thread(target=hold.wait, daemon=True)
+    thread.start()
+    monkeypatch.setattr(api.self_update, "_self_update_thread", thread)
+    now = api.self_update.time.time()
+    notified = []
+    try:
+        base = {"id": "j1", "step": "downloading", "boot_id": api.capabilities.BOOT_ID, "updated_at": now,
+                "started_at": now - 7000}
+        # Still within the pull's limit (a resumed job keeps its first started_at): left alone.
+        path.write_text(json.dumps({**base, "pull_started_at": now - 60}))
+        assert api.self_update.self_update_status(path, notify=notified.append)["step"] == "downloading"
+        # A job from before the pull was timed: left alone too.
+        path.write_text(json.dumps(base))
+        assert api.self_update.self_update_status(path, notify=notified.append)["step"] == "downloading"
+        # Past it, with the thread still waiting on Hermes: failed, and written so.
+        path.write_text(json.dumps({**base, "pull_started_at": now - api.self_update.SELF_UPDATE_PULL_STALL_S - 1}))
+        job = api.self_update.self_update_status(path, notify=notified.append)
+        assert (job["step"], job["code"], job["failed_step"]) == ("failed", "pull_stalled", "downloading")
+        assert "hermes plugins update conduit_push" in job["detail"]
+        assert json.loads(path.read_text())["step"] == "failed"
+        api.self_update.time.sleep(0.2)
+        assert [n["id"] for n in notified] == ["j1"]
+    finally:
+        hold.set()
+
+
 def test_a_pending_restart_isnt_stale(monkeypatch, tmp_path):
     path = tmp_path / api.self_update.SELF_UPDATE_FILE
     path.write_text(json.dumps({"id": "j1", "step": "restarting_dashboard", "boot_id": api.capabilities.BOOT_ID, "updated_at": 0}))
