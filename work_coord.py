@@ -125,11 +125,17 @@ ANSWER_HEAD = ("Work update from Conduit: the user answered what you asked them,
                "or in another of your chats (a call's, said aloud). "
                "This is their own answer, already recorded (no work_propose call is needed):\n{lines}\n")
 ANSWER_TAIL = ("Act on it now: do what they said yes to or picked, and undo what you went ahead with that they "
-               "didn't pick or said no to. Then tell them in a line what you did, with its link when it has one.")
+               "didn't pick or said no to; one they dismissed asks nothing of you, so leave its work as it is. "
+               "Then tell them in a line what you did, with its link when it has one.")
 ANSWER_LINE = "- {id}{about}, approved by the user just now: «{text}»"
 ANSWER_PICKED = "- {id}{about}: the user picked «{choice}» just now. You asked: «{text}»"
 ANSWER_SAID = "- {id}{about}: the user answered «{choice}» just now. You asked: «{text}»"
 ANSWER_DECLINED = "- {id}{about}, declined by the user just now: «{text}»"
+# Dismissed: the user took the question off their list without answering it
+# (issue 3105), which is no answer, so nothing it asked is done or undone.
+ANSWER_DISMISSED = ("- {id}{about}: the user dismissed it just now without answering, so it needs no answer any "
+                    "more. It isn't their yes, no or pick: leave what you already did as it is, and don't ask it "
+                    "again unless something new comes up. You asked: «{text}»")
 # What the user added with an answer given by voice or in another chat.
 ANSWER_WORDS = ". They added: «{note}»."
 # After a work update's lines, in place of "tell the user what came back".
@@ -609,8 +615,8 @@ SCHEMA = {
     "description": ("Ask the user something whose answer can wait, and keep what they answered. Use clarify "
                     "when you can't go on without the answer right now; use this when the work can go on, or "
                     "the answer can come later: the question stays on the user's Needs you list until they "
-                    "answer it or you withdraw it, past this turn and restarts, and their answer comes back to "
-                    "this chat as a new message. Call it with text (the question, with what you found and what "
+                    "answer or dismiss it or you withdraw it, past this turn and restarts, and their answer comes "
+                    "back to this chat as a new message. Call it with text (the question, with what you found and what "
                     "you recommend) and, for options, choices (two to four) with the one you recommend; you get "
                     "an id (P1), and ask them in your reply. going_ahead says you carry on with your "
                     "recommendation until they answer; only when the coordination setting is Auto, and never "
@@ -692,8 +698,8 @@ def _asked_before(store: work_store.Store, refs: list[str], new: str, *, besides
                   text: str = "", chat: str = "") -> Optional[dict]:
     """Why a question about ``refs`` isn't asked now, or None: another open
     question covers some of that work (or, about no workstream, asks nearly
-    the same as ``text`` in the same chat), or the user said no to it in the
-    last day and nothing new came up."""
+    the same as ``text`` in the same chat), or the user said no to it or
+    dismissed it in the last day and nothing new came up."""
     # One open question per workstream: a second would ask the user twice.
     pending = store.proposal_about(refs, status="open", besides=besides)
     if pending is None and not refs:
@@ -717,6 +723,12 @@ def _asked_before(store: work_store.Store, refs: list[str], new: str, *, besides
         return {"ok": False, "id": declined["id"], "error": "declined",
                 "note": f"The user declined {declined['id']} about this work. Ask again only with what came "
                         "up since, in new, and say it to them; otherwise leave it."}
+    # So does a question they took off their list without answering.
+    dismissed = store.proposal_about(refs, status="dismissed", since=time.time() - PROPOSAL_CLOSED_AGE_S)
+    if dismissed is not None and not new:
+        return {"ok": False, "id": dismissed["id"], "error": "dismissed",
+                "note": f"The user dismissed {dismissed['id']} about this work without answering. Ask again only "
+                        "with what came up since, in new, and say it to them; otherwise leave it."}
     return None
 
 
@@ -809,7 +821,8 @@ ASKED_SPOKEN_HEAD = "Questions you asked the user that still wait on their answe
 ASKED_SPOKEN_RULE = ("Say them when the user asks what waits on them, or when one bears on what they ask; read the "
                      "choices out. When they answer one, record it with work_propose "
                      '{"id": "P1", "answer": ...}: one of its choices, approved or declined for a yes or no, or their '
-                     "own words for one with neither. One another chat asked goes to that chat, which acts on it.")
+                     "own words for one with neither. One another chat asked goes to that chat, which acts on it. "
+                     "When they say one doesn't matter any more, withdraw it rather than record an answer.")
 
 
 # The asked notes' size: they ride with the Bot Chat's digest (NOTE_CHARS)
@@ -1040,7 +1053,9 @@ def answer_tapped(store: work_store.Store, item: str, answer: str, coordinator: 
         return {"ok": False, "id": item, "error": "not_now",
                 "note": f"{item} isn't waiting on an answer any more."}
     choices = work_store.proposal_choices(row)
-    if choices:
+    if answer == "dismissed":
+        choice = note = ""
+    elif choices:
         choice = next((known for known in choices if known.casefold() == choice.strip().casefold()), "")
         if answer != "answered" or not choice:
             return {"ok": False, "id": item, "error": "unknown_choice",
@@ -1056,14 +1071,17 @@ def answer_tapped(store: work_store.Store, item: str, answer: str, coordinator: 
         refs = work_store.proposal_refs(done)
         about = f" (about {_listed(refs)})" if refs else ""
         text = _short(done["text"], PROPOSAL_CHARS)
-        if choice:
+        if answer == "dismissed":
+            said = ANSWER_DISMISSED.format(id=item, about=about, text=text)
+        elif choice:
             said = (ANSWER_SAID if free_answer(row) else ANSWER_PICKED).format(id=item, about=about,
                                                                              choice=choice, text=text)
         else:
             said = (ANSWER_LINE if answer == "approved" else ANSWER_DECLINED).format(id=item, about=about, text=text)
         return said + (ANSWER_WORDS.format(note=note) if note else "")
 
-    told = bool(coordinator) and (answer != "declined" or bool(row.get("chat")) or bool(row.get("going_ahead")))
+    told = bool(coordinator) and (answer not in ("declined", "dismissed") or bool(row.get("chat"))
+                                  or bool(row.get("going_ahead")))
     note = _short(note, PROPOSAL_CHARS)
     kept = (f"{choice}: {note}" if choice else note) if note else choice
     done = store.proposal_answer(item, answer, kept, target=coordinator if told else "",
@@ -1086,6 +1104,9 @@ APP_ITEMS = 30
 APP_ANSWERS = {"approve": "approved", "decline": "declined"}
 # A question with choices is answered with one of them (the body's ``choice``).
 APP_PICK = "answer"
+# Any open question can be dismissed: taken off the list with no answer
+# (issue 3105). Older apps read only the actions they know.
+APP_DISMISS = "dismiss"
 APP_WHY_ITEMS = 5
 APP_WHY_BEFORE_S = 1800.0
 _FAILED = ("lost", "refused", "expired", "dropped")
@@ -1099,7 +1120,7 @@ def question_card(row: dict, titles: Optional[dict[str, str]] = None) -> dict:
     refs = work_store.proposal_refs(row)
     titles = titles or {}
     choices = work_store.proposal_choices(row)
-    actions = (([APP_PICK] if choices or free_answer(row) else list(APP_ANSWERS))
+    actions = (([APP_PICK] if choices or free_answer(row) else list(APP_ANSWERS)) + [APP_DISMISS]
                if row["status"] == "open" else [])
     # Older apps read ref and title: the first workstream, and every title.
     return {"id": row["id"], "kind": "proposal", "ref": row["ref"], "refs": refs,

@@ -27,6 +27,7 @@ import contextvars
 import json
 import logging
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -34,7 +35,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable
 
-from . import calls, client, room_rules
+from . import calls, client, room_rules, turn_surface
 from .session_titles import bot_name, title as chat_title, titled
 from .events import (
     card_choice_labels,
@@ -311,6 +312,11 @@ def _first_answer_wins(
     """
     outcome: dict[str, Any] = {}
     relay_won = False
+    # What the user has sent the chat's turn so far: a message written while
+    # the question waits withdraws it (issue 3105).
+    writes = _UserWrites()
+    # Hermes' own prompts (a messaging gateway's) open before the original runs.
+    prompts_before = _gateway_prompt_ids()
     # The original came back undelivered: outcome["original"] is the fallback.
     unattended = False
     # Set once the original returns, so the poll's backoff sleep ends within
@@ -383,6 +389,9 @@ def _first_answer_wins(
             if "original_error" in outcome:
                 raise outcome["original_error"]
             return outcome["original"]
+        wrote = writes.wrote()
+        if wrote:
+            return _withdrawn(request_id, relay_won, writes, prompts_before, batch, locked_answers, wrote)
         if client.notifications_paused():
             # The relay refused this pairing after the push was queued: the
             # push was dropped, and polling would only hammer the refusal.
@@ -409,8 +418,13 @@ def _first_answer_wins(
             # Answered on a call from Hermes, with no chat open (the Watch):
             # the parked decision is released like after a native answer.
             _release_decision(request_id, relay_won)
+            _close_hermes_prompt(writes.session, prompts_before, batch, RESOLVED)
             return _call_answer_result(batch, batch_protocol, call_answers)
         if state == "answered":
+            # Answered on the phone's card: Hermes' own card for it goes too,
+            # or it would stay on screen and take a later message as the
+            # answer to a question already answered (issue 3105).
+            _close_hermes_prompt(writes.session, prompts_before, batch, RESOLVED)
             if batch_protocol and "answers" in status:
                 # Complete batch: the relay only reports answered once every
                 # qid is locked, so first-answer-wins held per question.
@@ -499,7 +513,7 @@ def _first_answer_wins(
         # An unattended wait already has the original (its fallback): only
         # a call's answer ends its sleep early.
         _sleep_until_call_answers(request_id, _poll_delay(unanswered_polls),
-                                  original_done=None if unattended else original_done)
+                                  original_done=None if unattended else original_done, writes=writes)
 
     if last_look:
         # The wait had already run out when its one more poll stopped it:
@@ -530,7 +544,11 @@ def _first_answer_wins(
         # (calls_store.answer_in_writing).
         call_answers = calls.taken_answers(request_id)
         if call_answers is not None:
+            _close_hermes_prompt(writes.session, prompts_before, batch, RESOLVED)
             return _call_answer_result(batch, batch_protocol, call_answers)
+        wrote = writes.wrote()
+        if wrote:
+            return _withdrawn(request_id, True, writes, prompts_before, batch, locked_answers, wrote)
         time.sleep(POLL_INTERVAL_SECONDS)
     if "original_error" in outcome:
         raise outcome["original_error"]
@@ -555,10 +573,12 @@ CALL_ANSWER_POLL_SECONDS = 1.0
 
 
 def _sleep_until_call_answers(request_id: str, seconds: float,
-                              original_done: threading.Event | None = None) -> None:
+                              original_done: threading.Event | None = None,
+                              writes: "_UserWrites | None" = None) -> None:
     """Sleeps ``seconds``, waking early once a call has answered the batch,
-    so the answer doesn't wait out the relay's poll backoff, or once
-    ``original_done`` is set (the original clarify call returned)."""
+    so the answer doesn't wait out the relay's poll backoff, once
+    ``original_done`` is set (the original clarify call returned), or once
+    the user wrote in the chat (``writes``)."""
     remaining = seconds
     while remaining > 0:
         step = min(CALL_ANSWER_POLL_SECONDS, remaining)
@@ -567,6 +587,8 @@ def _sleep_until_call_answers(request_id: str, seconds: float,
         if remaining > 0 and original_done is not None and original_done.is_set():
             return
         if remaining > 0 and calls.has_call_answers(request_id):
+            return
+        if remaining > 0 and writes is not None and writes.wrote():
             return
 
 
@@ -673,6 +695,154 @@ def _interrupted() -> bool:
         return bool(is_interrupted())
     except Exception:
         return False
+
+
+# A question the user wrote past (issue 3105). Hermes' messaging gateway
+# withdraws a question when the user writes something else instead of
+# answering, and their message takes over the turn (gateway/run_inbound.py,
+# _release_pending_clarify): "an unanswered question must not hold the turn
+# (and the chat)". Its app gateway, which Conduit and Hermes Desktop talk to,
+# hands such a message to the turn as a steer, which can't reach the model
+# until the question's tool returns, so the chat sat locked until Stop. The
+# wait here ends instead, as the messaging gateway's does.
+SUPERSEDED = "superseded"
+# The ``request.cancel`` reason for Hermes' own card when the question was
+# answered elsewhere (on the phone's card or a call): Conduit for desktop
+# drops a card cancelled so, and the phone says it was answered elsewhere.
+RESOLVED = "resolved"
+SUPERSEDED_NOTICE = ("[the user wrote a message instead of answering, so the question was withdrawn: only an "
+                     "answer shown here stands, and nothing else was answered. Their message comes right after "
+                     "this: go by it, and don't guess the rest.]")
+SUPERSEDED_QUEUED_NOTICE = ("[the user wrote a message instead of answering, so the question was withdrawn: only an "
+                            "answer shown here stands, and nothing else was answered. Their message runs as soon "
+                            "as this turn ends: end it now in a line, without guessing the rest.]")
+
+
+class _UserWrites:
+    """What the user has sent the running turn of the chat on this thread,
+    read from Hermes' app gateway's record of it (``turn_surface.current_session``):
+    a steer waits on the agent, a message under ``busy_input_mode: queue``
+    waits on the record. ``wrote`` names how a message sent since the
+    question was asked waits ("steered" or "queued"), else "". A chat its app
+    gateway doesn't run (a messaging gateway's, the CLI) has no record, and
+    never reads as written in. A message the user queued themselves, with the
+    busy mode on steer or interrupt, is theirs to run after the turn: it
+    doesn't count."""
+
+    def __init__(self) -> None:
+        self.session = turn_surface.current_session()
+        self._steers = self._queued = 0
+        self._steers, self._queued = self._counts()
+
+    def _counts(self) -> tuple[int, int]:
+        session = self.session
+        if not isinstance(session, dict):
+            return 0, 0
+        try:
+            agent = session.get("agent")
+            steers = 0
+            if agent is not None:
+                pending = getattr(agent, "_pending_steer", None) or ""
+                parts = (vars(agent).get("_pending_steer_parts") if hasattr(agent, "__dict__") else None) or []
+                joined = "\n".join(str(part[1]) for part in parts if isinstance(part, (tuple, list)) and len(part) == 2)
+                steers = len(parts) if parts and joined == pending else (1 if pending else 0)
+                # A correction aimed at a model request (busy mode interrupt) waits here.
+                steers += 1 if getattr(agent, "_pending_redirect", None) else 0
+            head = session.get("queued_prompt")
+            queued = sum(1 for envelope in ([head] if head else []) + list(session.get("queued_prompts") or [])
+                         if not _hidden_send(envelope))
+            return steers, queued
+        except Exception:  # noqa: BLE001 - an unreadable record reads as nothing sent
+            return self._steers, self._queued
+
+    def wrote(self) -> str:
+        if not isinstance(self.session, dict):
+            return ""
+        steers, queued = self._counts()
+        if steers > self._steers:
+            return "steered"
+        if queued > self._queued and _busy_mode() == "queue":
+            return "queued"
+        return ""
+
+
+def _hidden_send(envelope: Any) -> bool:
+    """A queued prompt the user didn't write: a plugin's hidden send (a
+    workstream's wake, Pulse) carries its ``display_kind`` "hidden" on its
+    envelope as ``_queued_display_kind`` once Hermes has staged its row."""
+    return isinstance(envelope, dict) and envelope.get("_queued_display_kind") == "hidden"
+
+
+def _busy_mode() -> str:
+    """Hermes' app gateway's ``display.busy_input_mode``, "" when unknown."""
+    try:
+        read = getattr(sys.modules.get("tui_gateway.server"), "_load_busy_input_mode", None)
+        return str(read() or "") if callable(read) else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _withdrawn(request_id: str, relay_won: bool, writes: _UserWrites, before: Any,
+               batch: list[dict[str, Any]], locked: dict[str, Any], wrote: str) -> str:
+    """The question's result once the user wrote in the chat instead of
+    answering: every card for it goes (the phone's and Hermes' own, so no
+    later message is taken as its answer), and the model is told that only
+    the answers shown stand and that their message comes next. A batch's
+    answers locked before still stand. The result has the batch shape for a
+    single question too, as Hermes' own clarify returns every outcome."""
+    calls.forget_waiting_card(request_id)
+    _release_decision(request_id, relay_won)
+    _close_hermes_prompt(writes.session, before, batch, SUPERSEDED)
+    return _format_batch_result(batch, locked, outcome="cancelled",
+                                notice=SUPERSEDED_QUEUED_NOTICE if wrote == "queued" else SUPERSEDED_NOTICE)
+
+
+def _gateway_prompt_ids() -> frozenset[str]:
+    """The questions Hermes' messaging gateway holds open right now."""
+    try:
+        entries = getattr(sys.modules.get("tools.clarify_gateway"), "_entries", None)
+        return frozenset(dict(entries)) if isinstance(entries, dict) else frozenset()
+    except Exception:  # noqa: BLE001
+        return frozenset()
+
+
+def _close_hermes_prompt(app_session: Any, before: Any, batch: list[dict[str, Any]], reason: str) -> None:
+    """Withdraws Hermes' own card for a question that was answered elsewhere
+    or written past, so the original clarify, which runs on to its timeout
+    otherwise, returns now: in its app gateway (``app_session``, the chat's
+    record there), the card every client shows goes with a ``request.cancel``
+    giving ``reason``; in a messaging gateway, the question registered since
+    ``before`` with this batch's wording is cancelled, so the chat's next
+    message isn't taken as its answer. Never raises."""
+    try:
+        if isinstance(app_session, dict):
+            server = sys.modules.get("tui_gateway.server")
+            requests = sys.modules.get("tui_gateway.server_requests")
+            sessions = getattr(server, "_sessions", None)
+            cancel = getattr(requests, "cancel", None)
+            if isinstance(sessions, dict) and callable(cancel):
+                for sid, record in list(sessions.items()):
+                    if record is app_session:
+                        cancel(sid, reason, method="clarify")
+                        break
+        gateway = sys.modules.get("tools.clarify_gateway")
+        resolve = getattr(gateway, "resolve_gateway_clarify", None)
+        get_pending = getattr(gateway, "get_pending", None)
+        if callable(resolve) and callable(get_pending):
+            asked = {entry["question"] for entry in batch}
+            matches: dict[str, list[str]] = {}
+            for clarify_id in _gateway_prompt_ids() - frozenset(before or ()):
+                entry = get_pending(clarify_id)
+                question = getattr(entry, "question", None) if entry is not None else None
+                if question in asked:
+                    matches.setdefault(question, []).append(clarify_id)
+            # Only a wording that one new question carries: two chats asking
+            # the same thing at once leave the other chat's card alone.
+            for ids in matches.values():
+                if len(ids) == 1:
+                    resolve(ids[0], getattr(gateway, "CANCELLED", "\x00cancelled"))
+    except Exception:  # noqa: BLE001 - the answer stands; the card times out as before
+        logger.warning("conduit_push: couldn't withdraw Hermes' own question card", exc_info=True)
 
 
 def _release_decision(request_id: str, relay_won: bool) -> None:

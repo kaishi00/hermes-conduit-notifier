@@ -362,10 +362,10 @@ notes:
     chat_takeover.release_detached_claims lets go of this process's claim on a chat whose runtime
     no client is attached to any more and that runs nothing (hermes-conduit issue 3125), through
     tui_gateway.server's own _release_active_session_slot under the runtime's history_lock, read
-    by name through sys.modules: _sessions, _sessions_lock, _transport_is_dead (the
-    _detached_ws_transport sentinel counts), _session_pending_kind, _session_has_active_delegations
-    and _session_holds_transcript_claim. Without them the claim stays and the takeover answers
-    same_host as before. upstream/test_detached_claim_takeover.py holds it.
+    by name through sys.modules. It needs _sessions, _sessions_lock, _transport_is_dead (the
+    _detached_ws_transport sentinel counts) and _session_pending_kind; without one the claim stays
+    and the takeover answers same_host as before. _session_has_active_delegations and
+    _session_holds_transcript_claim keep a busy runtime's claim when Hermes has them. upstream/test_detached_claim_takeover.py holds it.
 # Upstream behaviors we know are broken, keyed by test and failure signature.
 # A listed test xfails while it fails with this signature, and fails when it
 # passes (upstream fixed it: review the workaround) or fails differently.

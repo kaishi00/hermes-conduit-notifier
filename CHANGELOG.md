@@ -13,11 +13,22 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.194.6 (2026-11-22)
+## 0.195.1 (2026-11-22)
 
 ### Fixes
 
 - After your phone lost its connection to the dashboard (a plugin update, a network change), sending in that chat could be refused with "open in Conduit on another device" though it was open nowhere else, and nothing in Conduit could undo it. Conduit now takes the chat back from its own earlier connection.
+
+## 0.195.0 (2026-11-22)
+
+### Fixes
+
+- Writing a message while a question card waits no longer leaves the chat stuck until Stop: the question is withdrawn and your message goes through, as Hermes does in other chats.
+- A question you answered from a notification or on a call no longer stays answerable in the chat, where your next message could be taken as its answer.
+
+### New and improved
+
+- A question that waits on your Needs you list can be dismissed without an answer, and the bot is told you dismissed it rather than picked something.
 
 ## 0.194.5 (2026-11-22)
 

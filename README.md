@@ -685,6 +685,20 @@ the FULL batch to Conduit instead of collapsing it to the first question:
 - Releasing a decision (native path won) is fired off the answer's critical
   path on a daemon thread, so a slow or unreachable relay can never delay
   the user's native answer.
+- When the relay or a call answers first, Hermes' own card for the question
+  is withdrawn too (`request.cancel` with reason `resolved` in Hermes' app
+  gateway, a cancel in a messaging gateway), so it doesn't stay on screen or
+  take the chat's next message as the answer to a question already answered.
+- A message the user writes in the chat instead of answering withdraws the
+  question, as Hermes' messaging gateway does: Hermes' app gateway (Conduit,
+  Hermes Desktop) hands it to the turn as a steer, which can't reach the
+  model until the question returns, so the chat would sit locked until Stop.
+  The plugin ends the wait as soon as the steer arrives (or a message queued
+  under `display.busy_input_mode: queue`; one you queue yourself under steer
+  or interrupt still runs after the turn), withdraws every card for it
+  (`request.cancel` with reason `superseded`), and tells Hermes nothing was
+  answered and that the message comes next. A form's answers locked before
+  still stand (plugin 0.195.0+).
 
 Known limitation: the relay cannot see answers made natively (Hermes
 Desktop/TUI answer through the gateway), and the gateway cannot see relay
@@ -1811,8 +1825,10 @@ question or a small task doesn't start a workstream. Change it in Conduit
   pause her: any chat of the bot's (not a workstream, nor a peer's chat
   forwarded over A2A) can ask one with `work_propose`, with two
   to four choices and the one she recommends, and it stays on your Needs you
-  list past the turn and restarts until you answer it, she withdraws it, or
-  you delete its chat (filing the chat keeps it). Your tap goes back to the
+  list past the turn and restarts until you answer or dismiss it, she
+  withdraws it, or you delete its chat (filing the chat keeps it). Dismiss
+  takes it off your list with no answer, and she's told it was dismissed,
+  never a yes, no or pick (plugin 0.195.0+). Your tap goes back to the
   chat that asked as a message she acts on. Under `auto` she may carry on
   with her recommendation meanwhile and undo it if you pick otherwise; under
   `ask` she waits, and she always waits on a step that can't be undone. A
@@ -2042,15 +2058,15 @@ lock, and Conduit's next send claims the chat.
   it; ask again shortly, nothing
   is interrupted; a marker that can't be read counts as running, and only a marker whose writer is provably dead, or a gone owner's marker that names no writer, is ignored) or
   `same_host` (this dashboard process still holds it with a client attached,
-  for example Conduit on another device or the web chat; that claim is left
-  alone).
+  for example Conduit on another device or the web chat, or with work still
+  running on a runtime nobody is attached to; that claim is left alone).
 - A claim this dashboard process holds for a chat runtime no client is
   attached to any more (Conduit's own earlier connection, after its socket
   closed) and that runs nothing (no turn running or marked, no question
   waiting, no delegated work) is let go through Hermes' own release, and the
   route answers `taken_over`: Hermes usually reaps such a runtime or hands its
   claim on by itself, but one it kept refused that device's sends with no way
-  out (plugin 0.194.6+). The runtime stays and its next turn claims the chat
+  out (plugin 0.195.1+). The runtime stays and its next turn claims the chat
   again.
 - Hermes' gateway can also hold a chat with no claim at all: work it queued
   in its durable ledger (`session_admissions` and `worker_executions` in the

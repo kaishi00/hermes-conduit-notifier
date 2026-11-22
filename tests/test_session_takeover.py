@@ -731,3 +731,19 @@ def test_without_hermes_gateway_loaded_nothing_changes(tmp_path):
     _seed(tmp_path, [_entry("chat", pid=OWN_PID, lease="lease-own")])
     assert "tui_gateway.server" not in sys.modules
     assert _take(tmp_path, ["chat"])["status"] == "same_host"
+
+
+def test_the_release_holds_the_in_process_takeover_lock(tmp_path):
+    registry, gateway = FakeRegistry(tmp_path), FakeGateway()
+    _seed(tmp_path, [_entry("chat", pid=OWN_PID, lease="lease-own")])
+    _runtime(gateway, registry, tmp_path, "sid", "chat")
+    held = []
+    release = gateway._release_active_session_slot
+
+    def checked(session):
+        held.append(sys.__dict__["_conduit_chat_takeover_lock"].locked())
+        return release(session)
+
+    gateway._release_active_session_slot = checked
+    assert _take_with(tmp_path, ["chat"], gateway, registry)["status"] == "taken_over"
+    assert held == [True]  # another takeover thread can't interleave its registry write

@@ -298,7 +298,9 @@ def release_detached_claims(session_ids: list, *, registry: Any, turn_marker: An
             lock = session.get("history_lock")
             if lock is None:
                 continue
-            with lock:  # a turn's admission and Hermes' own release take it too
+            # _in_process first, as take_over_session takes it before the registry lock: Hermes' file
+            # lock may not exclude this process's other takeover threads from the release's write.
+            with _in_process, lock:  # a turn's admission and Hermes' own release take history_lock too
                 if abandoned is not None and abandoned.is_set():
                     raise TakeoverError(504, "Chat takeover timed out")
                 lease = _detached_idle_claim(server, sid, session, wanted, state_path, turn_marker, home)
@@ -329,8 +331,8 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
     claim whose surface writes no turn marker holds the chat, or the
     gateway's ledger holds work on it (surface ``bot`` for another bot's
     message, ``gateway`` otherwise; ask again shortly); ``same_host``:
-    this dashboard process still holds one of the ids, which this route
-    never touches (other processes' claims may have been dropped). Marker reads happen under the registry lock on purpose:
+    this dashboard process still holds one of the ids, with a client on its
+    runtime or work running on it (other processes' claims may have been dropped). Marker reads happen under the registry lock on purpose:
     the decision and the write must be atomic against other claimers; the
     reads are bounded by the caller's ids (at most TAKEOVER_MAX_IDS) per owner.
 
