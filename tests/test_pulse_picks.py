@@ -85,6 +85,12 @@ def test_a_failing_status_is_refused_when_the_report_saw_the_job_running_fine():
     assert picks.unbacked_failing("job::x", {**pick, "facts": {"label": "x", "state": "ok"}}, {"job::x": ""}) == ""
     # A pick with no shape of its own (a plain one) never carries a status.
     assert picks.unbacked_failing("job::x", {"line": "x"}, {"job::x": ""}) == ""
+    # Runs that end in a failure are a failing claim too; a recovery isn't.
+    runs = {"shape": "runs", "facts": {"job": "PR watcher", "results": ["ok", "fail"]}}
+    assert picks.unbacked_failing("job::x", runs, {"job::x": ""}) == "unbacked_status"
+    assert picks.unbacked_failing("job::x", runs, {"job::x": "failed its last run"}) == ""
+    recovered = {"shape": "runs", "facts": {"job": "PR watcher", "results": ["fail", "ok"]}}
+    assert picks.unbacked_failing("job::x", recovered, {"job::x": ""}) == ""
 
 
 def test_the_picks_are_told_not_to_read_a_failed_tool_call_as_a_failing_thing():

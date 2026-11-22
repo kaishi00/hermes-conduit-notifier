@@ -324,7 +324,7 @@ FAILING_STATES = ("warn", "fail")
 
 
 def unbacked_failing(subject: Any, pick: Any, health: Mapping[str, str]) -> str:
-    """Why a pick's failing status can't stand, "" when it can.
+    """Why a pick's failing status or runs can't stand, "" when it can.
 
     ``health`` is what the report's job list said of each job it showed, by
     the job's lasting subject ("job:<profile>:<id>", pulse_report.cron_jobs):
@@ -333,10 +333,21 @@ def unbacked_failing(subject: Any, pick: Any, health: Mapping[str, str]) -> str:
     "fail" while the list shows it fine read a failed tool call in a chat as a
     failing job — a read at a wrong path fails while the file is there.
     """
-    if not isinstance(pick, Mapping) or pick.get("shape") != "status":
+    if not isinstance(pick, Mapping):
         return ""
     facts = pick.get("facts")
-    if not isinstance(facts, Mapping) or facts.get("state") not in FAILING_STATES:
+    if not isinstance(facts, Mapping):
+        return ""
+    if pick.get("shape") == "status":
+        failing = facts.get("state") in FAILING_STATES
+    elif pick.get("shape") == "runs":
+        # Runs that end in a failure say the job is failing now; ones that
+        # end "ok" (a recovery) are fine against a healthy list.
+        results = facts.get("results")
+        failing = isinstance(results, list) and bool(results) and results[-1] == "fail"
+    else:
+        return ""
+    if not failing:
         return ""
     key = str(subject or "")
     if not key.startswith(JOB_SUBJECT) or key not in health:

@@ -68,6 +68,8 @@ UNSET_RULE = ("An app, connector or account the user hasn't connected or set up 
 # when a later summary line is the one retained.
 BLOCKED_ERROR = re.compile(r"cannot re-exec process to join the existing user namespace|"
                            r"newuidmap: write to uid_map failed: Operation not permitted")
+# Podman's own line for the same stop, under the namespace error it quotes.
+NAMESPACE_SETUP = re.compile(r"cannot set up namespace using")
 SANDBOX_BLOCKED = "blocked by sandbox"
 BLOCKED = re.compile(rf"exit -?\d+, {SANDBOX_BLOCKED}\b")
 # Exit codes that are never harmless whatever was printed: a timeout (124),
@@ -399,8 +401,13 @@ def terminal_failure(result: Any, command: Any = None) -> Optional[str]:
     lines = [part.strip() for part in output.splitlines() if part.strip()] if isinstance(output, str) else []
     if not lines:
         return f"exit {code}, {EXPECTED}, {NO_OUTPUT}" if expected_exit(command, code) else f"exit {code}, {NO_OUTPUT}"
-    sandbox_blocked = any(BLOCKED_ERROR.search(part) for part in lines)
+    # The sandbox stopped the command only when its output says so and the
+    # line kept as the failure is that stop: in "podman info; ./deploy.sh" the
+    # deploy's own failure still counts.
+    denied = any(BLOCKED_ERROR.search(part) for part in lines)
     marked = [(part, mark) for part in lines if (mark := FAILURE_MARK.search(part))]
+    kept = marked[-1][0] if marked else lines[-1]
+    sandbox_blocked = denied and bool(BLOCKED_ERROR.search(kept) or NAMESPACE_SETUP.search(kept))
     if marked:
         # The last marked line is the exception under a traceback. It's
         # redacted whole first (a cut could start inside a URL's user info),

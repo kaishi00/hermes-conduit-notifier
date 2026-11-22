@@ -1134,6 +1134,10 @@ def test_a_command_the_sandbox_blocked_is_left_out_of_failed_calls(recording, ou
 
 @pytest.mark.parametrize("command, output, expected_snippet", [
     ("podman start hindsight", "Error: no such container hindsight", "no such container"),
+    # The sandbox stopped one part, and the part after it failed on its own.
+    ("podman info; ./deploy.sh",
+     "newuidmap: write to uid_map failed: Operation not permitted\nError: deploy failed: disk full",
+     "deploy failed"),
     ("podman ps",
      'time="2026-11-17T08:05:06Z" level=error msg="invalid internal status, try resetting the pause '
      'process with \\"podman system migrate\\": could not find any running process: no such process"',
