@@ -806,7 +806,7 @@ def _hidden_from_search(session_ids: tuple[str, ...], source: Any, home: Optiona
         if turn is not None:
             # A room the settings leave out is searched as Hermes alone would
             # search it, its compactions' continuations and all.
-            return _lifted(turn, home).with_others and (not turn.room_id or _applies(turn.room_id, home))
+            return _lifted(turn, home, fresh=True).with_others and (not turn.room_id or _applies(turn.room_id, home))
     # No row here: hidden when it says it's a room's.
     return (str(source or "").strip().lower() == ROOM_SOURCE
             or any(ROOM_SESSION_ID.fullmatch(session_id) for session_id in session_ids))
@@ -1131,7 +1131,7 @@ def _named(handle: str, owners: Mapping[Optional[str], str]) -> str:
     return f"@{handle} ({owner}'s)" if owner else f"@{handle}"
 
 
-def _lifted(turn: Optional[RoomTurn], home: Optional[Path]) -> Optional[RoomTurn]:
+def _lifted(turn: Optional[RoomTurn], home: Optional[Path], fresh: bool = False) -> Optional[RoomTurn]:
     """The turn as a room without other people's agents when everyone in it
     from another installation came over a Link both sides marked as the
     owner's own Hermes (room_links.own_links; the multi-instance plan's Rooms
@@ -1141,7 +1141,8 @@ def _lifted(turn: Optional[RoomTurn], home: Optional[Path]) -> Optional[RoomTurn
     unmarking a Link brings the rules back from the next call and someone
     joining within seconds. On the home, the same read names the room's
     others as they are now, not as the first read found them (notifier
-    issue 788). Anything that can't be read keeps the rules."""
+    issue 788). Anything that can't be read keeps the rules. ``fresh`` reads
+    the room now whatever was kept (past-chat search: notifier #969)."""
     if turn is None or not turn.with_others or not turn.room_id or home is None:
         return turn
     key = (str(home), turn.room_id, turn.side)
@@ -1152,7 +1153,7 @@ def _lifted(turn: Optional[RoomTurn], home: Optional[Path]) -> Optional[RoomTurn
         if known is not None:
             # Least recently used goes first at the cap, not first written.
             _own_verdicts.move_to_end(key)
-    if known is not None and known[0] > now and known[1] == inputs:
+    if not fresh and known is not None and known[0] > now and known[1] == inputs:
         lifted, others = known[2], known[3]
     else:
         lifted, others = _own_verdict(turn, home)

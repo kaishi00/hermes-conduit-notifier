@@ -793,7 +793,9 @@ def _report_fields(args: dict[str, Any]) -> dict[str, Any]:
             except ValueError:
                 continue
         if isinstance(inner, dict) and "happening" in inner:
-            return inner
+            # A field left beside the wrapper ("saw" at the top) still counts;
+            # the nested copy wins where both have one.
+            return {**{k: v for k, v in args.items() if k != key}, **inner}
     return args
 
 

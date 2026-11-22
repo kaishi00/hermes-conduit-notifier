@@ -6979,6 +6979,8 @@ def stop() -> None:
     with _not_work_lock:
         # A reload starts from the registry again (#964's review).
         _not_work.clear()
+        _not_compacted.clear()
+    work_coord.forget_open_questions()
     with _wake_lock:
         pending = list(_wakes.values())
         _wakes.clear()
@@ -6997,7 +6999,6 @@ def stop() -> None:
         _unjournaled.clear()
         _turn_began.clear()
         _turn_gateways.clear()
-        _not_compacted.clear()
         _replies.clear()
         _redirecting.clear()
         _agents.clear()

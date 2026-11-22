@@ -30,6 +30,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable
 
@@ -613,6 +614,15 @@ def _card_asks_instead(session_id: str) -> bool:
     return _session_source(session_id) != A2A_SOURCE
 
 
+# Sources read, by (state.db, session): Hermes sets a session's source when
+# it makes the session and never changes it, and the asked note asks before
+# every model call of every chat (notifier issue 983). Only what was found is
+# kept: a session not there yet may be written a moment later.
+SOURCES_KEPT = 1024
+_sources: "OrderedDict[tuple[str, str], str]" = OrderedDict()
+_sources_lock = threading.Lock()
+
+
 def _session_source(session_id: str) -> str:
     """The session's ``source`` in Hermes' state.db, or "" when it can't be read."""
     if not session_id:
@@ -621,6 +631,12 @@ def _session_source(session_id: str) -> str:
         from hermes_constants import get_hermes_home
 
         path = Path(get_hermes_home()) / room_rules.STATE_DB
+        key = (str(path), session_id)
+        with _sources_lock:
+            known = _sources.get(key)
+            if known is not None:
+                _sources.move_to_end(key)
+                return known
         if not path.exists():
             return ""
         conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=room_rules.READ_TIMEOUT)
@@ -630,7 +646,14 @@ def _session_source(session_id: str) -> str:
             conn.close()
     except Exception:  # noqa: BLE001 - an unreadable store answers as a chat would
         return ""
-    return str(row[0] or "").strip().lower() if row else ""
+    source = str(row[0] or "").strip().lower() if row else ""
+    if source:
+        with _sources_lock:
+            _sources[key] = source
+            _sources.move_to_end(key)
+            while len(_sources) > SOURCES_KEPT:
+                _sources.popitem(last=False)
+    return source
 
 
 def _interrupted() -> bool:

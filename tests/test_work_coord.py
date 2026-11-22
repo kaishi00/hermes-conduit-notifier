@@ -1033,3 +1033,52 @@ def test_a_chats_turns_list_its_own_questions_and_an_answer_said_elsewhere_reach
     mine = call("work_propose", {"text": "Tag it now?"}, session_id=OTHER_CHAT)["id"]
     _chat_db(home, [(OTHER_CHAT, "user", "Yes, tag it.", None)])
     assert call("work_propose", {"id": mine, "answer": "approved"}, session_id=OTHER_CHAT)["status"] == "approved"
+
+
+def test_a_first_question_cut_to_fit_keeps_its_choices():
+    """#980: a first question too long for the spoken note's room gives up
+    its own words (and its chat's title) before its choices and closing
+    quote; past that, the line says where the rest is."""
+    row = {"id": "P1", "text": "which way " * 30, "created_at": 0, "chat": "c1",
+           "choices": json.dumps(["this way", "that way"])}
+    for budget in (900, 800):
+        note = coord.asked_spoken_note([row], lambda at: "now", {"c1": "T" * 500}, budget)
+        assert len(note) <= budget, budget
+        assert "» Choices: «this way», «that way»." in note, note
+    tiny = coord.asked_spoken_note([{**row, "choices": json.dumps(["a" * 200] * 4)}],
+                                   lambda at: "now", {"c1": "T" * 500}, 900)
+    assert len(tiny) <= 900 and tiny.count(coord.ASKED_CUT) == 1, tiny
+
+
+def test_the_asked_note_reads_the_registry_only_when_it_changes(on, hermes, home, monkeypatch):
+    # Notifier issue 983: the note is made before every model call of every
+    # chat, and read the registry's questions afresh each time.
+    monkeypatch.setattr(sys.modules["conduit_push.stamps"], "SETTLED_NS", 0)
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 3600.0)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    monkeypatch.setattr(work, "_home", lambda: on.home)
+    coord.forget_open_questions()
+    asked(home)
+    reads = {"n": 0}
+    real = store_mod.Store.proposals_open
+
+    def counted(self, *args, **kwargs):
+        reads["n"] += 1
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(store_mod.Store, "proposals_open", counted)
+    for _ in range(3):
+        assert work.asked_note(OTHER_CHAT) is None
+    assert reads["n"] == 1, "none waiting: kept until the registry changes"
+    item = call("work_propose", {"text": "Ship it?", "choices": ["yes", "no"]}, session_id=OTHER_CHAT)["id"]
+    for _ in range(3):
+        assert item in work.asked_note(OTHER_CHAT)
+    assert reads["n"] == 3, "a write is seen on the next call (the propose read once too)"
+    # One asked in a chat is read again seconds later, for a chat deleted since.
+    with coord._open_lock:
+        for key, (stamp, until, rows) in list(coord._open_kept.items()):
+            coord._open_kept[key] = (stamp, until - coord.OPEN_QUESTIONS_TTL_S - 1, rows)
+    assert item in work.asked_note(OTHER_CHAT)
+    assert reads["n"] == 4
+    work.stop()
+    assert not coord._open_kept
