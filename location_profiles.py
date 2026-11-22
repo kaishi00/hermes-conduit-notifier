@@ -17,17 +17,12 @@ one wins: the default profile, then named ones alphabetically.
 
 from __future__ import annotations
 
-import json
-import re
 from pathlib import Path
 from typing import Any, Callable
 
 from .location_store import LocationStore
-
-PAIRING_FILE = "conduit-push.json"
-# A folder name goes into notes the agent reads and into the access log, and
-# is sent to the phone as is, so one that would need cleaning isn't used.
-_UNUSABLE_NAME = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]")
+# The profile lookup is shared with the calendar and health (profile_sharing).
+from .profile_sharing import _UNUSABLE_NAME, PAIRING_FILE, _installation, label, profile_homes  # noqa: F401
 
 
 def store_for(home: str | Path, make: Callable[[Any], LocationStore] = LocationStore) -> tuple[LocationStore, str | None]:
@@ -50,35 +45,6 @@ def store_for(home: str | Path, make: Callable[[Any], LocationStore] = LocationS
     return own, None
 
 
-def profile_homes(home: Path) -> list[tuple[str, Path]]:
-    """Every other Hermes profile on this host, as (name, home): the default
-    profile is the root, named ones live in its profiles/ folder."""
-    root = home.parent.parent if home.parent.name == "profiles" else home
-    try:
-        named = sorted(path for path in (root / "profiles").iterdir() if path.is_dir())
-    except OSError:
-        named = []
-    try:
-        own = home.resolve()
-    except (OSError, RuntimeError):  # RuntimeError: a symlink loop
-        return []
-    found, seen = [], {own}
-    for name, path in [("default", root)] + [(path.name, path) for path in named if path.name != "default"]:
-        try:
-            resolved = path.resolve()
-        except (OSError, RuntimeError):
-            continue
-        if resolved not in seen:
-            seen.add(resolved)
-            found.append((name, path))
-    return found
-
-
-def label(name: str) -> str:
-    """A profile's name as it may go into another profile's access log."""
-    return _UNUSABLE_NAME.sub("", name)[:64]
-
-
 def _sharing_on(store: LocationStore) -> bool:
     if not store.exists():
         return False
@@ -88,15 +54,3 @@ def _sharing_on(store: LocationStore) -> bool:
 
 def _on(sharing: dict[str, Any]) -> bool:
     return bool(sharing.get("talking") or sharing.get("background"))
-
-
-def _installation(home: Path) -> str:
-    """The relay installation (the iPhone) this profile is paired with, or ""."""
-    try:
-        value = json.loads((home / PAIRING_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ""
-    installation = value.get("installation_id") if isinstance(value, dict) else None
-    credential = value.get("credential") if isinstance(value, dict) else None
-    return installation if isinstance(installation, str) and isinstance(credential, str) and credential else ""
-

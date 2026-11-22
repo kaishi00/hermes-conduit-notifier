@@ -766,3 +766,25 @@ def test_a_profile_that_reads_this_location_hears_its_arrivals_and_a_wipe_reache
     assert [len(found.new_moments()) for found in stores] == [1, 1, 0]
     assert client.post(f"{BASE}/location/wipe", json={"device_id": DEVICE}).status_code == 200
     assert [found.new_moments() for found in stores] == [[], [], []]
+
+
+def test_pulse_reads_a_calendar_another_profile_shares_with_this_hosts_other_profiles(tmp_path):
+    from test_phone import _sharing
+
+    home = tmp_path / "hermes"
+    work = home / "profiles" / "work"
+    for path in (home, work):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "conduit-push.json").write_text(json.dumps({"credential": "c", "installation_id": "installation-1"}))
+    london = lambda hour, minute=0: datetime(2026, 10, 14, hour, minute, tzinfo=LONDON).timestamp()
+    phone_home(work, sharing=_sharing(other_profiles=True))
+    assert [event["title"] for event in places.today_events(home, LONDON, london(9, 50))] \
+        == [event["title"] for event in places.today_events(work, LONDON, london(9, 50))] != []
+    assert hours.busy(home, london(9, 50)) == hours.busy(work, london(9, 50)) == (hours.EVENT, london(11))
+    # With the switch off, the default profile reads nothing.
+    phone_home(tmp_path / "solo" / "profiles" / "work", sharing=_sharing(other_profiles=False))
+    (tmp_path / "solo" / "conduit-push.json").write_text(json.dumps({"credential": "c", "installation_id": "installation-1"}))
+    (tmp_path / "solo" / "profiles" / "work" / "conduit-push.json").write_text(
+        json.dumps({"credential": "c", "installation_id": "installation-1"}))
+    assert places.today_events(tmp_path / "solo", LONDON, london(9, 50)) == []
+    assert hours.busy(tmp_path / "solo", london(9, 50)) is None

@@ -22,7 +22,7 @@ from typing import Any, Callable, Optional
 from hermes_constants import get_hermes_home
 
 from . import phone_tool, room_asks, room_rules
-from .phone_store import PhoneError, PhoneStore
+from .phone_store import PhoneError, PhoneStore, store_for
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -91,7 +91,7 @@ def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool]
         answer = _handle(args if isinstance(args, dict) else {}, session, is_child,
                          room_turn or (lambda sid: room_rules.room_turn(sid, get_hermes_home())),
                          choices or (lambda turn: room_rules.choices_for(turn, get_hermes_home())),
-                         store or PhoneStore(get_hermes_home()), now)
+                         store or store_for(get_hermes_home())[0], now)
     except Exception:  # noqa: BLE001 — a tool must never raise
         logger.warning("conduit_free_busy failed", exc_info=True)
         answer = {"ok": False, "error": "unavailable", "note": _CANT}

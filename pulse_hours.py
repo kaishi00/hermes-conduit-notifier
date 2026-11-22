@@ -270,10 +270,10 @@ def busy(home: Optional[Path], now: float) -> Optional[tuple[str, Optional[float
     if home is None:
         return None
     try:
-        from .phone_store import PhoneStore
+        from .phone_store import store_for as phone_store_for
     except Exception:  # noqa: BLE001 — no phone store in this build
         return None
-    phone = PhoneStore(home)
+    phone = phone_store_for(home)[0]
     if not phone.exists():
         return None
     try:

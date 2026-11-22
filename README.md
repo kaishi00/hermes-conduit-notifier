@@ -3447,6 +3447,17 @@ workouts, body, vitals, fitness), with how far back to start.
   has synced data, and subagents can't use it. What it returns goes to your
   agent's model like any tool result, which Conduit tells the user before
   they turn sharing on.
+- **Other profiles on this host** (plugin 0.194+, capability
+  `phone-health-profiles`). With "Share with this host's other profiles"
+  on in Conduit's Settings > Health (a batch's `other_profiles: true`, kept
+  per device; absent leaves it as it was), every other profile on the same
+  host that is paired with the same iPhone (the same relay installation in
+  its `conduit-push.json`) reads that device's data with `conduit_health`,
+  and its overview names the sharing profile. A profile that a phone syncs
+  health to itself always reads its own, and if several profiles share
+  with the others the first wins (default, then named ones
+  alphabetically). Voice reads stay with the sharing profile, whose key
+  they're sealed with.
 
 Limits: 4 devices per profile, 6,000 items and 4 MiB per batch, 120 uploads
 a minute per profile.
@@ -3495,7 +3506,7 @@ timers Hermes set) and `conduit_contacts` (`people`) joins the list, each once
 a phone shares it; setting an alarm or timer in a call is the phone's own tool
 too.
 
-### Signed-in voice reads (plugin 0.194+)
+### Signed-in voice reads (plugin 0.194.1+)
 
 Conduit for desktop's live calls are signed in to the dashboard but have no
 device key to seal with. So the phone also tells the host, inside each
@@ -3511,10 +3522,10 @@ device that allows them, the last one synced:
 | --- | --- | --- |
 | GET | `/api/plugins/conduit_push/voice-tools?reader=<mode>` | The tools that mode may use (the same entries as the sealed list) |
 | POST | `/api/plugins/conduit_push/voice-tools/read` with `{reader, tool, args}` | `{ok, result}`, the tool's answer; 404 when the user doesn't let that mode read it |
-| GET | `/api/plugins/conduit_push/voice-context?reader=<mode>` | `{ok, context}`: lines for the call's start, where the user is (the latest fix of the last 6 hours, at the detail they share, never while paused) and their phone's battery, CarPlay and Focus, as shared; `""` when nothing is allowed or fresh |
+| GET | `/api/plugins/conduit_push/voice-context?reader=<mode>` | `{ok, context}`: lines for the call's start, where the user is (the saved place or area of the latest fix of the last 6 hours, never coordinates, never while paused) and their phone's battery, CarPlay and Focus, as shared; `""` when nothing is allowed or fresh |
 
-Location is read as `conduit_location` reads it, through another profile's
-store when that one shares with this profile, and each read, the briefing's
+Each store is read as its agent tool reads it, through another profile's
+store when that one shares with this host's other profiles, and each read, the briefing's
 included, is logged as that mode's call. A bad `reader` is a 400. The plugin
 reports `voice-readers`.
 
@@ -3804,6 +3815,23 @@ whether notes and attendees are included (off by default).
   wake that didn't go doesn't count);
   the rest is the usual status. iOS may hold a background wake back, so the tool says so rather
   than guess.
+- **Other profiles on this host (plugin 0.194+).** With "Share with this
+  host's other profiles" on in Conduit's Settings > Calendar & phone
+  (`sharing.other_profiles: true`, capability `phone-health-profiles`),
+  every other profile on the same host that is paired with the same iPhone
+  (the same relay installation in its `conduit-push.json`) reads that
+  device's calendar, reminders, status, alarms, shortcuts, people and
+  photos as its own: `conduit_calendar`, `conduit_phone`,
+  `conduit_contacts`, `conduit_photos`, the phone line with each message,
+  Pulse and free/busy in rooms. Its changes queue in the sharing profile's
+  store, and the nudge goes through the asking profile's own pairing, so the
+  phone picks them up on its next exchange as usual. The two profiles share
+  one queue for that device, so `pending` in either lists the other's
+  changes too, and only the first to ask sees them as `new`. Devices that
+  left the switch off stay out of its reads and changes. A profile that a phone
+  syncs to itself always reads its own, and if several profiles share with
+  the others the first wins (default, then named ones alphabetically).
+  Voice reads stay with the sharing profile, whose key they're sealed with.
 - **With each message (plugin 0.167+).** When the user turns on "With each
   message" under Focus and phone status (`sharing.turn_status`, capability
   `phone-turn-status`; only with the status or Focus shared), a turn whose

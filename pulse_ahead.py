@@ -287,10 +287,10 @@ def calendar_section(home: Path, zone: tzinfo, now: float, events: Optional[dict
     budget, for an unkeyed pick to be matched by its title; with
     ``reminders``, each reminder listed gets a key ("r1") the same way."""
     try:
-        from .phone_store import PhoneStore
+        from .phone_store import store_for as phone_store_for
     except Exception:  # noqa: BLE001 — no phone store in this build
         return "", False
-    phone = PhoneStore(home)
+    phone = phone_store_for(home)[0]
     if not phone.exists():
         return "", False
     parts, anything = [], False

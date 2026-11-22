@@ -339,6 +339,10 @@ def _signed_in_sources(reader: str) -> Dict[str, Tuple[Any, Any, str]]:
                 # As the agent's tool reads it: another profile's store when
                 # that one shares with this profile.
                 store, _owner = core._plugin_package_module("location_profiles").store_for(home, store_class)
+            elif key == "health":
+                # Another profile's health too, when that one shares it with
+                # this host's other profiles, as the agent's tool reads it.
+                store, _owner = core._plugin_package_module("health_store").store_for(home)
             else:
                 store = store_class(home)
             device_id = store.voice_reader_device(reader)
@@ -349,7 +353,7 @@ def _signed_in_sources(reader: str) -> Dict[str, Tuple[Any, Any, str]]:
             sources[key] = (store, tool, device_id)
     try:
         phone = core._plugin_package_module("phone_tool")
-        store = phone.PhoneStore(home)
+        store, _owner = core._plugin_package_module("phone_store").store_for(home)
         device_id = store.voice_reader_device(reader)
         if device_id:
             sources["phone"] = (store, phone, device_id)

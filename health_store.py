@@ -48,7 +48,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from . import sealing, voice_readers
+from . import profile_sharing, sealing, voice_readers
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,8 @@ except ImportError:  # everything but Windows
 
 FILE_NAME = "conduit-health.sqlite3"
 SCHEMA_VERSION = 1
+# A device's "Share with this host's other profiles", one meta row each.
+OTHER_PROFILES_KEY = "other_profiles:"
 
 SALT = b"conduit-health-v1"
 INFO_INGEST = b"conduit-health-v1 ingest device-to-host"
@@ -297,9 +299,14 @@ def _flat_data(value: Any, field: str) -> dict[str, Any]:
 
 
 class HealthStore:
-    def __init__(self, home: Any, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, home: Any, clock: Callable[[], float] = time.time, *, owner: str | None = None) -> None:
+        """``owner``: the profile this store belongs to, when another profile
+        reads it through "Share with this host's other profiles"
+        (store_for); its reads then see only the devices that turned that
+        on."""
         self.path = Path(home) / FILE_NAME
         self.clock = clock
+        self.owner = owner
 
     # Connections ---------------------------------------------------------------
 
@@ -407,6 +414,7 @@ class HealthStore:
                 for table in ("buckets", "events", "tombstones", "windows"):
                     db.execute(f"DELETE FROM {table} WHERE device=?", (device_id,))
                 db.execute("DELETE FROM meta WHERE key=?", (_readers_key(device_id),))
+                db.execute("DELETE FROM meta WHERE key=?", (OTHER_PROFILES_KEY + device_id,))
             db.execute(
                 "INSERT INTO devices(id, name, device_public, host_private, host_public, kid, created_at, last_seen)"
                 " VALUES(?,?,?,?,?,?,?,NULL)"
@@ -551,8 +559,10 @@ class HealthStore:
                     db.execute(f"DELETE FROM {table} WHERE {column}=?", (device_id,))
             if device_id is None:
                 db.execute("DELETE FROM meta WHERE key LIKE 'voice_readers:%'")
+                db.execute("DELETE FROM meta WHERE key LIKE ?", (OTHER_PROFILES_KEY + "%",))
             else:
                 db.execute("DELETE FROM meta WHERE key=?", (_readers_key(device_id),))
+                db.execute("DELETE FROM meta WHERE key=?", (OTHER_PROFILES_KEY + device_id,))
         # The file goes once no device is left. Counted again under the
         # writers' lock, so a key registered since the delete stays.
         with self._locked():
@@ -610,6 +620,8 @@ class HealthStore:
                     "SELECT id, name, last_seen, categories, tz, detailed FROM devices"
                     " WHERE last_seen IS NOT NULL AND (? IS NULL OR id=?) ORDER BY last_seen DESC",
                     (only, only)).fetchall():
+                if self.owner is not None and not shares_out(db, device_id):
+                    continue
                 metrics = {}
                 for metric, grain, first, last in db.execute(
                         "SELECT metric, grain, MIN(date), MAX(date) FROM buckets WHERE device=?"
@@ -636,6 +648,8 @@ class HealthStore:
         read, where another device's name must never stand in for it)."""
         rows = db.execute("SELECT id, name, last_seen FROM devices WHERE last_seen IS NOT NULL"
                           " ORDER BY last_seen DESC").fetchall()
+        if self.owner is not None:
+            rows = [row for row in rows if shares_out(db, row[0])]
         if exact:
             rows = [row for row in rows if row[0] == wanted]
             return (rows[0][0], rows[0][1], rows[0][2]) if rows else None
@@ -737,6 +751,48 @@ def _round(value: Any) -> Any:
 # --- Schema and batch apply -----------------------------------------------------------
 
 
+def store_for(home: Any, clock: Callable[[], float] = time.time) -> tuple[HealthStore, str | None]:
+    """The store this profile's tool reads, and the name of the profile it
+    belongs to when that's another one (None for its own): its own once a
+    device has synced here, else the one another profile paired with the
+    same iPhone shares with this host's other profiles (profile_sharing)."""
+    own = HealthStore(home, clock)
+    if _synced(own.path):
+        return own, None
+    found = profile_sharing.sharing_profile(home, lambda path: _synced(Path(path) / FILE_NAME, shared_out=True))
+    if found is None:
+        return own, None
+    name, path = found
+    return HealthStore(path, clock, owner=name), name
+
+
+def shares_out(db: sqlite3.Connection, device_id: str) -> bool:
+    """Whether the device lets this host's other profiles read its data
+    (kept in meta, so the schema stays readable by older plugins)."""
+    return _meta(db, OTHER_PROFILES_KEY + device_id) == "1"
+
+
+def _synced(path: Path, *, shared_out: bool = False) -> bool:
+    """Whether a device has synced into the store at ``path`` (sharing with
+    the other profiles too, with ``shared_out``). Read-only: never takes the
+    write lock, which may be another profile's."""
+    if not path.exists():
+        return False
+    try:
+        connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=5)
+    except sqlite3.DatabaseError:
+        return False
+    try:
+        if _meta(connection, "schema") != str(SCHEMA_VERSION):
+            return False
+        ids = [row[0] for row in connection.execute("SELECT id FROM devices WHERE last_seen IS NOT NULL")]
+        return any(not shared_out or shares_out(connection, device_id) for device_id in ids)
+    except sqlite3.DatabaseError:
+        return False
+    finally:
+        connection.close()
+
+
 def _meta(db: sqlite3.Connection, key: str) -> str | None:
     try:
         row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
@@ -830,6 +886,11 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     for field in ("categories", "detailed"):
         if not isinstance(_list_or_empty(batch, field), list):
             raise HealthError("malformed", f"{field} must be a list")
+    # "Share with this host's other profiles"; absent means unchanged, as
+    # for the categories.
+    other_profiles = batch.get("other_profiles")
+    if other_profiles is not None and not isinstance(other_profiles, bool):
+        raise HealthError("malformed", "other_profiles must be true or false")
     # Absent means "unchanged": a batch of only deletions keeps what the
     # device said it shares.
     categories = None if batch.get("categories") is None else [
@@ -910,6 +971,10 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
         removed += db.execute("DELETE FROM events WHERE device=? AND id=?", (device_id, event_id)).rowcount
         db.execute("INSERT OR IGNORE INTO tombstones VALUES(?,?,?)", (device_id, event_id, now))
 
+    if other_profiles is True:
+        db.execute("INSERT OR REPLACE INTO meta VALUES(?, '1')", (OTHER_PROFILES_KEY + device_id,))
+    elif other_profiles is False:
+        db.execute("DELETE FROM meta WHERE key=?", (OTHER_PROFILES_KEY + device_id,))
     db.execute("UPDATE devices SET last_seen=?, tz=COALESCE(?, tz), categories=COALESCE(?, categories),"
                " detailed=COALESCE(?, detailed) WHERE id=?",
                (now, tz, None if categories is None else json.dumps(categories),

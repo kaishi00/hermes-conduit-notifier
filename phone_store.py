@@ -79,7 +79,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from . import sealing, voice_readers
+from . import profile_sharing, sealing, voice_readers
 
 try:
     import fcntl
@@ -502,9 +502,15 @@ def _decode(value: Any, fallback: Any) -> Any:
 
 
 class PhoneStore:
-    def __init__(self, home: Any, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, home: Any, clock: Callable[[], float] = time.time, *, owner: str | None = None) -> None:
+        """``owner``: the profile this store belongs to, when another profile
+        reads it through "Share with this host's other profiles"
+        (store_for); its reads and changes then see only the devices that
+        turned that on."""
         self.path = Path(home) / FILE_NAME
         self.clock = clock
+        self.owner = owner
+        self.shared_only = owner is not None
 
     # Connections ---------------------------------------------------------------
 
@@ -946,7 +952,8 @@ class PhoneStore:
         now = int(self.clock())
         with self._write() as db:
             _expire(db, now)
-            device_id, device_name, sharing = _pick_device(db, device, change_need(kind), now=now)
+            device_id, device_name, sharing = _pick_device(db, device, change_need(kind), now=now,
+                                                           shared_only=self.shared_only)
             if db.execute("SELECT COUNT(*) FROM changes WHERE state='pending'").fetchone()[0] >= MAX_PENDING:
                 raise PhoneError("too_many_pending",
                                  f"{MAX_PENDING} changes are already waiting for the phone; wait for the user to "
@@ -994,7 +1001,8 @@ class PhoneStore:
         with self._read() as db:
             if db is None:
                 raise PhoneError("nothing_shared", f"No device shares {_NEED_WORDS[change_need(kind)]} with Hermes")
-            device_id, device_name, _ = _pick_device(db, device, change_need(kind), now=now)
+            device_id, device_name, _ = _pick_device(db, device, change_need(kind), now=now,
+                                                     shared_only=self.shared_only)
             clean_target, clean_fields, summary, collection = _checked(db, device_id, kind, fields, target, now)
             calendar = None
             if kind in CALENDAR_CHANGE_KINDS:
@@ -1034,9 +1042,11 @@ class PhoneStore:
         now = int(self.clock())
         with self._write() as db:
             _expire(db, now)
+            only, only_args = self._shared_devices(db)
             rows = db.execute(
                 f"SELECT {_CHANGE_COLUMNS}, devices.name FROM changes LEFT JOIN devices ON devices.id=changes.device"
-                " ORDER BY changes.created_at DESC, changes.rowid DESC LIMIT ?", (max(1, min(int(limit), 50)),)).fetchall()
+                f" WHERE 1{only} ORDER BY changes.created_at DESC, changes.rowid DESC LIMIT ?",
+                (*only_args, max(1, min(int(limit), 50)))).fetchall()
             found = [_change_view(row) for row in rows]
             # Only the outcomes shown here count as seen; older ones past the
             # window stay new for the next call.
@@ -1046,6 +1056,15 @@ class PhoneStore:
                            % ",".join("?" * len(shown)), (now, *shown))
         return found
 
+    def _shared_devices(self, db: sqlite3.Connection) -> tuple[str, tuple[str, ...]]:
+        """A condition on ``changes.device`` that keeps another profile's
+        reads to the devices sharing with it ("" for this profile's own)."""
+        if not self.shared_only:
+            return "", ()
+        ids = tuple(device_id for device_id, sharing in db.execute("SELECT id, sharing FROM devices")
+                    if _shares_out(_decode(sharing, {})))
+        return f" AND changes.device IN ({','.join('?' * len(ids)) or 'NULL'})", ids
+
     def unreported_outcomes(self) -> list[dict[str, Any]]:
         """Outcomes the agent hasn't seen yet, oldest first, marked seen."""
         if not self.path.exists():
@@ -1053,9 +1072,11 @@ class PhoneStore:
         now = int(self.clock())
         with self._write() as db:
             _expire(db, now)
+            only, only_args = self._shared_devices(db)
             rows = db.execute(
                 f"SELECT {_CHANGE_COLUMNS}, devices.name FROM changes LEFT JOIN devices ON devices.id=changes.device"
-                " WHERE state!='pending' AND reported_at IS NULL ORDER BY finished_at LIMIT 20").fetchall()
+                f" WHERE state!='pending' AND reported_at IS NULL{only} ORDER BY finished_at LIMIT 20",
+                only_args).fetchall()
             if rows:
                 db.execute("UPDATE changes SET reported_at=? WHERE id IN (%s)" % ",".join("?" * len(rows)),
                            (now, *[row[0] for row in rows]))
@@ -1176,6 +1197,8 @@ class PhoneStore:
             for device_id, name, last_seen, sharing, tz, window_from, window_to, status_at, focus_at in db.execute(
                     "SELECT id, name, last_seen, sharing, tz, window_from, window_to, status_at, focus_at"
                     f" FROM devices WHERE last_seen IS NOT NULL ORDER BY {_IN_TOUCH_ORDER}"):
+                if self.shared_only and not _shares_out(_decode(sharing, {})):
+                    continue
                 found.append({
                     "id": device_id, "name": name, "last_seen": last_seen, "sharing": _decode(sharing, {}),
                     "time_zone": tz, "window_from": window_from, "window_to": window_to,
@@ -1205,7 +1228,8 @@ class PhoneStore:
                 return
             try:
                 device_id, name, sharing = _pick_device(db, device, need, exact=exact,
-                                                        now=int(self.clock()) if for_change else None)
+                                                        now=int(self.clock()) if for_change else None,
+                                                        shared_only=self.shared_only)
             except PhoneError as error:
                 if error.code == "nothing_shared" and not exact:
                     yield None
@@ -1731,6 +1755,45 @@ def _expire(db: sqlite3.Connection, now: int) -> None:
                (now - FINISHED_KEPT_S,))
 
 
+def store_for(home: Any, clock: Callable[[], float] = time.time) -> tuple["PhoneStore", str | None]:
+    """The store this profile's tools read, and the name of the profile it
+    belongs to when that's another one (None for its own): its own once a
+    device has synced here, else the one another profile paired with the
+    same iPhone shares with this host's other profiles (profile_sharing)."""
+    own = PhoneStore(home, clock)
+    if _synced(own.path):
+        return own, None
+    found = profile_sharing.sharing_profile(home, lambda path: _synced(Path(path) / FILE_NAME, shared_out=True))
+    if found is None:
+        return own, None
+    name, path = found
+    return PhoneStore(path, clock, owner=name), name
+
+
+def _synced(path: Path, *, shared_out: bool = False) -> bool:
+    """Whether a device has synced into the store at ``path`` (sharing with
+    the other profiles too, with ``shared_out``). Read-only: never upgrades
+    the file or takes its write lock, which may be another profile's."""
+    if not path.exists():
+        return False
+    try:
+        connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=5)
+    except sqlite3.DatabaseError:
+        return False
+    try:
+        rows = connection.execute("SELECT sharing FROM devices WHERE last_seen IS NOT NULL").fetchall()
+    except sqlite3.DatabaseError:
+        return False
+    finally:
+        connection.close()
+    return any(not shared_out or _shares_out(_decode(row[0], {})) for row in rows)
+
+
+def _shares_out(sharing: Any) -> bool:
+    """A device's sharing lets this host's other profiles read it."""
+    return isinstance(sharing, dict) and sharing.get("other_profiles") is True
+
+
 def shares(sharing: dict[str, Any], need: str) -> bool:
     calendar = sharing.get("calendar")
     if need == "events":
@@ -1782,14 +1845,17 @@ def _read_only(sharing: dict[str, Any], need: str) -> PhoneError | None:
     return None
 
 
-def _pick_device(db: sqlite3.Connection, wanted: Any, need: str,
-                 exact: bool = False, now: int | None = None) -> tuple[str, str, dict[str, Any]]:
+def _pick_device(db: sqlite3.Connection, wanted: Any, need: str, exact: bool = False, now: int | None = None,
+                 shared_only: bool = False) -> tuple[str, str, dict[str, Any]]:
     """The device a read or a change is for. Unnamed, it's the device in use:
     the one that checked in (``status``) or uploaded most recently. ``now``
     (for a change) also refuses to stand another device in for one that is
-    still setting up after a new key."""
+    still setting up after a new key. ``shared_only``: only the devices that
+    share with this host's other profiles (another profile is reading)."""
     rows = [(row[0], row[1], _decode(row[2], {})) for row in db.execute(
         f"SELECT id, name, sharing FROM devices WHERE last_seen IS NOT NULL ORDER BY {_IN_TOUCH_ORDER}")]
+    if shared_only:
+        rows = [row for row in rows if _shares_out(row[2])]
     if exact:
         # Another device's name must never stand in for this one.
         named = [row for row in rows if row[0] == wanted]
@@ -1824,6 +1890,8 @@ def _pick_device(db: sqlite3.Connection, wanted: Any, need: str,
         for name, last_seen, created_at, sharing, prior_sharing, last_contact in db.execute(
                 "SELECT name, last_seen, created_at, sharing, prior_sharing, last_contact FROM devices"
                 f" ORDER BY {_IN_TOUCH_ORDER}"):
+            if shared_only and not _shares_out(_decode(sharing if last_seen is not None else prior_sharing, {})):
+                continue
             if last_seen is not None:
                 if shares(_decode(sharing, {}), need):
                     break
@@ -1865,7 +1933,8 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
         raise PhoneError("malformed", f"sharing.calendar must be one of {', '.join(CALENDAR_SHARING)}")
     sharing: dict[str, Any] = {"calendar": calendar}
     for field in ("reminders", "details", "attendee_emails", "status", "focus", "auto_add", "alarms", "contacts",
-                  "shortcuts", "shortcuts_auto", "contacts_edit", "photos", "turn_status", *READ_ONLY_SHARING):
+                  "shortcuts", "shortcuts_auto", "contacts_edit", "photos", "turn_status", "other_profiles",
+                  *READ_ONLY_SHARING):
         sharing[field] = bool(_bool(value.get(field), f"sharing.{field}", False))
     # Add-only and read-only leaves nothing; read-only reminders need reminders.
     if sharing["calendar"] == "write_only" and sharing["calendar_read_only"]:
