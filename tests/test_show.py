@@ -330,7 +330,7 @@ def test_cards_wrapped_another_way_are_still_drawn(tool_home):
                   [json.dumps([STATS])], [json.dumps(STATS)], {"cards": [json.dumps([STATS])]}):
         answer = _call({"title": "Today", "cards": given})
         assert answer["ok"] is True and answer["cards"] == [STATS], given
-    assert _call({"title": "Today", "cards": "[not json"})["error"] == "invalid_cards"
+    assert _call({"title": "Today", "cards": "[not json"})["error"] == "cards_not_json", "says the JSON is broken"
     assert _call({"title": "Today", "cards": "[" * 100_000})["error"] == "invalid_cards", "too deep to parse"
     deep = _call({"title": "Today", "cards": [[[[[[[[[[[STATS]]]]]]]]]]]})
     assert deep["error"] == "invalid_cards", "too deep to open"
@@ -889,3 +889,61 @@ def test_the_model_draws_cards_only_when_they_help():
     # The user's wishes stand as their own sentence, not inside the "never" list.
     assert "a few points. When the user has said how they want cards used" in tool.SCHEMA["description"]
     assert "bullet points. When the user has said how they want cards used" in " ".join(skill.split())
+
+
+FRENCH_ITEMS = ["Le CLAC de la pédale: par le plancher, pas par l'air. Le seul bruit qu'un voisin entend",
+                "Le « toud » doux des mailles: plus faible qu’une télé", 'Les cymbales "low volume": atténuées']
+FRENCH_CHECKLIST = {"type": "checklist", "title": "Le bruit quand tu pratiques",
+                    "checklist": [{"text": text} for text in FRENCH_ITEMS]}
+
+
+@pytest.mark.parametrize("cards", [[FRENCH_CHECKLIST], json.dumps([FRENCH_CHECKLIST]),
+                                   json.dumps([FRENCH_CHECKLIST], ensure_ascii=False)],
+                         ids=["array", "ascii-json-string", "utf8-json-string"])
+def test_french_quotes_and_accents_reach_the_card_as_written(tool_home, cards):
+    _exchange(PresentStore(tool_home), features=("show-cards", "board-cards"))
+    answer = _call({"title": "Bruit", "cards": cards})
+    assert answer["ok"] is True
+    assert [item["text"] for item in answer["cards"][0]["checklist"]] == FRENCH_ITEMS, \
+        "' \" « » ’ and accents are kept as written"
+    [card] = _exchange(PresentStore(tool_home))["cards"]
+    assert "qu'un voisin" in card["markdown"] and "« toud »" in card["markdown"] and "atténuées" in card["markdown"]
+
+
+def test_a_cards_string_that_doesnt_parse_says_where(tool_home):
+    """Angelos's broken call (2026-11-22): cards as a JSON string with a } missing.
+    The answer said only that each card needs a type, so he blamed the French
+    quotes and sent the card again without apostrophes or accents."""
+    _exchange(PresentStore(tool_home), features=("show-cards", "board-cards"))
+    broken = json.dumps([{"type": "callout", "callout": {"text": "Bon choix"}}, FRENCH_CHECKLIST],
+                        ensure_ascii=False).replace("}}, {", "}, {", 1)
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(broken)
+    # Hermes's coerce_tool_args wraps a JSON array string it can't parse as
+    # [string] before the plugin sees it; both shapes say where it broke.
+    for given in (broken, [broken]):
+        answer = _call({"title": "Bruit", "cards": given})
+        assert answer["ok"] is False and answer["error"] == "cards_not_json", given
+        assert "not a string" in answer["note"] and "accents" in answer["note"]
+        [where] = [problem for problem in answer["problems"] if problem.startswith("cards: sent as a JSON string")]
+        assert "at character" in where and "near:" in where and "not a string" in where
+    assert "cards" not in _exchange(PresentStore(tool_home)), "nothing reaches the phone"
+
+
+def test_cards_that_parse_but_are_invalid_keep_the_old_answer(tool_home):
+    _exchange(PresentStore(tool_home), features=("show-cards", "board-cards"))
+    answer = _call({"title": "Bruit", "cards": json.dumps([{"type": "checklist"}])})
+    assert answer["error"] == "invalid_cards"
+    assert not any(problem.startswith("cards: sent as a JSON string") for problem in answer["problems"])
+
+
+def test_a_broken_string_beside_a_good_card_names_its_place(tool_home):
+    """Review on #1006: a broken string next to a card that's drawn isn't
+    "nothing shown"; the note says which card it was and that only its cards
+    were left out."""
+    _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
+    answer = _call({"title": "Today", "cards": [STATS, "[{\"type\": \"callout\""]})
+    assert answer["ok"] is True and answer["cards"] == [STATS]
+    [where] = [problem for problem in answer["problems"] if tool.CARDS_NOT_JSON_MARK in problem]
+    assert where.startswith("cards[1]: sent as a JSON string") and "its cards left out" in where
+    assert "nothing shown" not in where

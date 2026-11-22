@@ -117,7 +117,8 @@ SCHEMA: dict[str, Any] = {
             "markdown": {"type": "string", "maxLength": MAX_CARD_MARKDOWN_CHARS,
                          "description": f"What to show, as Markdown (up to {MAX_CARD_MARKDOWN_CHARS} characters). "
                                         "Leave it out when cards say it all."},
-            "cards": card_schema.tool_parameter("Cards for Conduit to draw, shown above the Markdown.",
+            "cards": card_schema.tool_parameter("Cards for Conduit to draw, shown above the Markdown: an array of "
+                                                "card objects, not a JSON string.",
                                                 {"template": card_templates.TEMPLATE_INPUT}),
             "from_work": {"type": "string",
                           "description": "In a Bot Chat: a workstream's ref (\"W3\") whose update says it showed "
@@ -378,6 +379,9 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     cards = card_schema.normalize_cards(given, problems)
     if args.get("cards") not in (None, []) and not cards:
         _drop_unshown(reviews, kept, [])
+        if any(CARDS_NOT_JSON_MARK in problem for problem in problems):
+            return {"ok": False, "error": "cards_not_json", "note": CARDS_NOT_JSON_ERROR_NOTE,
+                    "problems": problems[:20], **({"saved": saved} if saved else {})}
         return {"ok": False, "error": "invalid_cards", "note": INVALID_CARDS_NOTE, "problems": problems[:20],
                 **({"saved": saved} if saved else {})}
     if saved and not cards and not (isinstance(args.get("markdown"), str) and args["markdown"].strip()):
@@ -701,11 +705,31 @@ def _review_decision(raw: Any, where: str, problems: list[str]) -> tuple[dict[st
 # How deep _cards_unwrapped opens wrappers: past this the cards are refused.
 _MAX_CARD_WRAPS = 8
 
+# Both the note and the check for cards_not_json use the mark, so a reword
+# of the note can't quietly turn that answer back into invalid_cards.
+CARDS_NOT_JSON_MARK = "sent as a JSON string that doesn't parse"
+CARDS_NOT_JSON_NOTE = ("{where}: " + CARDS_NOT_JSON_MARK + " ({error}, near: {near}), its cards left out. "
+                       "Send cards as an array of card objects, not a string. Quotes, apostrophes and accents "
+                       "are fine as they are; check that every {{ and [ is closed")
+CARDS_NOT_JSON_ERROR_NOTE = ("No card was shown: cards came as a JSON string that doesn't parse (its problems say "
+                             "where). Send cards as an array of card objects, not a string, and keep the text as "
+                             "written: quotes, apostrophes and accents need no change.")
+_NEAR_CHARS = 40
+
+
+def _not_json_note(text: str, error: json.JSONDecodeError, where: str) -> str:
+    """Where a cards string stops parsing, for the model to fix that spot
+    instead of guessing: Angelos blamed French quotes and stripped every
+    apostrophe and accent, when a } was missing (2026-11-22)."""
+    near = text[max(0, error.pos - _NEAR_CHARS):error.pos + _NEAR_CHARS].replace("\n", " ")
+    return CARDS_NOT_JSON_NOTE.format(where=where, error=f"{error.msg} at character {error.pos}", near=json.dumps(near, ensure_ascii=False))
+
+
 CARD_WRAPS_NOTE = ("cards: wrapped more than {depth} deep (lists, JSON strings or {{\"cards\": ...}} "
                    "inside each other), the cards inside left out; send them as one list")
 
 
-def _cards_unwrapped(given: Any, problems: list[str] | None = None, depth: int = 0) -> Any:
+def _cards_unwrapped(given: Any, problems: list[str] | None = None, depth: int = 0, where: str = "cards") -> Any:
     """The cards as the list the schema asks for, however a model wrapped
     them: a list sent as a JSON string, one card on its own, a
     ``{"cards": ...}`` wrapper, or the list inside another list
@@ -721,24 +745,32 @@ def _cards_unwrapped(given: Any, problems: list[str] | None = None, depth: int =
     if _is_card_json(given):
         try:
             given = json.loads(given)
+        except json.JSONDecodeError as error:
+            if problems is not None:
+                problems.append(_not_json_note(given, error, where))
+            return given
         except (ValueError, RecursionError):
             return given
     if isinstance(given, dict):
         if _is_cards_wrapper(given):
-            return _cards_unwrapped(given["cards"], problems, depth + 1)
+            return _cards_unwrapped(given["cards"], problems, depth + 1, where)
         return [given]
     if not isinstance(given, list):
         return given
     cards: list[Any] = []
-    for item in given:
+    # Hermes sends a cards string it can't parse as [string]: that one item
+    # is still "cards" to the model, not cards[0].
+    alone = depth == 0 and len(given) == 1
+    for index, item in enumerate(given):
+        item_where = where if alone else f"{where}[{index}]"
         if isinstance(item, list) or _is_card_json(item) or (isinstance(item, dict) and _is_cards_wrapper(item)):
             if depth + 1 > _MAX_CARD_WRAPS:
                 # Left as it is, never spliced in: what the note says was
                 # left out isn't drawn.
-                _cards_unwrapped(item, problems, depth + 1)
+                _cards_unwrapped(item, problems, depth + 1, item_where)
                 cards.append(item)
                 continue
-            opened = _cards_unwrapped(item, problems, depth + 1)
+            opened = _cards_unwrapped(item, problems, depth + 1, item_where)
             cards.extend(opened if isinstance(opened, list) else [opened])
         else:
             cards.append(item)

@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.193.9 (2026-11-22)
+
+### Fixes
+
+- When your agent sent a card's contents as broken JSON text, it was only told the card was invalid, so it guessed at quotes or accents and sent the card again with apostrophes and accents removed. It now hears where the JSON broke and to send the cards as a list, keeping the text as written.
+
 ## 0.193.8 (2026-11-22)
 
 ### Fixes
