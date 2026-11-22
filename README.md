@@ -3506,7 +3506,7 @@ timers Hermes set) and `conduit_contacts` (`people`) joins the list, each once
 a phone shares it; setting an alarm or timer in a call is the phone's own tool
 too.
 
-### Signed-in voice reads (plugin 0.194.1+)
+### Signed-in voice reads (plugin 0.194.2+)
 
 Conduit for desktop's live calls are signed in to the dashboard but have no
 device key to seal with. So the phone also tells the host, inside each

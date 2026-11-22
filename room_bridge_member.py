@@ -58,6 +58,9 @@ MAX_BACKOFF_S = 300
 PASS = "(pass)"
 NOTICE = "I've used all my turns in this room for today, so I'll sit out until tomorrow."
 FAILED = "The turn failed on this agent's Hermes."
+OUT_OF_CREDIT = "This agent's model provider is out of credit, so it can't answer until its owner tops it up."
+RATE_LIMITED = "This agent's model provider is rate limiting it. Try again in a little while."
+KEY_REFUSED = "This agent's model provider refused its API key."
 CAPPED = "This agent's Hermes stopped the turn after 10 minutes."
 RESTARTED = "This agent's Hermes restarted during the turn."
 STOPPED = "The turn was stopped on this agent's Hermes."
@@ -633,7 +636,7 @@ def _shown(answer: Any, *, home_stopped: bool) -> Optional[dict]:
         return {"status": "completed",
                 "output": room_bridge.cut(output if isinstance(output, str) else "", MAX_OUTPUT_BYTES)}
     if status == "failed":
-        return {"status": "failed", "error": FAILED}
+        return {"status": "failed", "error": _failure(answer.get("error"))}
     if status in ("interrupted", "unknown"):
         # Hermes interrupts a run only when it restarts or shuts down.
         return {"status": "interrupted", "error": RESTARTED}
@@ -642,6 +645,29 @@ def _shown(answer: Any, *, home_stopped: bool) -> Optional[dict]:
     # A state this plugin doesn't know is one Hermes' client wouldn't: the
     # run's still on, until it ends or the cap stops it.
     return {"status": status if status in room_bridge.ACTIVE else "running"}
+
+
+# What a failed run's error says, read for its kind only: Hermes writes the
+# provider's refusal into it ("HTTP 429: Insufficient balance ..."), and the
+# home hears one of these fixed sentences, never the text. Credit comes
+# before rate limits, since providers send a spent balance as a 429 too.
+_FAILURE_KINDS = (
+    (OUT_OF_CREDIT, re.compile(
+        r"insufficient[ _](balance|credit|funds|quota)|out of credit|no resource package|recharge|top[ -]?up"
+        r"|billing|payment required|\bhttp 402\b|credit balance|exceeded your current quota", re.I)),
+    (KEY_REFUSED, re.compile(r"\bhttp 401\b|invalid[ _]api[ _]key|incorrect api key|authentication[ _]failed"
+                             r"|unauthori[sz]ed", re.I)),
+    (RATE_LIMITED, re.compile(r"\bhttp 429\b|rate[ _-]?limit|too many requests", re.I)),
+)
+
+
+def _failure(error: Any) -> str:
+    """The fixed sentence for a failed run's error: why, when it's the model provider's refusal."""
+    if isinstance(error, str):
+        for sentence, pattern in _FAILURE_KINDS:
+            if pattern.search(error[:4096]):
+                return sentence
+    return FAILED
 
 
 def _error(code: str) -> dict:
