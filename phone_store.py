@@ -1061,8 +1061,11 @@ class PhoneStore:
         reads to the devices sharing with it ("" for this profile's own)."""
         if not self.shared_only:
             return "", ()
-        ids = tuple(device_id for device_id, sharing in db.execute("SELECT id, sharing FROM devices")
-                    if _shares_out(_decode(sharing, {})))
+        # A re-keyed device (sharing cleared until its next batch) keeps what it
+        # shared before, as the change path does (_pick_device), so the
+        # changes this profile queued through it stay in its view meanwhile.
+        ids = tuple(device_id for device_id, sharing, prior in db.execute("SELECT id, sharing, prior_sharing FROM devices")
+                    if _shares_out(_decode(sharing if sharing is not None else prior, {})))
         return f" AND changes.device IN ({','.join('?' * len(ids)) or 'NULL'})", ids
 
     def unreported_outcomes(self) -> list[dict[str, Any]]:

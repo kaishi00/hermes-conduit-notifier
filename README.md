@@ -3526,8 +3526,10 @@ device that allows them, the last one synced:
 
 Each store is read as its agent tool reads it, through another profile's
 store when that one shares with this host's other profiles, and each read, the briefing's
-included, is logged as that mode's call. A bad `reader` is a 400. The plugin
-reports `voice-readers`.
+included, is logged as that mode's call: in the store's read log where it
+keeps one (location, under `<profile>: <mode> call` when another profile
+read it), and in the host's log for every read. A bad `reader` is a 400. The
+plugin reports `voice-readers`.
 
 ## Events from Shortcuts automations (plugin 0.73+)
 

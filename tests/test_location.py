@@ -1418,6 +1418,22 @@ def test_a_signed_in_calls_briefing_says_where_the_user_is_at_their_detail(voice
     assert client.get(f"{BASE}/voice-context", params={"reader": "qwen-live"}).json()["context"] == ""
 
 
+def test_a_signed_in_read_of_another_profiles_location_names_the_reading_profile(voice, tmp_path):
+    client, _ = voice
+    work = tmp_path / "profiles" / "work"
+    _paired(tmp_path)
+    _paired(work)
+    store, _ = _shared(work, fix=fix(), sharing=sharing(other_profiles=True, voice_readers=["gpt-live"]))
+    assert "in Shoreditch" in client.get(f"{BASE}/voice-context", params={"reader": "gpt-live"}).json()["context"]
+    # Logged in the sharing profile's store under the one that read, as the agent's reads are.
+    assert store.reads()[0]["session_title"] == "default: GPT-Live call"
+    read = client.post(f"{BASE}/voice-tools/read", json={"reader": "gpt-live", "tool": "conduit_location",
+                                                        "args": {"action": "now"}})
+    assert read.status_code == 200 and read.json()["result"]["ok"] is True
+    assert store.reads()[0]["session_title"] == "default: GPT-Live call"
+    assert len(store.reads()) == 2
+
+
 def test_a_fix_with_no_place_or_area_gives_the_briefing_no_point_on_the_map(voice):
     client, store = voice
     _voice_phone(store, fix=fix(area=None), sharing=sharing(background_precision="precise", voice_readers=["gpt-live"]))

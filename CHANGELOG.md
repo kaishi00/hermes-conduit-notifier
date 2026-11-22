@@ -13,6 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.194.4 (2026-11-22)
+
+### Fixes
+
+- When another profile's call on your computer reads where you are, Location's read log now names that profile, as it does for its chats.
+- A change another profile asked your phone for no longer drops out of its view while your phone sets up its connection again.
+
+### New and improved
+
+- A computer call's look at your phone's battery and Focus is now recorded in the host's log, like its other reads.
+
 ## 0.194.3 (2026-11-22)
 
 ### New and improved

@@ -329,41 +329,52 @@ def _reader(value: Any) -> str:
 
 def _signed_in_sources(reader: str) -> Dict[str, Tuple[Any, Any, str]]:
     """Per sealed key ("location", "health", "phone"): the store, the module
-    that reads it, and the device whose user lets ``reader`` read it. Keys no
-    device allows are left out; one that can't be read is logged and left out."""
-    sources: Dict[str, Tuple[Any, Any, str]] = {}
+    that reads it, the device whose user lets ``reader`` read it, and this
+    profile's name when the store is another profile's ("" for its own), so
+    a read is logged there under this one. Keys no device allows are left
+    out; one that can't be read is logged and left out."""
+    sources: Dict[str, Tuple[Any, Any, str, str]] = {}
     home = core._calls_home()
     for tool, store_class, _, key in _voice_tool_modules().values():
         try:
             if key == "location":
                 # As the agent's tool reads it: another profile's store when
                 # that one shares with this profile.
-                store, _owner = core._plugin_package_module("location_profiles").store_for(home, store_class)
+                store, owner = core._plugin_package_module("location_profiles").store_for(home, store_class)
             else:
                 # Another profile's health too, when that one shares it with
                 # this host's other profiles, as the agent's tool reads it.
-                store, _owner = core._plugin_package_module("health_store").store_for(home)
+                store, owner = core._plugin_package_module("health_store").store_for(home)
             device_id = store.voice_reader_device(reader)
         except Exception:  # noqa: BLE001
             logger.warning("Conduit signed-in voice reads: %s unavailable", key, exc_info=True)
             continue
         if device_id:
-            sources[key] = (store, tool, device_id)
+            sources[key] = (store, tool, device_id, _reading_profile(home) if owner is not None else "")
     try:
         phone = core._plugin_package_module("phone_tool")
-        store, _owner = core._plugin_package_module("phone_store").store_for(home)
+        store, owner = core._plugin_package_module("phone_store").store_for(home)
         device_id = store.voice_reader_device(reader)
         if device_id:
-            sources["phone"] = (store, phone, device_id)
+            sources["phone"] = (store, phone, device_id, _reading_profile(home) if owner is not None else "")
     except Exception:  # noqa: BLE001
         logger.warning("Conduit signed-in voice reads: phone unavailable", exc_info=True)
     return sources
 
 
+def _reading_profile(home: Any) -> str:
+    """This profile's name, for the log of another profile's store."""
+    try:
+        return str(core._plugin_package_module("room_setup").profile_name(Path(home)))
+    except Exception:  # noqa: BLE001 — the read is still logged, by its mode
+        logger.debug("Conduit signed-in voice reads: no profile name", exc_info=True)
+        return ""
+
+
 def signed_in_voice_tools(reader: str) -> Dict[str, Any]:
     reader = _reader(reader)
     tools: List[Dict[str, Any]] = []
-    for key, (store, module, device_id) in _signed_in_sources(reader).items():
+    for key, (store, module, device_id, _) in _signed_in_sources(reader).items():
         if key == "phone":
             for name, entry in module.voice_tools(store, device_id).items():
                 tools.append({"name": name, "key": key, **entry})
@@ -380,13 +391,16 @@ def signed_in_voice_read(body: Any) -> Dict[str, Any]:
     name, args = body.get("tool"), body.get("args")
     if not isinstance(name, str) or not name:
         raise core.TokenError(400, "Expected a tool name")
-    for key, (store, module, device_id) in _signed_in_sources(reader).items():
+    for key, (store, module, device_id, reading) in _signed_in_sources(reader).items():
         if key == "phone":
             if name in module.voice_tools(store, device_id):
                 logger.info("Conduit signed-in voice read: %s for %s", name, reader)
                 return {"result": module.voice_handle(name, args, device_id=device_id, store=store)}
         elif name == module.TOOL_NAME:
             logger.info("Conduit signed-in voice read: %s for %s", name, reader)
+            if key == "location":
+                return {"result": module.voice_handle(args, device_id=device_id, store=store, provider=reader,
+                                                      profile=reading)}
             return {"result": module.voice_handle(args, device_id=device_id, store=store, provider=reader)}
     raise core.TokenError(404, "The user doesn't let this voice mode read that here")
 
@@ -396,11 +410,15 @@ def signed_in_voice_context(reader: str) -> Dict[str, Any]:
     sources = _signed_in_sources(reader)
     lines = []
     if "location" in sources:
-        store, module, device_id = sources["location"]
-        lines.append(module.voice_context(store, device_id, reader))
+        store, module, device_id, reading = sources["location"]
+        lines.append(module.voice_context(store, device_id, reader, profile=reading))
     if "phone" in sources:
-        store, module, device_id = sources["phone"]
-        lines.append(module.voice_context(store, device_id))
+        store, module, device_id, _ = sources["phone"]
+        line = module.voice_context(store, device_id)
+        if line:
+            # The phone keeps no read log of its own: the host's log records it, as a read does.
+            logger.info("Conduit signed-in voice context: phone status for %s", reader)
+        lines.append(line)
     return {"context": "\n".join(line for line in lines if line)}
 
 
