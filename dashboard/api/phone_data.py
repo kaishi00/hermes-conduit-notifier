@@ -306,14 +306,131 @@ async def _voice_tools_route(response: Response, profile: Optional[str], fn: Cal
         raise core._unexpected(name, exc, feature="Voice tools")
 
 
+# --- Signed-in voice reads (Conduit for desktop) ------------------------------
+#
+# A call that is only signed in to the dashboard, Conduit for desktop's, has
+# no device key to seal with. The phone tells the host, in each store's sealed
+# sharing, which voice modes the user lets read that data (``voice_readers``,
+# the same per-mode choice its own calls follow), and the host answers such a
+# call for those modes alone, from the device that allows it: GET
+# /voice-tools?reader= lists, POST /voice-tools/read reads, and GET
+# /voice-context gives the call's start a line on where the user is and their
+# phone's state. Location is read as the agent's tool reads it, through
+# another profile's store when that one shares with this profile.
+# (Eric 2026-11-22: location in a call's briefing, and the phone's data
+# tools on desktop calls.)
+
+def _reader(value: Any) -> str:
+    voice_readers = core._plugin_package_module("voice_readers")
+    if not isinstance(value, str) or value not in voice_readers.VOICE_READERS:
+        raise core.TokenError(400, "reader must be one of " + ", ".join(voice_readers.VOICE_READERS))
+    return value
+
+
+def _signed_in_sources(reader: str) -> Dict[str, Tuple[Any, Any, str]]:
+    """Per sealed key ("location", "health", "phone"): the store, the module
+    that reads it, and the device whose user lets ``reader`` read it. Keys no
+    device allows are left out; one that can't be read is logged and left out."""
+    sources: Dict[str, Tuple[Any, Any, str]] = {}
+    home = core._calls_home()
+    for tool, store_class, _, key in _voice_tool_modules().values():
+        try:
+            if key == "location":
+                # As the agent's tool reads it: another profile's store when
+                # that one shares with this profile.
+                store, _owner = core._plugin_package_module("location_profiles").store_for(home, store_class)
+            else:
+                # Another profile's health too, when that one shares it with
+                # this host's other profiles, as the agent's tool reads it.
+                store, _owner = core._plugin_package_module("health_store").store_for(home)
+            device_id = store.voice_reader_device(reader)
+        except Exception:  # noqa: BLE001
+            logger.warning("Conduit signed-in voice reads: %s unavailable", key, exc_info=True)
+            continue
+        if device_id:
+            sources[key] = (store, tool, device_id)
+    try:
+        phone = core._plugin_package_module("phone_tool")
+        store, _owner = core._plugin_package_module("phone_store").store_for(home)
+        device_id = store.voice_reader_device(reader)
+        if device_id:
+            sources["phone"] = (store, phone, device_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit signed-in voice reads: phone unavailable", exc_info=True)
+    return sources
+
+
+def signed_in_voice_tools(reader: str) -> Dict[str, Any]:
+    reader = _reader(reader)
+    tools: List[Dict[str, Any]] = []
+    for key, (store, module, device_id) in _signed_in_sources(reader).items():
+        if key == "phone":
+            for name, entry in module.voice_tools(store, device_id).items():
+                tools.append({"name": name, "key": key, **entry})
+        elif module.voice_shared(store, device_id):
+            tools.append({"name": module.TOOL_NAME, "key": key, "description": module.voice_description(),
+                          "parameters": module.voice_parameters()})
+    return {"tools": tools}
+
+
+def signed_in_voice_read(body: Any) -> Dict[str, Any]:
+    if not isinstance(body, dict):
+        raise core.TokenError(400, "Expected a JSON object")
+    reader = _reader(body.get("reader"))
+    name, args = body.get("tool"), body.get("args")
+    if not isinstance(name, str) or not name:
+        raise core.TokenError(400, "Expected a tool name")
+    for key, (store, module, device_id) in _signed_in_sources(reader).items():
+        if key == "phone":
+            if name in module.voice_tools(store, device_id):
+                logger.info("Conduit signed-in voice read: %s for %s", name, reader)
+                return {"result": module.voice_handle(name, args, device_id=device_id, store=store)}
+        elif name == module.TOOL_NAME:
+            logger.info("Conduit signed-in voice read: %s for %s", name, reader)
+            return {"result": module.voice_handle(args, device_id=device_id, store=store, provider=reader)}
+    raise core.TokenError(404, "The user doesn't let this voice mode read that here")
+
+
+def signed_in_voice_context(reader: str) -> Dict[str, Any]:
+    reader = _reader(reader)
+    sources = _signed_in_sources(reader)
+    lines = []
+    if "location" in sources:
+        store, module, device_id = sources["location"]
+        lines.append(module.voice_context(store, device_id, reader))
+    if "phone" in sources:
+        store, module, device_id = sources["phone"]
+        lines.append(module.voice_context(store, device_id))
+    return {"context": "\n".join(line for line in lines if line)}
+
+
+@router.get("/voice-context")
+async def get_voice_context(response: Response, reader: Optional[str] = None,
+                            profile: Optional[str] = None) -> Dict[str, Any]:
+    """A signed-in call's opening facts, for the modes the user allows."""
+    await core._scoped_acquire(_voice_tools_limiter, profile)
+    return await _voice_tools_route(response, profile, lambda: signed_in_voice_context(reader), "context")
+
+
+@router.post("/voice-tools/read")
+async def post_voice_tools_read(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    await core._scoped_acquire(_voice_tools_limiter, profile)
+    body = await core._read_json_body(request, VOICE_TOOLS_MAX_BODY_BYTES)
+    return await _voice_tools_route(response, profile, lambda: signed_in_voice_read(body), "read")
+
+
 @router.get("/voice-tools")
 async def get_voice_tools(response: Response, profile: Optional[str] = None, health_device: Optional[str] = None,
                           location_device: Optional[str] = None,
-                          phone_device: Optional[str] = None) -> Dict[str, Any]:
+                          phone_device: Optional[str] = None, reader: Optional[str] = None) -> Dict[str, Any]:
     """The tools a call may use. Conduit names its own device in each store
     (``*_device``), so it's offered only what that device's reads can answer."""
     response.headers["Cache-Control"] = "no-store"
     await core._scoped_acquire(_voice_tools_limiter, profile)
+    if reader is not None:
+        # A signed-in call (Conduit for desktop): only what the user lets its
+        # mode read.
+        return await _voice_tools_route(response, profile, lambda: signed_in_voice_tools(reader), "list")
     devices = {"health": health_device, "location": location_device, "phone": phone_device}
     return await _voice_tools_route(response, profile, lambda: voice_tools_list(devices), "list")
 

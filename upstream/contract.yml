@@ -805,8 +805,10 @@ routes:
   - POST /speech-server/test
   - POST /turn-surface
   - POST /turn-surface/discard
+  - GET /voice-context
   - GET /voice-tools
   - POST /voice-tools/call
+  - POST /voice-tools/read
   - POST /voice/archive
   - GET /voice/chat-calls
   - POST /voice/sessions

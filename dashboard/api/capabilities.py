@@ -166,6 +166,11 @@ ROUTE_CAPABILITIES = (
     "present-v1",
     "health-sync",
     "voice-tools",
+    # sharing.voice_readers in the location and phone stores, a health batch's
+    # "voice_readers", and the signed-in reads they allow: GET
+    # /voice-tools?reader=, POST /voice-tools/read and GET /voice-context
+    # (Conduit for desktop's calls).
+    "voice-readers",
     "phone-sync",
     "phone-alarms",
     "phone-contacts",

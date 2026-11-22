@@ -1444,6 +1444,28 @@ def test_the_phone_state_goes_with_a_turn_only_when_the_user_lets_it(home):
     assert "% battery" not in note and "Work Focus on" in note
 
 
+def test_a_signed_in_calls_briefing_gets_the_phone_state_for_the_modes_the_user_lets(home):
+    store = phone.PhoneStore(home.path, clock=lambda: float(NOW))
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_batch(sharing=_sharing(voice_readers=["gemini-live"]),
+                                     status={"at": "2026-10-14T08:00:00+01:00", "battery": 0.4, "carplay": True})))
+    assert store.voice_reader_device("gemini-live") == DEVICE
+    assert store.voice_reader_device("grok-live") is None
+    line = tool.voice_context(store, DEVICE)
+    assert line.startswith("The user's phone") and "40% battery" in line and "connected to CarPlay" in line
+    # Turning the mode off on the phone takes it back with the next batch.
+    store.ingest(handset.seal(_batch(batch_id="batch-0002", sent_at="2026-10-14T08:00:01+01:00")))
+    assert store.voice_reader_device("gemini-live") is None
+
+
+def test_a_narrowing_batch_never_adds_a_voice_reader():
+    assert phone._narrowed({"voice_readers": ["gemini-live"]},
+                           phone._parse_sharing(_sharing(voice_readers=["gemini-live", "grok-live"])))[
+        "voice_readers"] == ["gemini-live"]
+    assert phone._narrowed({}, phone._parse_sharing(_sharing(voice_readers=["gemini-live"])))["voice_readers"] == []
+
+
 def test_turn_status_needs_status_or_focus_shared():
     assert phone._parse_sharing(_sharing(turn_status=True))["turn_status"] is True
     assert phone._parse_sharing(_sharing(turn_status=True, status=False, focus=False))["turn_status"] is False
@@ -1509,6 +1531,26 @@ def test_routes_round_trip(client):
     assert http.post(f"{BASE}/phone/wipe", json={"all": True, "device_id": DEVICE}).status_code == 400
     assert http.post(f"{BASE}/phone/wipe", json={"device_id": DEVICE}).json()["remaining_devices"] == 0
     assert http.get(f"{BASE}/phone/status").json()["stored"] is False
+
+
+def test_a_signed_in_call_reads_the_phone_only_for_the_modes_it_names(client):
+    http = client.http
+    handset = Phone()
+    handset.accept(http.post(f"{BASE}/phone/key", json=handset.key_request()).json())
+    batch = _batch(sent_at=datetime.now(timezone.utc).isoformat(), sharing=_sharing(voice_readers=["grok-live"]))
+    assert http.post(f"{BASE}/phone/ingest", json=handset.seal(batch)).status_code == 200
+    listed = lambda reader: [tool["name"] for tool in  # noqa: E731
+                             http.get(f"{BASE}/voice-tools", params={"reader": reader}).json()["tools"]]
+    names = listed("grok-live")
+    assert names and all(name.startswith("conduit_") for name in names)
+    assert listed("gemini-live") == []
+    read = http.post(f"{BASE}/voice-tools/read", json={"reader": "grok-live", "tool": names[0], "args": {}})
+    assert read.status_code == 200 and "result" in read.json()
+    refused = http.post(f"{BASE}/voice-tools/read", json={"reader": "gemini-live", "tool": names[0], "args": {}})
+    assert refused.status_code == 404
+    for tool_name in ([], {"a": 1}, None, ""):
+        bad = http.post(f"{BASE}/voice-tools/read", json={"reader": "grok-live", "tool": tool_name, "args": {}})
+        assert bad.status_code == 400, tool_name
 
 
 def test_body_caps(client):

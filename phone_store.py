@@ -79,7 +79,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from . import profile_sharing, sealing
+from . import profile_sharing, sealing, voice_readers
 
 try:
     import fcntl
@@ -1240,6 +1240,23 @@ class PhoneStore:
             yield db, {"id": device_id, "name": name, "sharing": sharing, "last_seen": row[0], "time_zone": row[1],
                        "window_from": row[2], "window_to": row[3]}
 
+    def voice_reader_device(self, reader: str) -> str | None:
+        """The device whose user lets ``reader`` read its calendar and phone
+        status on a signed-in call, the one that synced last; None when none
+        does."""
+        with self._read() as db:
+            if db is None:
+                return None
+            for device_id, sharing in db.execute(
+                    "SELECT id, sharing FROM devices WHERE last_seen IS NOT NULL ORDER BY last_seen DESC"):
+                decoded = _decode(sharing, None)
+                # Another profile's store offers only the devices that share out.
+                if self.shared_only and not _shares_out(decoded or {}):
+                    continue
+                if voice_readers.lets(decoded, reader):
+                    return device_id
+            return None
+
     def calendars(self, db: sqlite3.Connection, device: str, kind: str | None = None) -> list[dict[str, Any]]:
         query = (f"SELECT {_CALENDAR_COLUMNS} FROM calendars WHERE device=?"
                  + (" AND kind=?" if kind else "") + " ORDER BY position")
@@ -1943,6 +1960,10 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
     sharing["turn_status"] = sharing["turn_status"] and (sharing["status"] or sharing["focus"])
     sharing["past_days"] = _whole(value.get("past_days"), "sharing.past_days", 0, MAX_WINDOW_DAYS)
     sharing["future_days"] = _whole(value.get("future_days"), "sharing.future_days", 0, MAX_WINDOW_DAYS)
+    # The voice modes the user lets read the calendar and phone status on a
+    # signed-in call (voice_readers).
+    sharing["voice_readers"] = voice_readers.parse(value.get("voice_readers"),
+                                                   lambda message: PhoneError("malformed", message))
     return sharing
 
 
@@ -2010,6 +2031,9 @@ def _narrowed(stored: Any, sharing: dict[str, Any]) -> dict[str, Any]:
             elif isinstance(value, int):
                 narrowed[field] = min(value, kept)
             # A batch that names no window keeps saying none.
+        elif field == "voice_readers":
+            kept = stored.get(field)
+            narrowed[field] = sorted(set(value) & set(kept)) if isinstance(kept, list) else []
     return narrowed
 
 
