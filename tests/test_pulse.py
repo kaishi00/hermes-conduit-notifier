@@ -1525,6 +1525,10 @@ def test_the_job_list_says_which_of_its_jobs_are_failing(tmp_path):
     assert health == {"job::a1": "", "job::b2": "failed its last 3 runs: disk full"}
     assert text.splitlines()[2] == ("- j2 Nightly backup (daily at 10:00, next 2026-10-21T10:00:00+00:00)"
                                     " [failing: failed its last 3 runs: disk full]: y")
+    # Passing health without keys still records every listed job's health.
+    health_only = {}
+    report.cron_jobs(tmp_path, health=health_only)
+    assert health_only == health
 
 
 def test_the_report_context_stays_within_its_budget(db, tmp_path):

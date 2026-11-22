@@ -495,12 +495,13 @@ def cron_jobs(home: Path, others: Sequence[tuple[str, Path]] = (), keys: Optiona
         upcoming = job.get("next_run_at")
         failing = job_health(job)
         key = ""
-        if keys is not None and str(job.get("id") or ""):
+        job_id = str(job.get("id") or "")
+        subject = f"job:{profile}:{job_id}" if job_id else ""
+        if keys is not None and subject:
             key = f"j{len(keys) + 1} "
-            subject = f"job:{profile}:{job['id']}"
             keys[key.strip()] = subject
-            if health is not None:
-                health[subject] = failing
+        if health is not None and subject:
+            health[subject] = failing
         lines.append(f"- {key}{f'[{profile}] ' if profile else ''}{_clip(job.get('name') or job.get('id'), 80)} ({when}"
                      + (f", next {_clip(upcoming, 40)}" if upcoming else "") + ")"
                      + (f" [failing: {failing}]" if failing else "") + f": {_clip(job.get('prompt'), 160)}")
