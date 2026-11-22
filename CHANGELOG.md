@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.192.2 (2026-11-22)
+
+### Fixes
+
+- If a plugin update that Conduit gave up on comes back asking for your OK, the notification that asks now arrives. Before, it was dropped as a repeat of the "didn't finish" one.
+
 ## 0.192.1 (2026-11-21)
 
 ### Fixes

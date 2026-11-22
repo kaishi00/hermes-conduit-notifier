@@ -5,6 +5,7 @@ import json
 import pathlib
 import sys
 import threading
+import time
 import types
 
 import pytest
@@ -381,6 +382,8 @@ def test_a_resumed_job_whose_pull_fails_reads_as_a_pull_failure(monkeypatch, tmp
     api.self_update._self_update_thread.join(5)
     job = json.loads(path.read_text())
     assert job["step"] == "failed" and job["failed_step"] == "downloading"
+    # The resumed pull is timed from the resume, not the job's first start.
+    assert abs(job["pull_started_at"] - time.time()) < 60
 
 
 def test_a_dashboard_restarted_before_the_gateway_says_so_where_it_cant_restart_it(monkeypatch, tmp_path):
@@ -585,6 +588,8 @@ def test_start_runs_one_job_at_a_time(monkeypatch, tmp_path):
     second = api.self_update.start_self_update("coder", lambda *a: None, path=path, steps=(pull, _restarted),
                                    homes=lambda: [tmp_path], notify=lambda job: None)
     assert first["id"] == second["id"] and first["step"] == "downloading" and first["profile"] == "coder"
+    # Its pull is timed, so one that never comes back reads as stalled.
+    assert first["pull_started_at"] == first["started_at"]
     release.set()
     api.self_update._self_update_thread.join(5)
     assert json.loads(path.read_text())["step"] == "failed"
@@ -726,6 +731,11 @@ def test_the_corrected_push_isnt_a_duplicate_of_the_failed_one(monkeypatch):
                                          "detail": "BLOCKED"})
     assert sent[2]["title"] == "Conduit plugin update needs your OK" and "update anyway" in sent[2]["body"]
     assert sent[3]["body"] == "BLOCKED"
+    # A pull that comes back after the stall push isn't a duplicate of it.
+    api.self_update._notify_self_update({"id": "j4", "step": "failed", "code": "pull_stalled", "detail": "stalled"})
+    api.self_update._notify_self_update({"id": "j4", "step": "failed", "code": "scan_blocked", "scan_verdict": "caution",
+                                         "detail": "BLOCKED"})
+    assert sent[4]["identifier"] != sent[5]["identifier"]
 
 
 def test_an_update_points_every_profile_at_it_before_the_gateway_restarts(monkeypatch, tmp_path):
