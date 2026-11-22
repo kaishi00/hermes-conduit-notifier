@@ -1050,6 +1050,13 @@ def test_a_first_question_cut_to_fit_keeps_its_choices():
     assert len(tiny) <= 900 and tiny.count(coord.ASKED_CUT) == 1, tiny
 
 
+def _seconds_later():
+    """OPEN_QUESTIONS_TTL_S on for what open_questions kept."""
+    with coord._open_lock:
+        for key, (stamp, until, rows) in list(coord._open_kept.items()):
+            coord._open_kept[key] = (stamp, until - coord.OPEN_QUESTIONS_TTL_S - 1, rows)
+
+
 def test_the_asked_note_reads_the_registry_only_when_it_changes(on, hermes, home, monkeypatch):
     # Notifier issue 983: the note is made before every model call of every
     # chat, and read the registry's questions afresh each time.
@@ -1070,15 +1077,19 @@ def test_the_asked_note_reads_the_registry_only_when_it_changes(on, hermes, home
     for _ in range(3):
         assert work.asked_note(OTHER_CHAT) is None
     assert reads["n"] == 1, "none waiting: kept until the registry changes"
+    own = call("work_propose", {"text": "Ship the beta?"}, session_id=BOT_CHAT)["id"]
+    assert own in work.asked_note("voice-call-chat", spoken=True)
+    after = reads["n"]
+    _seconds_later()
+    assert own in work.asked_note("voice-call-chat", spoken=True)
+    assert reads["n"] == after, "the Bot Chat's own change only with a write: kept past the seconds (#997's review)"
     item = call("work_propose", {"text": "Ship it?", "choices": ["yes", "no"]}, session_id=OTHER_CHAT)["id"]
     for _ in range(3):
         assert item in work.asked_note(OTHER_CHAT)
-    assert reads["n"] == 3, "a write is seen on the next call (the propose read once too)"
+    assert reads["n"] == after + 2, "a write is seen on the next call (the propose read once too)"
     # One asked in a chat is read again seconds later, for a chat deleted since.
-    with coord._open_lock:
-        for key, (stamp, until, rows) in list(coord._open_kept.items()):
-            coord._open_kept[key] = (stamp, until - coord.OPEN_QUESTIONS_TTL_S - 1, rows)
+    _seconds_later()
     assert item in work.asked_note(OTHER_CHAT)
-    assert reads["n"] == 4
+    assert reads["n"] == after + 3
     work.stop()
     assert not coord._open_kept

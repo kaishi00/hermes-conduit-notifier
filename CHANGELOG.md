@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.193.2 (2026-11-22)
+
+### Fixes
+
+- While your Bot Chat's own question waits on you, the questions waiting on you are no longer read from disk again every couple of seconds, which slowed each step of a reply a little. 0.193.1 kept them only while nothing waited.
+
 ## 0.193.1 (2026-11-22)
 
 ### Fixes
