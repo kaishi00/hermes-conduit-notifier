@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.193.10 (2026-11-22)
+
+### New and improved
+
+- On a call, saying "skip" now leaves any question Hermes asks blank, as the new Skip on its card in Conduit does, so Hermes goes on without it. Before, only a form's questions could be skipped.
+
 ## 0.193.9 (2026-11-22)
 
 ### Fixes

@@ -845,7 +845,7 @@ def _local_live_call_answer(grant: watch_tools._WatchGrant, words: str) -> Optio
     words answer what Hermes waits on in the call's chat (answer_call_waiting,
     as answer_call does for the other modes), and this is what the call says
     after. A question takes any words, by number, label or "the recommended
-    one", "skip" leaves one of a form blank, and words that ask go as a
+    one", "skip" leaves it blank, and words that ask go as a
     request to explain first. An approval
     takes only a plain yes or no, and only when the user lets the Watch
     answer approvals by voice; a question about it denies it with the

@@ -185,7 +185,7 @@ def call_waiting(session_id: Any) -> Dict[str, Any]:
 def answer_call_waiting(body: Any) -> Dict[str, Any]:
     """The user's spoken answer, on a call from Hermes, to what Hermes waits
     on in its chat: a question's ``answer`` (a choice's number or label, "the
-    recommended one", their own words, or "skip" for one of a form) for
+    recommended one", their own words, or "skip" to leave it blank) for
     ``question`` (its number in the batch), or an approval's ``choice`` (once
     or deny, with ``reason``). The
     agent's process passes it to Hermes within seconds. An approval's answer
