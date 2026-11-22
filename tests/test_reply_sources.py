@@ -423,6 +423,7 @@ def test_a_kanban_workers_chat_woken_in_the_dashboard_sends_no_push(turn, monkey
 
     hermes_store = sys.modules[plugin.__name__.rpartition(".")[0] + ".hermes_store"]
     monkeypatch.setattr(hermes_store, "open_store", lambda home: Store())
+    monkeypatch.setattr(hermes_store, "can", lambda method: True)
     monkeypatch.setattr(plugin, "_stored_automation", {})
     assert turn("tui") == []
     # A conversation's turn still pushes.
@@ -439,6 +440,7 @@ def test_an_unreadable_session_store_still_pushes(turn, monkeypatch):
 
     hermes_store = sys.modules[plugin.__name__.rpartition(".")[0] + ".hermes_store"]
     monkeypatch.setattr(hermes_store, "open_store", broken)
+    monkeypatch.setattr(hermes_store, "can", lambda method: True)
     monkeypatch.setattr(plugin, "_stored_automation", {})
     assert turn("tui") == ["response.ready"]
 
@@ -460,6 +462,7 @@ def test_a_sessions_stored_source_is_read_once_it_is_stored(turn, monkeypatch):
 
     hermes_store = sys.modules[plugin.__name__.rpartition(".")[0] + ".hermes_store"]
     monkeypatch.setattr(hermes_store, "open_store", lambda home: Store())
+    monkeypatch.setattr(hermes_store, "can", lambda method: True)
     monkeypatch.setattr(plugin, "_stored_automation", {})
     assert plugin._stored_automation_session("s-1") is False
     assert plugin._stored_automation_session("s-1") is False

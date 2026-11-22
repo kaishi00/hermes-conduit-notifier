@@ -574,6 +574,10 @@ def _stored_automation_session(session_id: Any) -> bool:
     try:
         from . import hermes_store
 
+        # A Hermes whose store can't look a session up by id leaves it to the
+        # turn's own source, without opening the store every turn to find out.
+        if not hermes_store.can("get_session"):
+            return False
         db = hermes_store.open_store(get_hermes_home())
         try:
             row = db.get_session(session_id)
