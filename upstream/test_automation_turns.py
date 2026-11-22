@@ -4,7 +4,9 @@
 
 The plugin asks Hermes which session a turn runs in
 (``agent.session_source.session_source_for``) and whether the gateway runs it
-as a one-shot (``gateway.session_finite.finite_turn_required``). This loads
+as a one-shot (``gateway.session_finite.finite_turn_required``), and first
+the source Hermes stored for the session, for a worker's chat a watch wakes
+later in the dashboard's gateway, whose turn says "tui". This loads
 the plugin in a child with Hermes' own modules and the variables each kind of
 run sets, and checks its answer, so a Hermes that renames them shows up here
 rather than as pushes on the reporter's phone.
@@ -68,3 +70,41 @@ def test_hermes_says_which_turns_are_automation(tmp_path: Path) -> None:
         assert answers["env"] is quiet, name
         assert answers["gateway one-shot"] is True, name
         assert answers["gateway chat"] is quiet_in_gateway, name
+
+
+STORED_PROBE = r"""
+import importlib.util, json, sys
+from pathlib import Path
+
+root, home = Path(sys.argv[1]), Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("conduit_push", root / "__init__.py",
+                                              submodule_search_locations=[str(root)])
+package = importlib.util.module_from_spec(spec)
+sys.modules["conduit_push"] = package
+spec.loader.exec_module(package)
+from conduit_push import hermes_store
+
+db = hermes_store.open_store(home)
+try:
+    db.ensure_session("worker-1", "kanban")
+    db.ensure_session("chat-1", "tui")
+finally:
+    db.close()
+print(json.dumps({sid: package._automation_turn("local", sid) for sid in ("worker-1", "chat-1", "unstored")}))
+"""
+
+
+def test_a_kanban_workers_chat_woken_in_the_gateway_stays_quiet(tmp_path: Path) -> None:
+    # A watch's update wakes a finished worker's chat in the dashboard's
+    # gateway, whose turn says "tui": the source Hermes stored for the session
+    # still says it's a Kanban worker's.
+    home = tmp_path / "home"
+    home.mkdir()
+    python = Path(_hermes_bin()).with_name("python")
+    base = {key: value for key, value in os.environ.items()
+            if not key.startswith(("HERMES_SESSION_", "HERMES_SINGLE_QUERY"))}
+    done = subprocess.run([str(python), "-c", STORED_PROBE, str(ROOT), str(home)], capture_output=True, text=True,
+                          timeout=120, env={**base, "HERMES_SESSION_SOURCE": "tui", "HERMES_HOME": str(home)},
+                          cwd=str(tmp_path))
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert json.loads(done.stdout.strip().splitlines()[-1]) == {"worker-1": True, "chat-1": False, "unstored": False}

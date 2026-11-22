@@ -531,9 +531,14 @@ _automation_sessions: dict[str, None] = {}
 _automation_lock = threading.Lock()
 
 
-def _automation_turn(platform: Any = None) -> bool:
+def _automation_turn(platform: Any = None, session_id: Any = None) -> bool:
     """Whether this turn runs in one of AUTOMATION_SOURCES' sessions. A
     Hermes that can't say counts as a conversation, so the push goes."""
+    # A Kanban worker's chat that something wakes later (a watch's update,
+    # an inject) runs its turn in the dashboard's gateway, whose own source
+    # isn't the session's: the stored source still says what it is.
+    if _stored_automation_session(session_id):
+        return True
     try:
         # A one-shot turn the gateway runs for `chat -q` carries the fact on
         # the turn, not in the session's source.
@@ -548,6 +553,51 @@ def _automation_turn(platform: Any = None) -> bool:
     except Exception:  # noqa: BLE001 — an older Hermes sets the variable itself
         source = os.environ.get("HERMES_SESSION_SOURCE", "")
     return isinstance(source, str) and source.strip().lower() in AUTOMATION_SOURCES
+
+
+# What a session's stored source said, by session id: whether it's one of
+# AUTOMATION_SOURCES. A session's source never changes once stored, so the
+# answer is kept either way; a session not stored yet is read again next turn.
+_stored_automation: dict[str, bool] = {}
+
+
+def _stored_automation_session(session_id: Any) -> bool:
+    """Whether Hermes stored this session with one of AUTOMATION_SOURCES as
+    its source. A store that can't be read counts as a conversation."""
+    session_id = session_id.strip() if isinstance(session_id, str) else ""
+    if not session_id:
+        return False
+    with _automation_lock:
+        known = _stored_automation.get(session_id)
+    if known is not None:
+        return known
+    try:
+        from . import hermes_store
+
+        # A Hermes whose store can't look a session up by id leaves it to the
+        # turn's own source, without opening the store every turn to find out.
+        if not hermes_store.can("get_session"):
+            return False
+        db = hermes_store.open_store(get_hermes_home())
+        try:
+            row = db.get_session(session_id)
+        finally:
+            try:
+                db.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("Couldn't close the session store", exc_info=True)
+    except Exception:  # noqa: BLE001 — unreadable: the turn's own source decides
+        logger.debug("conduit_push: couldn't read the source of %s", session_id, exc_info=True)
+        return False
+    if not isinstance(row, dict):
+        return False
+    source = row.get("source")
+    quiet = isinstance(source, str) and source.strip().lower() in AUTOMATION_SOURCES
+    with _automation_lock:
+        _stored_automation[session_id] = quiet
+        while len(_stored_automation) > MAX_TURN_STARTS:
+            del _stored_automation[next(iter(_stored_automation))]
+    return quiet
 
 
 def _note_automation_session(session_id: str) -> None:
@@ -622,7 +672,7 @@ def _post_llm_call(**kwargs: Any) -> None:
     # A script's, one-shot's or Kanban worker's turn is quiet, unless it
     # wrote its push with conduit_notify (taken whatever happens, so it never
     # rides a later turn's reply).
-    automation = _automation_turn(kwargs.get("platform"))
+    automation = _automation_turn(kwargs.get("platform"), session_id)
     headline = notify_tool.take(session_id, kwargs.get("turn_id"))
     # Hermes' line for a turn its compaction ended before the model ran
     # (compaction_skip) is no news either.
@@ -1072,7 +1122,7 @@ def _on_session_end(**kwargs: Any) -> None:
     _quietly(room_asks.ended, lambda: PresentStore(get_hermes_home()), session_id, answered)
     _quietly(_room_work_ended, session_id, answered)
     _quietly(_link_asks_ended, session_id, answered)
-    automation = _automation_turn(kwargs.get("platform"))
+    automation = _automation_turn(kwargs.get("platform"), session_id)
     if not pulse_turn and ((not workstream and not automation) or _has_live_turn(session_id)):
         # A Pulse turn, a workstream's or a script's never started a Live Activity, so there is none to end,
         # unless its start couldn't tell it was one (the work registry unreadable, or its id not yet recorded).
@@ -1455,7 +1505,7 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         # A workstream's hidden turn shows no Lock Screen progress, as Pulse's
         # doesn't; one that starts after its row settled (a follow-up queued
         # behind the last turn) puts it back to running.
-        if _automation_turn(kwargs.get("platform")):
+        if _automation_turn(kwargs.get("platform"), session_id):
             _note_automation_session(session_id)
         elif not _work_turn_started(session_id):
             _quietly(live_activity.reporter.turn_started, session_id)
