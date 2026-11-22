@@ -29,7 +29,7 @@ dashboard routes (dashboard process) write it and answer sealed voice reads
 from it; the ``conduit_health`` tool (agent process) reads it. The dashboard
 loads this file and health_tool.py as a private package
 (``conduit_push_dashboard_pkg``), so it imports nothing else from the plugin
-but sealing.py.
+but sealing.py and profile_sharing.py (standard library only).
 """
 
 from __future__ import annotations
