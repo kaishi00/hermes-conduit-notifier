@@ -20,6 +20,8 @@ watch_paths:
   - tools/tool_search*.py
   - hermes_cli/profiles*.py
   - hermes_cli/dashboard_auth/
+  # capabilities.sign_in_ends_on_restart mirrors the basic provider's signing-secret rule.
+  - plugins/dashboard_auth/basic/
   - hermes_cli/config*.py
   # hermes_store.py: a profile's session store through Hermes' storage interface (its
   # 2026-11-18 canary on, loaded with importlib), or SessionDB on a release before it.

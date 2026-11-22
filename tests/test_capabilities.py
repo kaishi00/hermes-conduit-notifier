@@ -270,3 +270,56 @@ def test_what_the_plugin_cant_do_on_this_hermes_is_listed_until_it_can(monkeypat
 
     monkeypatch.setattr(degraded, "current", broken)
     assert "degraded" not in _client().get(f"{BASE}/capabilities").json()
+
+
+def _fake_basic_sign_in(monkeypatch, *, basic: bool, config: dict):
+    # Hermes' provider registry and config, as the dashboard serving the plugin has them.
+    registry = types.ModuleType("hermes_cli.dashboard_auth.registry")
+    registry.get_provider = lambda name, scope=None: object() if basic and name == "basic" else None
+    dashboard_auth = types.ModuleType("hermes_cli.dashboard_auth")
+    dashboard_auth.registry = registry
+    config_module = types.ModuleType("hermes_cli.config")
+    config_module.load_config = lambda: config
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.dashboard_auth = dashboard_auth
+    hermes_cli.config = config_module
+    for name, module in (("hermes_cli", hermes_cli), ("hermes_cli.dashboard_auth", dashboard_auth),
+                         ("hermes_cli.dashboard_auth.registry", registry), ("hermes_cli.config", config_module)):
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.delenv("HERMES_DASHBOARD_BASIC_AUTH_SECRET", raising=False)
+    monkeypatch.setattr(api.capabilities, "_sign_in_ends_on_restart", None)
+
+
+def test_password_sign_in_without_a_secret_says_restarts_sign_everyone_out(monkeypatch):
+    # Hermes signs a password sign-in with a key made per dashboard process when
+    # dashboard.basic_auth.secret is unset, so each restart ends every session.
+    _fake_basic_sign_in(monkeypatch, basic=True, config={"dashboard": {"basic_auth": {"username": "me"}}})
+    assert _client().get(f"{BASE}/capabilities").json()["sign_in_ends_on_restart"] is True
+
+
+def test_unexpanded_shell_text_counts_as_no_secret(monkeypatch):
+    # Hermes ignores a secret holding the command instead of its output.
+    secret = {"secret": "$(openssl rand -base64 32)"}
+    _fake_basic_sign_in(monkeypatch, basic=True, config={"dashboard": {"basic_auth": secret}})
+    assert _client().get(f"{BASE}/capabilities").json()["sign_in_ends_on_restart"] is True
+
+
+def test_a_secret_in_config_or_the_environment_keeps_sign_ins(monkeypatch):
+    secret = {"secret": "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0"}
+    _fake_basic_sign_in(monkeypatch, basic=True, config={"dashboard": {"basic_auth": secret}})
+    assert "sign_in_ends_on_restart" not in _client().get(f"{BASE}/capabilities").json()
+
+    _fake_basic_sign_in(monkeypatch, basic=True, config={})
+    monkeypatch.setenv("HERMES_DASHBOARD_BASIC_AUTH_SECRET", "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0")
+    assert "sign_in_ends_on_restart" not in _client().get(f"{BASE}/capabilities").json()
+
+
+def test_no_password_sign_in_or_no_registry_reports_nothing(monkeypatch):
+    _fake_basic_sign_in(monkeypatch, basic=False, config={})
+    assert "sign_in_ends_on_restart" not in _client().get(f"{BASE}/capabilities").json()
+
+    _fake_basic_sign_in(monkeypatch, basic=True, config={})
+    # An older Hermes, with no provider registry.
+    monkeypatch.delattr(sys.modules["hermes_cli.dashboard_auth"], "registry")
+    monkeypatch.setitem(sys.modules, "hermes_cli.dashboard_auth.registry", None)
+    assert "sign_in_ends_on_restart" not in _client().get(f"{BASE}/capabilities").json()
