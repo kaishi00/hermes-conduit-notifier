@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Optional
 
 from fastapi import HTTPException, Request, Response
 
-from . import core
+from . import core, session_usage
 
 router = core.router
 
@@ -266,18 +266,50 @@ def _chat_mute() -> Any:
         return _chat_mute_module
 
 
+def _same_chat(session_ids: list) -> list:
+    """``session_ids`` and every session of the chat they name through
+    compression, back to its first and on to its newest (session_usage._chain):
+    a client names a chat by the ids it has, and a compaction since gives it
+    new ones. A branch, a reset or a subagent's run is a chat of its own, so
+    it never joins. Just ``session_ids`` when the store can't be read."""
+    import sqlite3
+
+    found = list(session_ids)
+    path = _cron_home() / "state.db"
+    if not path.exists():
+        return found
+    try:
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
+        try:
+            conn.row_factory = sqlite3.Row
+            for session_id in session_ids:
+                start = session_usage._row(conn, session_id)
+                if start is None:
+                    continue
+                # Newest first: the ids a client has now come before the old ones.
+                for row in reversed(session_usage._chain(conn, start)):
+                    if row["id"] not in found:
+                        found.append(row["id"])
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return list(session_ids)
+    return found
+
+
 def muted_chats() -> Dict[str, Any]:
-    return {"chats": _chat_mute().ChatMuteStore(_cron_home()).chats()}
+    chats = _chat_mute().ChatMuteStore(_cron_home()).chats()
+    return {"chats": [{**chat, "session_ids": _same_chat(chat["session_ids"])} for chat in chats]}
 
 
 def update_muted_chat(body: Any) -> Dict[str, Any]:
     module = _chat_mute()
     try:
         session_ids, seconds = module.parse(body)
-        chats = module.ChatMuteStore(_cron_home()).set_mute(session_ids, seconds)
+        module.ChatMuteStore(_cron_home()).set_mute(_same_chat(session_ids), seconds)
     except ValueError as exc:
         raise core.TokenError(400, str(exc))
-    return {"chats": chats}
+    return muted_chats()
 
 
 # Muted chats have a bucket of their own, so a busy Cron tab can't refuse a

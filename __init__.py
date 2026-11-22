@@ -933,7 +933,7 @@ def _chat_muted(session_id: str) -> bool:
         store = chat_mute.ChatMuteStore(get_hermes_home())
         if not store.chats():
             return False  # nothing muted: no need to read the session store
-        return store.muted([session_id, *_compaction_ancestors(session_id)])
+        return store.muted([session_id]) or store.muted(_compaction_ancestors(session_id))
     except Exception:  # noqa: BLE001 — can't tell, so the push goes out
         logger.debug("conduit_push: muted chats unreadable", exc_info=True)
         return False
@@ -951,9 +951,12 @@ def _compaction_ancestors(session_id: str) -> list[str]:
     path = Path(get_hermes_home()) / "state.db"
     if not path.exists():
         return []
-    db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
-    db.row_factory = sqlite3.Row
     columns = "id, source, parent_session_id, started_at, ended_at, end_reason, model_config"
+    try:
+        db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return []
+    db.row_factory = sqlite3.Row
     try:
         found: list[str] = []
         row = db.execute(f"SELECT {columns} FROM sessions WHERE id = ?", (session_id,)).fetchone()

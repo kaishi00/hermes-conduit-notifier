@@ -164,3 +164,40 @@ def test_a_busy_cron_tab_cant_refuse_a_mute(client, monkeypatch):
     monkeypatch.setattr(api.notifications._chat_mute_limiter, "acquire", full(api.notifications._chat_mute_limiter))
     refused = client.get(f"{BASE}/notifications/muted-chats")
     assert refused.status_code == 429 and "cron" not in refused.text.lower()
+
+
+def _sessions(path, rows):
+    """state.db with chat usage's columns: (id, parent, end_reason, markers, started, ended)."""
+    import json
+    import sqlite3
+
+    columns = api.session_usage._COLUMNS
+    db = sqlite3.connect(path / "state.db")
+    db.execute(f"CREATE TABLE sessions ({', '.join(columns)})")
+    for sid, parent, reason, markers, started, ended in rows:
+        row = {"id": sid, "source": "cli", "parent_session_id": parent, "started_at": started, "ended_at": ended,
+               "end_reason": reason, "model_config": json.dumps(markers)}
+        db.execute(f"INSERT INTO sessions ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                   [row.get(column) for column in columns])
+    db.commit()
+    db.close()
+
+
+def test_a_mute_names_the_whole_chat_through_compression_and_never_a_branch(client, tmp_path):
+    _sessions(tmp_path, [
+        ("root", None, "compression", {}, 1, 10), ("tip", "root", None, {}, 10, None),
+        ("branch", "tip", None, {"_branched_from": "tip"}, 12, None),
+    ])
+    muted = client.put(f"{BASE}/notifications/muted-chats", json={"session_ids": ["root"], "mute_s": None}).json()
+    assert muted["chats"][0]["session_ids"] == ["root", "tip"], "the client finds it under the newest id"
+    # Unmuted from the newest id the client has: the same chat.
+    assert client.put(f"{BASE}/notifications/muted-chats", json={"session_ids": ["tip"], "mute_s": 0}).json() \
+        == {"ok": True, "chats": []}
+    # A branch muted alone leaves the chat it came from as it was.
+    branch = client.put(f"{BASE}/notifications/muted-chats", json={"session_ids": ["branch"], "mute_s": 900}).json()
+    assert [chat["session_ids"] for chat in branch["chats"]] == [["branch"]]
+    assert not plugin_muted(tmp_path, "tip")
+
+
+def plugin_muted(home, session_id):
+    return api.notifications._chat_mute().ChatMuteStore(home).muted([session_id])

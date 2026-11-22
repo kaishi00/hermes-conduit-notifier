@@ -2262,7 +2262,10 @@ own switch (Cron runs, above).
   clock.
 - `PUT` the same route with `{"session_ids": ["<runtime id>", "<stored id>"],
   "mute_s": 3600}` mutes a chat (up to 16 ids, a timed mute at most a year);
-  `"mute_s": null` mutes it until unmuted and `"mute_s": 0` unmutes it.
+  `"mute_s": null` mutes it until unmuted and `"mute_s": 0` unmutes it. A
+  client sends the chat's own ids, never a branch's parent: the plugin adds
+  the chat's other sessions through compression, and both answers list them,
+  newest included, so any id the client has finds the mute.
 - The profile keeps them in `<hermes home>/conduit-muted-chats.json`
   (private to the user, at most 200 chats, ended mutes dropped on the next
   write). A file that can't be read mutes nothing, so a fault only lets a
