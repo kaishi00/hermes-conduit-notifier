@@ -1249,7 +1249,11 @@ class PhoneStore:
                 return None
             for device_id, sharing in db.execute(
                     "SELECT id, sharing FROM devices WHERE last_seen IS NOT NULL ORDER BY last_seen DESC"):
-                if voice_readers.lets(_decode(sharing, None), reader):
+                decoded = _decode(sharing, None)
+                # Another profile's store offers only the devices that share out.
+                if self.shared_only and not _shares_out(decoded or {}):
+                    continue
+                if voice_readers.lets(decoded, reader):
                     return device_id
             return None
 

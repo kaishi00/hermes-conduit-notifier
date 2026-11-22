@@ -606,6 +606,9 @@ class HealthStore:
                     continue
                 if isinstance(allowed, dict):
                     allowed = allowed.get("readers")
+                # Another profile's store offers only the devices that share out.
+                if self.owner is not None and not shares_out(db, device_id):
+                    continue
                 if isinstance(allowed, list) and reader in allowed:
                     return device_id
             return None
@@ -989,6 +992,11 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
         except ValueError:
             kept = None
         kept_at = kept.get("at") if isinstance(kept, dict) and isinstance(kept.get("at"), int) else None
+        kept_readers = kept.get("readers") if isinstance(kept, dict) and isinstance(kept.get("readers"), list) else []
+        if kept_at is not None and computed_at == kept_at:
+            # A batch from the same moment may only take modes away: which of
+            # two such batches came last can't be told, and a turn-off wins.
+            readers = [reader for reader in readers if reader in kept_readers]
         if kept_at is None or computed_at >= kept_at:
             db.execute("INSERT OR REPLACE INTO meta VALUES(?, ?)",
                        (_readers_key(device_id), json.dumps({"readers": readers, "at": computed_at})))

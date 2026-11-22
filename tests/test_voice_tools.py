@@ -295,6 +295,19 @@ def test_an_older_batch_sent_again_never_brings_back_a_mode_turned_off(client):
     assert client.get(f"{BASE}/voice-tools", params={"reader": "grok-live"}).json()["tools"] == []
 
 
+def test_a_batch_from_the_same_moment_can_only_take_a_mode_away(client):
+    phone = VoicePhone()
+    grant = _batch(voice_readers=["grok-live", "gemini-live"])
+    _share(client, phone, grant)
+    revoke = _batch("batch-0002", voice_readers=["gemini-live"])
+    assert client.post(f"{BASE}/health/ingest", json=phone.seal(revoke)).status_code == 200
+    again = client.post(f"{BASE}/health/ingest", json=phone.seal({**grant, "batch_id": "batch-0003"}))
+    assert again.status_code == 200
+    names = lambda reader: client.get(f"{BASE}/voice-tools", params={"reader": reader}).json()["tools"]  # noqa: E731
+    assert names("grok-live") == []
+    assert [tool["name"] for tool in names("gemini-live")] == ["conduit_health"]
+
+
 def test_wiping_health_forgets_which_modes_could_read_it(client):
     phone = VoicePhone()
     _share(client, phone, _batch(voice_readers=["grok-live"]))

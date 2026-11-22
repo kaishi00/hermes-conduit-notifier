@@ -13,11 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.194.2 (2026-11-22)
+## 0.194.3 (2026-11-22)
 
 ### New and improved
 
 - Live voice calls in Conduit on your computer can now know where you are and read your phone's calendar, reminders, status and health, for the voice modes you allow on your iPhone. A call starts knowing where you are, so it no longer has to ask.
+
+## 0.194.2 (2026-11-22)
+
+### Fixes
+
+- A group chat bot on another of your dashboards could say its model provider was out of credit or refused its key when the turn failed for another reason that only mentioned those words. Only the provider's own refusal says why now.
 
 ## 0.194.1 (2026-11-22)
 
