@@ -439,6 +439,7 @@ test('new inboxes are counted per network, so more addresses from one network ma
 test('a registration network is the IPv4 /24 or IPv6 /48 its address is in', () => {
   assert.equal(registrationNetwork('203.0.113.77'), '203.0.113.0/24');
   assert.equal(registrationNetwork('::ffff:203.0.113.77'), '203.0.113.0/24');
+  assert.equal(registrationNetwork('::ffff:cb00:714d'), '203.0.113.0/24');
   assert.equal(registrationNetwork('2001:DB8:0001:abcd::1'), '2001:db8:1::/48');
   assert.equal(registrationNetwork('2001:db8::'), '2001:db8:0::/48');
   assert.equal(registrationNetwork('::1'), '0:0:0::/48');
@@ -631,6 +632,7 @@ test('an open mailbox with room for fewer inboxes than registering can fill says
     mailbox.child.kill('SIGTERM');
     return (await mailbox.closed).stderr;
   };
+  assert.doesNotMatch(await stderrOf({ MAILBOX_MAX_INBOXES: '' }), /Registration is open/, 'the defaults have room');
   assert.match(await stderrOf({}), /Registration is open and MAILBOX_MAX_INBOXES is under the 777600 inboxes/);
   assert.doesNotMatch(await stderrOf({ MAILBOX_REGISTRATION_TOKEN: 'operator-registration-secret' }), /Registration is open/);
 });

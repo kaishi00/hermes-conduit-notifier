@@ -411,7 +411,12 @@ function clientAddress(request, proxyHops) {
 export function registrationNetwork(address) {
   const bare = String(address).replace(/%.*$/, '');
   const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(bare);
-  const v4 = mapped ? mapped[1] : bare;
+  const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(bare);
+  const fromHex = mappedHex && [mappedHex[1], mappedHex[2]].flatMap((group) => {
+    const value = parseInt(group, 16);
+    return [value >> 8, value & 0xff];
+  }).join('.');
+  const v4 = mapped ? mapped[1] : fromHex || bare;
   if (isIP(v4) === 4) return `${v4.split('.').slice(0, 3).join('.')}.0/24`;
   if (isIP(bare) !== 6) return bare;
   const [head, tail = ''] = bare.toLowerCase().split('::');
