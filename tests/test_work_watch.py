@@ -194,13 +194,14 @@ def test_the_watch_sends_its_answers_shape_never_json_mode(monkeypatch):
     monkeypatch.setattr(watch, "_ctx", type("Ctx", (), {"llm": Llm()})())
     assert watch._ask("instructions", "page") == ({"flag": False}, 0)
     [asked] = calls
-    assert asked["json_schema"] is watch.SCHEMA and "json_mode" not in asked
+    # Closed, which Claude's structured output requires (issue 1001).
+    assert asked["json_schema"] == {**watch.SCHEMA, "additionalProperties": False} and "json_mode" not in asked
     assert asked["max_tokens"] == watch.MAX_TOKENS >= 1_000  # room for a reasoning model to answer
     # Hermes checks the answer against the schema: what check() takes passes.
     import jsonschema  # tests/requirements.txt: Hermes checks replies with it
     for answer in (FLAG, {"flag": False}, {"flag": False, "between": None, "why": None}, {},
                    {"flag": "true", "between": "W1"}):
-        jsonschema.validate(answer, watch.SCHEMA)
+        jsonschema.validate(answer, asked["json_schema"])
 
 
 def test_reads_wait_a_moment_and_run_one_at_a_time(on, hermes, home, monkeypatch):

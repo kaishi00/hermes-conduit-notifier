@@ -1547,11 +1547,16 @@ def _memory_llm(instructions: str, text: str, purpose: str = "pulse memory",
     llm = getattr(_ctx, "llm", None)
     if llm is None:
         raise RuntimeError("this Hermes gives plugins no model access")
-    with _own_profile_scope(), _on_route(route):
-        result = llm.complete_structured(
-            instructions=instructions, input=[{"type": "text", "text": text}], **structured_args(schema),
-            task=memory.TASK if _memory_task else None, purpose=purpose, timeout=memory.CALL_TIMEOUT_S,
-            max_tokens=max_tokens)
+    try:
+        with _own_profile_scope(), _on_route(route):
+            result = llm.complete_structured(
+                instructions=instructions, input=[{"type": "text", "text": text}], **structured_args(schema),
+                task=memory.TASK if _memory_task else None, purpose=purpose, timeout=memory.CALL_TIMEOUT_S,
+                max_tokens=max_tokens)
+    except Exception as error:
+        # Callers record only the class; the provider's own words tell why (issue 1001).
+        logger.warning("conduit_push: Pulse: the %s call failed: %s", purpose, error_text(error))
+        raise
     usage = getattr(result, "usage", None)
     parsed = getattr(result, "parsed", None)
     if parsed is None and _log_unread(result, purpose, max_tokens) and cut_off is not None:
@@ -1585,8 +1590,45 @@ def structured_args(schema: Optional[dict]) -> dict[str, Any]:
     as ``json_object``, which the Claude subscription provider refuses before
     calling Claude (only a schema goes), so every read failed on a Claude route
     (notifier issue 848). Hermes sends a schema with ``strict`` off and checks
-    the reply against it; Pulse's and the watch's are loose for that."""
-    return {"json_schema": schema if schema is not None else {"type": "object"}}
+    the reply against it; Pulse's and the watch's are loose for that, and
+    closed (``closed_schema``) for Claude."""
+    return {"json_schema": closed_schema(schema if schema is not None else {"type": "object"})}
+
+
+def closed_schema(schema: Any) -> Any:
+    """``schema`` with ``additionalProperties: false`` on every object that
+    names its properties, nested ones too. Claude's structured output refuses
+    an object schema without it (output_config.format: "'additionalProperties'
+    must be explicitly set to false"), and Hermes passes the schema to Claude
+    unchanged, so every Pulse call failed on a Claude route (notifier issue
+    1001). A bare ``{"type": "object"}`` stays open, as Claude takes it, and
+    an object that already says stays as it says. The reply only needs the
+    keys it names: the code reads nothing else."""
+    if isinstance(schema, list):
+        return [closed_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    properties = schema.get("properties")
+    out = {key: closed_schema(value) for key, value in schema.items() if key != "properties"}
+    if isinstance(properties, dict):  # a map of names, not a schema: only its values close
+        out["properties"] = {name: closed_schema(value) for name, value in properties.items()}
+        out.setdefault("additionalProperties", False)
+    elif "properties" in schema:
+        out["properties"] = properties
+    return out
+
+
+# How much of a failed call's error the log keeps: a provider's 400 names the
+# cause in its text, which the exception's class alone doesn't (issue 1001).
+ERROR_TEXT_LIMIT = 500
+
+
+def error_text(error: BaseException) -> str:
+    """A failed model call's class and what it said, clipped, for the log."""
+    said = " ".join(str(error).split())
+    if len(said) > ERROR_TEXT_LIMIT:
+        said = said[:ERROR_TEXT_LIMIT - 1] + "…"
+    return f"{type(error).__name__}: {said}" if said else type(error).__name__
 
 
 def _on_route(route: Optional[dict[str, str]]) -> Any:
