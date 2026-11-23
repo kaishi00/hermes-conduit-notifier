@@ -12,6 +12,7 @@ closest names it found, goes back to the bot.
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -113,6 +114,45 @@ def _switch(home: Path, profile: str, model: str, provider: str) -> dict:
                       + " Nothing was started. Use a name from that, or leave model out to run it on the "
                         "Workstream Model.")
     return picked
+
+
+def bot_chat(home: Path, profile: str, chat_id: str) -> dict:
+    """The model a Workstream Model of "Same as bot chat" means: the one the
+    Bot Chat ``chat_id`` runs on now, when that's a pick of its own (Hermes
+    Desktop's model picker, ``/model``) rather than the profile's model.
+    Read as Hermes reads it back when it reopens the chat (Pulse's
+    ``chat_route`` reads its chat the same way): {"model", "provider"}.
+
+    {} when the chat follows the profile's model, or its pick is the
+    profile's model anyway, or Hermes dropped its provider, or this process
+    can't tell (outside the one hosting the chat, a Hermes without the
+    reader): the workstream then starts on the profile's model, as before.
+    Unset, ``session.create`` alone ran every workstream on the profile's
+    ``model.default`` while the Bot Chat was on its own pick."""
+    server = sys.modules.get("tui_gateway.server")
+    read_back = getattr(server, "_stored_session_runtime_overrides", None)
+    if not chat_id or not callable(read_back):
+        return {}
+    from . import pulse_hermes, room_setup
+
+    try:
+        row = pulse_hermes.chat_model_row(home, chat_id)
+        with room_setup.profile_scope(profile):
+            overrides = read_back(row) if row else {}
+            own = getattr(server, "_config_model_target", None)
+            target = own() if callable(own) else None
+            profile_model = tuple(target)[:2] if isinstance(target, (tuple, list)) else ()
+    except Exception:  # noqa: BLE001 — the workstream starts on the profile's model, as before
+        logger.warning("conduit_push: couldn't read the Bot Chat's model; the workstream starts on the "
+                       "profile's model", exc_info=True)
+        return {}
+    picked = overrides.get("model_override") if isinstance(overrides, dict) else None
+    if not isinstance(picked, dict):
+        return {}
+    model, provider = str(picked.get("model") or "").strip(), str(picked.get("provider") or "").strip()
+    if not model or not provider or (model, provider) == profile_model:
+        return {}
+    return {"model": model, "provider": provider}
 
 
 def label(picked: Optional[dict]) -> str:

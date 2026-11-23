@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.195.4 (2026-11-23)
+
+### Fixes
+
+- With Edit Bot > Work > Workstream Model on Same as Bot Chat, new workstreams start on the model the Bot Chat is on. Before, they started on the profile's default model when the Bot Chat had picked another.
+
 ## 0.195.3 (2026-11-22)
 
 ### Fixes
