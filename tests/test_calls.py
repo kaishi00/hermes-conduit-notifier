@@ -1297,6 +1297,78 @@ def test_a_cron_run_that_mentions_silent_mid_sentence_still_notifies(cron_home, 
     assert [event["type"] for event in fake.enqueued] == ["response.ready"]
 
 
+def test_a_run_delivered_to_its_own_bot_chat_is_quiet(cron_home, fake, monkeypatch):
+    jobs = types.ModuleType("cron.jobs")
+    jobs.get_job = lambda job_id: {"id": job_id, "deliver": "bot-chat:"}
+    monkeypatch.setitem(sys.modules, "cron.jobs", jobs)
+    _reply(session_id="local-1", task_id="cron:a1b2c3d4e5f6:x", turn_id="t1", assistant_response="Sunny, 59 degrees.")
+    assert fake.enqueued == []
+
+
+def test_a_run_delivered_to_another_profiles_bot_chat_keeps_the_run_chats_push(cron_home, fake, monkeypatch):
+    jobs = types.ModuleType("cron.jobs")
+    jobs.get_job = lambda job_id: {"id": job_id, "deliver": "bot-chat:atlas"}
+    monkeypatch.setitem(sys.modules, "cron.jobs", jobs)
+    _reply(session_id="local-1", task_id="cron:a1b2c3d4e5f6:x", turn_id="t1", assistant_response="Sunny, 59 degrees.")
+    assert [event["type"] for event in fake.enqueued] == ["response.ready"]
+
+
+def test_a_run_whose_bot_acts_on_the_report_is_quiet_wherever_it_delivers(cron_home, fake, monkeypatch):
+    jobs = types.ModuleType("cron.jobs")
+    jobs.get_job = lambda job_id: {"id": job_id, "deliver": "bot-chat:atlas"}
+    monkeypatch.setitem(sys.modules, "cron.jobs", jobs)
+    CronStore(cron_home).set_act("a1b2c3d4e5f6", True)
+    _reply(session_id="local-1", task_id="cron:a1b2c3d4e5f6:x", turn_id="t1", assistant_response="Sunny, 59 degrees.")
+    assert fake.enqueued == []
+
+
+def test_an_old_hermes_without_the_job_reader_keeps_the_push(cron_home, fake, monkeypatch):
+    monkeypatch.setitem(sys.modules, "cron.jobs", None)
+    _reply(session_id="local-1", task_id="cron:a1b2c3d4e5f6:x", turn_id="t1", assistant_response="Sunny, 59 degrees.")
+    assert [event["type"] for event in fake.enqueued] == ["response.ready"]
+
+
+def test_a_delivery_naming_a_profile_whose_home_is_not_this_one_keeps_the_push(cron_home, fake, monkeypatch):
+    # "bot-chat:<name>" resolves through the profile's home, like the note
+    # push does: a name this home isn't keeps the run chat's push, so the
+    # quiet rule and the note push can never disagree into zero notifications.
+    jobs = types.ModuleType("cron.jobs")
+    jobs.get_job = lambda job_id: {"id": job_id, "deliver": "bot-chat:default"}
+    monkeypatch.setitem(sys.modules, "cron.jobs", jobs)
+    _reply(session_id="local-1", task_id="cron:a1b2c3d4e5f6:x", turn_id="t1", assistant_response="Sunny, 59 degrees.")
+    assert [event["type"] for event in fake.enqueued] == ["response.ready"]
+
+
+@pytest.mark.parametrize("deliver", ["bot-chat:atlas,bot-chat:", "bot-chat:,bot-chat:atlas"])
+def test_two_bot_chat_targets_are_quiet_when_this_home_is_among_them(cron_home, fake, monkeypatch, deliver):
+    # Every listed target counts: Hermes' delivery loop reaches each, and the
+    # note push fires for the one this home serves, whichever order it's named in.
+    jobs = types.ModuleType("cron.jobs")
+    jobs.get_job = lambda job_id: {"id": job_id, "deliver": deliver}
+    monkeypatch.setitem(sys.modules, "cron.jobs", jobs)
+    _reply(session_id="local-1", task_id="cron:a1b2c3d4e5f6:x", turn_id="t1", assistant_response="Sunny, 59 degrees.")
+    assert fake.enqueued == []
+
+
+def test_a_bot_chat_jobs_background_task_keeps_the_mute_only_rule(cron_home, monkeypatch):
+    jobs = types.ModuleType("cron.jobs")
+    jobs.get_job = lambda job_id: {"id": job_id, "deliver": "bot-chat:"}
+    monkeypatch.setitem(sys.modules, "cron.jobs", jobs)
+    # A background task reports on its own: no delivered leg, no Bot Chat rule.
+    assert not cron_runs.quiet("local-1", "cron:a1b2c3d4e5f6:x")
+    assert cron_runs.quiet("local-1", "cron:a1b2c3d4e5f6:x", delivered=True)
+
+
+def test_the_failure_leg_reads_failure_deliver_first(cron_home, monkeypatch):
+    jobs = types.ModuleType("cron.jobs")
+    jobs.get_job = lambda job_id: {"id": job_id, "deliver": "bot-chat:", "failure_deliver": "chat:xyz"}
+    monkeypatch.setitem(sys.modules, "cron.jobs", jobs)
+    assert not cron_runs.quiet("local-1", "cron:a1b2c3d4e5f6:x", delivered=True, failure=True)
+    assert cron_runs.quiet("local-1", "cron:a1b2c3d4e5f6:x", delivered=True)
+    jobs.get_job = lambda job_id: {"id": job_id, "deliver": "bot-chat:"}
+    assert cron_runs.quiet("local-1", "cron:a1b2c3d4e5f6:x", delivered=True, failure=True)
+
+
 def test_chats_keep_the_interactive_silence_rule(home, fake):
     # Prose after the marker is a reply in a chat, by Hermes' interactive
     # rule and by the exact sentinel alike; only cron runs take the loose one.

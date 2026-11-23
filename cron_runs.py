@@ -14,6 +14,13 @@ A run stays quiet when:
   run anywhere else either. Chats keep Hermes' interactive rule, the marker
   as the whole reply (events.is_silent_response, the exact ``[SILENT]`` on
   a Hermes without it).
+- on a delivered leg (the reply or the failure push, not a background
+  task's), the job delivers to a Bot Chat: the report or failure notice
+  reaches the user through the Bot Chat (the note's push from
+  cron_bot_chat.show, or the Bot Chat's own turn's reply when the bot acts
+  on the report), so the run chat's push would be the second one
+  (Eric, 2026-11-23, issue 1047: one notification per run, wherever the
+  job delivers).
 """
 
 from __future__ import annotations
@@ -76,9 +83,83 @@ def muted(job: str) -> bool:
         return False
 
 
-def quiet(session_id: Any, task_id: Any, response: Any = None) -> bool:
-    """Whether this turn is a cron run whose push should not go out."""
+def _bot_chat_targets(deliver: Any) -> list[str]:
+    """Every profile the delivery names for a Bot Chat ('' for the job's
+    own), in its order; empty when the job doesn't deliver to a Bot Chat.
+    All of them: Hermes' delivery loop reaches each, and the quiet rule
+    asks whether any lands in this load's home."""
+    parts = deliver if isinstance(deliver, (list, tuple)) else str(deliver or "").split(",")
+    found = []
+    for part in parts:
+        text = str(part).strip()
+        low = text.lower()
+        if low == "bot-chat":
+            found.append("")
+        elif low.startswith("bot-chat:"):
+            found.append(text[len("bot-chat:"):].strip())
+    return found
+
+
+def _job_deliver(job: str, failure: bool) -> Any:
+    """The delivery targets Hermes holds for the job: its failure_deliver
+    when one is set and the failure notice is on its way, else deliver.
+    None when Hermes' job reader can't say (an older Hermes, a deleted
+    job)."""
+    try:
+        from cron.jobs import get_job
+
+        record = get_job(job)
+    except Exception:  # noqa: BLE001 — a Hermes without the reader: pushes as before
+        return None
+    if not isinstance(record, dict):
+        return None
+    deliver = record.get("deliver")
+    if failure:
+        return record.get("failure_deliver") or deliver
+    return deliver
+
+
+def quiet(session_id: Any, task_id: Any, response: Any = None, *,
+          delivered: bool = False, failure: bool = False) -> bool:
+    """Whether this turn is a cron run whose push should not go out.
+
+    A run stays quiet when the user turned its job's notifications off
+    (cron_store), or its output is Hermes' silence marker by the cron rule
+    (``[SILENT]``, SILENT / NO_REPLY, "…[SILENT] No changes").
+
+    On a delivered leg (`delivered`, the reply or the failure push — never
+    a background task's, which reports on its own), a run delivered to a
+    Bot Chat is quiet too (Eric, 2026-11-23, issue 1047: one notification
+    per run, wherever the job delivers): the report or failure notice
+    reaches the user through the Bot Chat, so the run chat's push would be
+    the second one — the Bot Chat's own turn's reply push when the bot acts
+    on the report (Let the bot act on it, any target profile), else the
+    note's own push from cron_bot_chat.show, sent by the load whose home is
+    the delivery's (cron_bot_chat._own_target — the same predicate the note
+    push fires on, so the two can't disagree). A delivery to another
+    profile's Bot Chat keeps the run chat's push: a push that opens that
+    chat seals with that profile's pairing, which the run's load doesn't
+    hold.
+    """
     job = job_id(session_id, task_id)
     if job is None:
         return False
-    return muted(job) or (response is not None and is_silent(response))
+    if muted(job) or (response is not None and is_silent(response)):
+        return True
+    if not delivered:
+        return False
+    targets = _bot_chat_targets(_job_deliver(job, failure))
+    if not targets:
+        return False
+    try:
+        acting = CronStore(get_hermes_home()).lets_act(job)
+    except Exception:  # noqa: BLE001 — unreadable: the report just shows, the default
+        acting = False
+    if acting:
+        # The Bot Chat's own turn is the delivery; its reply push opens it.
+        return True
+    # Just show it: the note's push opens the Bot Chat, from the load that
+    # holds its pairing — any listed target this home serves.
+    from .cron_bot_chat import _own_target
+
+    return any(_own_target(target) for target in targets)

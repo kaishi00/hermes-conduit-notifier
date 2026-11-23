@@ -169,7 +169,7 @@ def turn(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(plugin.calls, "turn_ended", lambda *args, **kwargs: False)
     monkeypatch.setattr(plugin.calls, "failed_turn", lambda *args, **kwargs: False)
-    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args: False)
+    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args, **kwargs: False)
     monkeypatch.setattr(plugin, "_desktop_watched", lambda session_id, started: False)
     monkeypatch.setattr(plugin, "_source_notifies", lambda *args: True)
     monkeypatch.setattr(plugin, "_session_title", lambda session_id: "")

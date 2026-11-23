@@ -332,7 +332,7 @@ def test_failures_still_push_from_a_muted_source(turn, monkeypatch):
     Store(turn.home).set_notify("messaging", False)
     pushed = []
     monkeypatch.setattr(plugin, "enqueue", pushed.append)
-    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args: False)
+    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args, **kwargs: False)
     plugin._on_session_end(session_id="s-1", turn_id="t-1", completed=False, interrupted=False, platform="telegram")
     assert [event["type"] for event in pushed] == ["turn.failed"]
 
@@ -363,7 +363,7 @@ def test_a_scripts_failed_tool_run_sends_no_failure_push(turn, monkeypatch):
     _no_hermes_sources(monkeypatch)
     pushed = []
     monkeypatch.setattr(plugin, "enqueue", pushed.append)
-    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args: False)
+    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args, **kwargs: False)
     monkeypatch.setenv("HERMES_SESSION_SOURCE", "tool")
     plugin._on_session_end(session_id="s-1", turn_id="t-1", completed=False, interrupted=False, platform="cli")
     assert pushed == []
@@ -508,7 +508,7 @@ def test_a_woken_kanban_workers_chat_shows_no_lock_screen_progress_or_background
     started, pushed = [], []
     monkeypatch.setattr(plugin.live_activity.reporter, "turn_started", started.append)
     monkeypatch.setattr(plugin, "enqueue", pushed.append)
-    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args: False)
+    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args, **kwargs: False)
     monkeypatch.setenv("HERMES_SESSION_SOURCE", "tui")
     plugin._pre_llm_call(session_id="worker-1", turn_id="t-1", user_message="watch update", platform="tui")
     plugin._subagent_stop(child_session_id="child-1", parent_session_id="worker-1", child_status="completed")
@@ -523,7 +523,7 @@ def test_a_woken_kanban_workers_failed_turn_sends_no_failure_push(turn, monkeypa
     _kanban_store(monkeypatch, {"worker-1": "kanban", "chat-1": "tui"})
     pushed = []
     monkeypatch.setattr(plugin, "enqueue", pushed.append)
-    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args: False)
+    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args, **kwargs: False)
     monkeypatch.setenv("HERMES_SESSION_SOURCE", "tui")
     plugin._on_session_end(session_id="worker-1", turn_id="t-1", completed=False, interrupted=False, platform="tui")
     assert pushed == []
@@ -535,7 +535,7 @@ def test_a_scripts_background_task_sends_no_push(turn, monkeypatch):
     _no_hermes_sources(monkeypatch)
     pushed = []
     monkeypatch.setattr(plugin, "enqueue", pushed.append)
-    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args: False)
+    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args, **kwargs: False)
     monkeypatch.setenv("HERMES_SESSION_SOURCE", "tool")
     plugin._pre_llm_call(session_id="script-1", turn_id="t-1", user_message="step 3", platform="cli")
     # The task finishes after the turn, where Hermes may describe the child: the parent decides.

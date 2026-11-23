@@ -114,12 +114,14 @@ def reference_tags(text: str) -> str:
     return "\n".join(lines)
 
 
-def note_text(job: Any, content: Any) -> str:
+def _note_parts(job: Any, content: Any) -> tuple[str, str]:
+    """(name, redacted report): the note's header words and the body the
+    note and its push share. Redacted as Hermes' own delivery redacts it,
+    or withheld rather than shown unredacted: the bot reads the note on its
+    next turn, and a report can hold a key."""
     job = job if isinstance(job, dict) else {}
     name = str(job.get("name") or job.get("id") or "?")
     text = content if isinstance(content, str) else str(content or "")
-    # Redacted as Hermes' own delivery redacts it, or not written at all:
-    # the bot reads the note on its next turn, and a report can hold a key.
     redact = getattr(_delivery_module(), "_redact_cron_payload", None)
     try:
         if not callable(redact):
@@ -130,6 +132,11 @@ def note_text(job: Any, content: Any) -> str:
         name = str(job.get("id") or "?")
         text = WITHHELD
     name = " ".join(name.replace('"', "'").split()) or "?"
+    return name, text
+
+
+def note_text(job: Any, content: Any) -> str:
+    name, text = _note_parts(job, content)
     return HEADER.format(name=name) + "\n\n" + reference_tags(text)
 
 
@@ -219,11 +226,84 @@ def _note_from_elsewhere(home: Path, chat: str, text: str, key: str, for_failure
         sleep(NOTE_RETRY_S)
 
 
+def _own_target(profile: str) -> bool:
+    """Whether the delivery targets this profile (``deliver: bot-chat:``
+    with no profile, or one naming this profile's home): this load holds
+    the pairing a push seals with, so it can send the note's push. Another
+    profile's Bot Chat is served by that profile's loads — a delivery there
+    keeps the run chat's push (cron_runs.quiet reads the same condition)."""
+    try:
+        from hermes_constants import get_hermes_home
+
+        return _target_home(profile) == Path(get_hermes_home()).resolve()
+    except Exception:  # noqa: BLE001 — unsayable: keep the run chat's push
+        return not profile
+
+
+def _push_note(job: dict, chat: str, profile: str, name: str, report: str, key: str,
+               for_failure: bool) -> None:
+    """The one push for a written note (issue 1047): the phone routes it by
+    its session, so the tap opens the Bot Chat the job delivers to; the
+    body carries the report's opening, and the slot is the job's — the same
+    seed a run chat's push takes, so flipping the job's delivery doesn't
+    strand the last notification — and the next run's replaces it. A
+    failure notice announces itself as a failure. The job's notification
+    toggle in Conduit's Cron tab holds it (as it held the run chat's push
+    before this push existed), and so does a Bot Chat the user muted, the
+    chat's own mute or a pre-compaction session's, as any reply's push."""
+    try:
+        from .client import enqueue
+        from .chat_mute import ChatMuteStore
+        from .cron_runs import _job_deliver, muted as job_muted
+        from .events import event_id, plain_text, push_event
+        from . import session_titles
+        from hermes_constants import get_hermes_home
+
+        if job_muted(str(job.get("id") or "")):
+            return
+        # The push rides the same delivery read the quiet rule makes: on a
+        # Hermes without the job reader (or a job it can't find) it can't
+        # know, so the run chat's push stays the one notification, as before.
+        if _job_deliver(str(job.get("id") or ""), for_failure) is None:
+            return
+        store = ChatMuteStore(get_hermes_home())
+        if store.chats():
+            # The mute follows the chat through compaction, as any reply's
+            # push does (_chat_muted). The walk lives in the plugin's entry
+            # module; a copy loaded without it keeps the chat's own id.
+            try:
+                from . import _compaction_ancestors
+
+                ancestors = _compaction_ancestors(chat)
+            except Exception:  # noqa: BLE001 — the walk needs the entry module
+                ancestors = []
+            if store.muted([chat]) or store.muted(ancestors):
+                return
+        load = profile or session_titles._profile_of(session_titles._home()) or ""
+        enqueue(push_event(
+            "turn.failed" if for_failure else "response.ready",
+            identifier=event_id("cron-note", key, chat),
+            session_id=chat,
+            profile=load,
+            profile_name=session_titles.bot_name(),
+            session_title=session_titles.title(chat),
+            title=f'Cron job "{name}" failed' if for_failure else f'Cron job "{name}"',
+            title_label="turn.failed" if for_failure else "response.ready",
+            body=plain_text(report),
+            slot=f"cron:{load or 'default'}:{job.get('id', '?')}",
+        ))
+    except Exception:  # noqa: BLE001 — a push must never break the delivery
+        logger.debug("conduit_push: cron note push failed", exc_info=True)
+
+
 def show(job: dict, content: str, profile: str, *, for_failure: bool = False,
          in_process: Optional[Callable[[Path], bool]] = None) -> Optional[str]:
     """Just show it: the run's report as a note in the Bot Chat, no turn.
     None once it's written (or a hidden failure notice is dropped), else
-    why it isn't, as Hermes' own delivery reports it."""
+    why it isn't, as Hermes' own delivery reports it. A note that lands
+    sends the one push for the run (issue 1047) when it went to this
+    profile's Bot Chat; cron_runs.quiet holds the run chat's push back on
+    the same condition."""
     target = f"bot-chat:{profile or '(own)'}"
     try:
         home = _target_home(profile)
@@ -234,7 +314,8 @@ def show(job: dict, content: str, profile: str, *, for_failure: bool = False,
         chat = _bot_chat(home)
         if not chat:
             return f"{target}: no Bot Chat yet, so the report has nowhere to show"
-        text = note_text(job, content)
+        name, report = _note_parts(job, content)
+        text = HEADER.format(name=name) + "\n\n" + reference_tags(report)
         key = f"conduit-cron:{job.get('id', '?')}:{job.get('execution_id') or job.setdefault('_bot_chat_run_id', time.time_ns())}"
         here = in_process(home) if in_process is not None else _owned_here(home)
         error = _note_from_here(home, chat, text, for_failure) if here else "its owner runs elsewhere"
@@ -249,6 +330,8 @@ def show(job: dict, content: str, profile: str, *, for_failure: bool = False,
         if error is None:
             job.setdefault("_bot_chat_delivery_receipts", {})[target] = {"status": "shown", "delivery_id": key}
             logger.info("Job '%s': report shown in the %s Bot Chat (no turn)", job.get("id", "?"), profile or "own")
+            if _own_target(profile):
+                _push_note(job, chat, profile, name, report, key, for_failure)
         return error
     except Exception as exc:  # noqa: BLE001 - reported to Hermes as its own delivery reports a failure
         logger.warning("conduit_push: cron report to %s failed", target, exc_info=True)

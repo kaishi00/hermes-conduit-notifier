@@ -266,7 +266,10 @@ notes:
     (hermes_store.py: the storage interface's messages repository, or SessionDB on a release
     before it) writes it, once per run. gateway.session_cron is newer than v0.22.5, so it's reached by name
     and checked first, and without it every job keeps Hermes' turn (the route's shows_reports is
-    false). upstream/test_cron_bot_chat.py runs both jobs on the canary and checks the bot has the
+    false). cron.jobs' get_job tells the quiet rule (cron_runs.quiet) which jobs deliver to a Bot
+    Chat, so the run chat's push stands down behind the Bot Chat's side (issue 1047); on a Hermes
+    without it, or a job it can't find, the note's push is held and the run chat's push is the one
+    notification, as before this. upstream/test_cron_bot_chat.py runs both jobs on the canary and checks the bot has the
     report on the user's next turn.
   plugin update around a running turn: >-
     The host-run update (feature map: "Conduit plugin update") asks
@@ -446,7 +449,7 @@ imports:
   cron:
     optional: ["jobs"]
   cron.jobs:
-    optional: ["trigger_job"]
+    optional: ["get_job", "trigger_job"]
   gateway.config:
     optional: ["Platform"]
   gateway.platforms.base:
