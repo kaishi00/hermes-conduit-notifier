@@ -677,7 +677,7 @@ def _post_llm_call(**kwargs: Any) -> None:
     # Hermes' line for a turn its compaction ended before the model ran
     # (compaction_skip) is no news either.
     quiet = (workstream or is_silent_response(response) or compaction_skip.notice(response) == compaction_skip.SKIPPED_DETAIL
-             or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
+             or cron_runs.quiet(session_id, kwargs.get("task_id"), response, delivered=True)
              or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"), response))
              or _member_room_turn(session_id) or _lead_routing(kwargs.get("turn_id"))
              or _waits_only_turn(kwargs.get("turn_id"))
@@ -1156,13 +1156,15 @@ def _on_session_end(**kwargs: Any) -> None:
         # call the user asked for on it still rings.
         calls.turn_ended(session_id, "failed", profile=_profile, fallback=None)
         return
-    if (cron_runs.quiet(session_id, kwargs.get("task_id")) or _member_room_turn(session_id) or routing
-            or automation or _chat_muted(session_id)):
+    if (cron_runs.quiet(session_id, kwargs.get("task_id"), delivered=True, failure=True)
+            or _member_room_turn(session_id) or routing or automation or _chat_muted(session_id)):
         # A muted cron job's failed run or a muted chat's, an agent's in a room someone else
         # hosts (where it shows), a room lead's routing pick (the lead
-        # then takes the message itself), or a script's or Kanban worker's
-        # run (_automation_turn): no push and no automatic alert call. A call
-        # the user asked for on this job (a watch) still rings.
+        # then takes the message itself), a script's or Kanban worker's
+        # run (_automation_turn), or a run delivered to a Bot Chat (its
+        # failure notice went there, with its push): no push and no
+        # automatic alert call. A call the user asked for on this job (a
+        # watch) still rings.
         calls.turn_ended(session_id, "failed", profile=_profile, fallback=None)
         return
     # A failure in a room this Hermes hosts opens the room, as its reply does.

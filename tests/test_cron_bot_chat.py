@@ -29,6 +29,13 @@ def _module(monkeypatch, name, **names):
     return module
 
 
+def _job_reader(monkeypatch, deliver="bot-chat:"):
+    """Hermes' cron job reader, as the quiet rule and the note push read it."""
+    jobs = types.ModuleType("cron.jobs")
+    jobs.get_job = lambda job_id: {"id": job_id, "deliver": deliver}
+    monkeypatch.setitem(sys.modules, "cron.jobs", jobs)
+
+
 @pytest.fixture
 def hermes(monkeypatch, tmp_path):
     """Hermes' cron delivery, its local-chat note and the profile's Bot Chat, as far as cron_bot_chat uses them."""
@@ -94,6 +101,120 @@ def test_a_report_shows_in_the_bot_chat_without_a_turn(hermes):
     assert hermes.turns == []
     assert hermes.notes == [(str(hermes.home.resolve()), "bot-chat-tip", HEADER + "\n\nRain at 9. [REDACTED]", False)]
     assert job["_bot_chat_delivery_receipts"]["bot-chat:(own)"]["status"] == "shown"
+
+
+def test_the_note_sends_the_one_push_for_the_run_and_it_opens_the_bot_chat(hermes, monkeypatch):
+    sent = []
+    client = importlib.import_module("conduit_push.client")
+    monkeypatch.setattr(client, "enqueue", lambda event: sent.append(event) or True)
+    _job_reader(monkeypatch)
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB), "Rain at 9. sk-secret", "") is None
+    (event,) = sent
+    events = importlib.import_module("conduit_push.events")
+    titles = importlib.import_module("conduit_push.session_titles")
+    load = titles._profile_of(titles._home()) or "default"
+    assert event["type"] == "response.ready"
+    assert event["session_id"] == "bot-chat-tip"
+    assert event["title"] == 'Cron job "Morning \'news\'"'
+    assert event["body"] == "Rain at 9. [REDACTED]"
+    assert event["slot"] == events.slot_token(f"cron:{load}:a1b2c3d4e5f6")
+    assert event["title_label"] == "response.ready"
+
+
+def test_a_job_whose_notifications_are_off_sends_no_push(hermes, monkeypatch):
+    cron_runs = importlib.import_module("conduit_push.cron_runs")
+    sent = []
+    client = importlib.import_module("conduit_push.client")
+    monkeypatch.setattr(client, "enqueue", lambda event: sent.append(event) or True)
+    _job_reader(monkeypatch)
+    # The mute is read in the push, through cron_runs' home binding.
+    monkeypatch.setattr(cron_runs, "get_hermes_home", lambda: hermes.home)
+    assert cron_bot_chat.install()
+    CronStore(hermes.home).set_notify(JOB["id"], False)
+    assert hermes.delivery.deliver(dict(JOB), "Rain at 9.", "") is None
+    assert hermes.notes != []  # the note still shows: the toggle holds pushes, not the delivery
+    assert sent == []
+
+
+def test_a_failure_notice_pushes_as_a_failure(hermes, monkeypatch):
+    sent = []
+    client = importlib.import_module("conduit_push.client")
+    monkeypatch.setattr(client, "enqueue", lambda event: sent.append(event) or True)
+    _job_reader(monkeypatch)
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB), "It failed.", "", for_failure=True) is None
+    (event,) = sent
+    assert event["type"] == "turn.failed"
+    assert event["title"] == 'Cron job "Morning \'news\'" failed'
+    assert event["title_label"] == "turn.failed"
+
+
+def test_a_suppressed_failure_notice_and_a_note_that_never_lands_send_no_push(hermes, monkeypatch):
+    sent = []
+    client = importlib.import_module("conduit_push.client")
+    monkeypatch.setattr(client, "enqueue", lambda event: sent.append(event) or True)
+    assert cron_bot_chat.install()
+    hermes.warnings = False
+    assert hermes.delivery.deliver(dict(JOB), "It failed.", "", for_failure=True) is None
+    assert sent == []
+    hermes.warnings, hermes.chat = True, None
+    assert "no Bot Chat yet" in hermes.delivery.deliver(dict(JOB), "Rain.", "")
+    assert sent == []
+
+
+def test_another_profiles_bot_chat_keeps_the_run_chats_push_instead(hermes, monkeypatch):
+    sent = []
+    client = importlib.import_module("conduit_push.client")
+    monkeypatch.setattr(client, "enqueue", lambda event: sent.append(event) or True)
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB), "Rain at 9.", "furina") is None
+    assert hermes.notes != []  # the note still shows
+    assert sent == []  # but this load can't seal a push for another profile's pairing
+
+
+def test_a_hermes_without_the_job_reader_keeps_the_run_chats_push_alone(hermes, monkeypatch):
+    # The straddle: the note path without cron.jobs.get_job. The push rides
+    # the same delivery read the quiet rule makes, so it stands down and the
+    # run chat's push is the one notification, as before this.
+    sent = []
+    client = importlib.import_module("conduit_push.client")
+    monkeypatch.setattr(client, "enqueue", lambda event: sent.append(event) or True)
+    monkeypatch.setitem(sys.modules, "cron.jobs", None)
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB), "Rain at 9.", "") is None
+    assert hermes.notes != []  # the note still lands
+    assert sent == []  # but the push stands down with the quiet rule's read
+
+
+def test_a_muted_bot_chat_holds_the_notes_push(hermes, monkeypatch):
+    ChatMute = importlib.import_module("conduit_push.chat_mute")
+    sent = []
+    client = importlib.import_module("conduit_push.client")
+    monkeypatch.setattr(client, "enqueue", lambda event: sent.append(event) or True)
+    _job_reader(monkeypatch)
+    assert cron_bot_chat.install()
+    ChatMute.ChatMuteStore(hermes.home).set_mute(["bot-chat-tip"], None)
+    assert hermes.delivery.deliver(dict(JOB), "Rain at 9.", "") is None
+    assert hermes.notes != []  # the note still shows in the muted chat
+    assert sent == []  # but the push stays quiet, as any reply's does
+
+
+def test_a_mute_on_a_pre_compaction_session_holds_the_notes_push_too(hermes, monkeypatch):
+    ChatMute = importlib.import_module("conduit_push.chat_mute")
+    sent = []
+    client = importlib.import_module("conduit_push.client")
+    monkeypatch.setattr(client, "enqueue", lambda event: sent.append(event) or True)
+    _job_reader(monkeypatch)
+    # The ancestor walk lives in the entry module (a copy reads it from there);
+    # the test hands the chat one ancestor, the way Hermes' store would.
+    monkeypatch.setattr(sys.modules["conduit_push"], "_compaction_ancestors",
+                        lambda chat_id: ["old-session"], raising=False)
+    assert cron_bot_chat.install()
+    ChatMute.ChatMuteStore(hermes.home).set_mute(["old-session"], None)
+    assert hermes.delivery.deliver(dict(JOB), "Rain at 9.", "") is None
+    assert hermes.notes != []
+    assert sent == []
 
 
 def test_a_job_that_lets_its_bot_act_keeps_hermes_turn(hermes):
