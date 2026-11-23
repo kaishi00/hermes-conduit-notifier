@@ -232,6 +232,23 @@ def test_refs_count_per_kind_and_only_refs_name_work(home):
     assert first.idempotency_key != second.idempotency_key
 
 
+def test_store_read_connections_use_sqlite_read_only_mode(home, monkeypatch):
+    store = store_mod.Store(home)
+    store.set_policy("strict")
+    connect = store_mod.sqlite3.connect
+    opened = []
+
+    def record_connect(target, *args, **kwargs):
+        opened.append((target, kwargs))
+        return connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(store_mod.sqlite3, "connect", record_connect)
+    assert store.policy() == "strict"
+    target, kwargs = opened[-1]
+    assert str(target).endswith("?mode=ro")
+    assert kwargs["uri"] is True
+
+
 def test_every_relationship_field_is_kept(home):
     store = store_mod.Store(home)
     row = store.add("ask_in", title="Research", requested_by={"bot": "raiden", "work": "W4"},

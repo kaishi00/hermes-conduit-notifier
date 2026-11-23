@@ -287,7 +287,8 @@ class Store:
         read on every tool call) never waits on one under WAL."""
         if write:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-        con = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        target = self.path if write else f"{self.path.resolve().as_uri()}?mode=ro"
+        con = sqlite3.connect(target, timeout=10, isolation_level=None, uri=not write)
         try:
             con.row_factory = sqlite3.Row
             con.execute("PRAGMA busy_timeout=10000")
