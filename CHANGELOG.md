@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.195.3 (2026-11-22)
+
+### Fixes
+
+- Settings > Pulse > Model takes Claude subscription models whose name ends in a context size like [1m] (Haiku 5.5, Sonnet 5.5). Before, the change was refused and showed as not applied.
+
 ## 0.195.2 (2026-11-22)
 
 ### Fixes
