@@ -1157,6 +1157,15 @@ def test_same_as_bot_chat_starts_workstreams_on_the_bot_chats_own_pick(on, home,
     assert start("Four", "List the open invoices.")["ok"]
     assert hermes.named("session.create")[-1][1]["model"] == "gpt-6.1-terra"
     work.app_set_settings(home, {"workstream_model": None})
+    # Hermes refusing the Bot Chat's model: the note names it and where to pick another.
+    def refuse(self, **kwargs):
+        raise broker_mod.BrokerError("unknown model")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(broker_mod.Broker, "start", refuse)
+        failed = start("Refused", "Tally the parcels.")
+    assert failed["ok"] is False and "claude-opus-5-5[1m], the model the Bot Chat is on" in failed["note"]
+    assert "Edit Bot > Work" in failed["note"]
     # A reader that fails, or none in this process: the profile's model, as before, and the log says why.
     monkeypatch.setattr(server, "_stored_session_runtime_overrides", lambda row: 1 / 0)
     with caplog.at_level(logging.WARNING):
@@ -1164,7 +1173,10 @@ def test_same_as_bot_chat_starts_workstreams_on_the_bot_chats_own_pick(on, home,
     assert "model" not in hermes.named("session.create")[-1][1]
     assert "couldn't read the Bot Chat's model" in caplog.text
     monkeypatch.delattr(server, "_stored_session_runtime_overrides")
-    assert work.work_models.bot_chat(home, "default", BOT_CHAT) == {}
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert work.work_models.bot_chat(home, "default", BOT_CHAT) == {}
+    assert "can't read the Bot Chat's model" in caplog.text
 
 
 def test_a_workstream_runs_on_the_model_the_users_words_named(on, home, hermes, monkeypatch):
