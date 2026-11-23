@@ -2759,7 +2759,7 @@ def _sweep_once(home: Path, store: work_store.Store, broker: Optional[work_broke
     try:
         broker = broker or work_broker.Broker(home)
         read_at = time.time()
-        live = broker.live_session_ids()
+        live = broker.recovery_protected_session_ids()
     except work_broker.BrokerError:
         return False
     # Only rows from before this process: a restart stopped those, and a

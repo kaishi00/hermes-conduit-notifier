@@ -159,6 +159,23 @@ def authority_session_ids(home: Any) -> Optional[set]:
         return None
 
 
+def authority_active_session_ids(home: Any) -> Optional[set[str]]:
+    """Sessions with an executing turn or a drain still scheduled in this process."""
+    authority = authority_for_home(home)
+    if authority is None:
+        return None
+    try:
+        executing = set(authority.executing)
+        for sid, live in list(authority.sessions.items()):
+            task = live.task
+            if task is not None and not task.done():
+                executing.add(sid)
+        return executing
+    except Exception:  # noqa: BLE001 — don't guess if this Hermes can't report activity
+        logger.debug("Conduit: couldn't read active session authority turns", exc_info=True)
+        return None
+
+
 def authority_scope(authority: Any) -> Any:
     """The scope of the profile that owns ``authority`` (its config and
     secrets), as the authority's own handlers read them; none without one."""

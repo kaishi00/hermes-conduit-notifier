@@ -241,6 +241,36 @@ async def work_run(bot: str = "") -> Dict[str, Any]:
     return await asyncio.to_thread(_work_run, bot)
 
 
+@router.get("/rehearsal-work")
+async def rehearsal_work(action: str, title: str = "", ref: str = "") -> Dict[str, Any]:
+    def drive():
+        from hermes_constants import get_hermes_home
+
+        home = get_hermes_home()
+        work = _conduit(".work_tool", "_start")
+        store = work.work_store.Store(home)
+        broker = work.work_broker.Broker(home)
+        if action == "start":
+            store.set_policy("lookups")
+            store.set_after_restart("continue")
+            return work._start(home, store, broker, {
+                "title": title, "instructions": "Give a slow read-only reply.", "new": True,
+            }, "")
+        row = store.get(ref)
+        if action == "stop":
+            return work._stop(store, broker, row)
+        live = None if action == "passive" else broker.live(row.session_id)
+        return {"status": store.get(ref).status, "started": bool(row.turn_at),
+                "continued": bool(store.get_meta(work._CONTINUED + ref)),
+                "swept": str(home) in work._swept,
+                "pinned": str(work._pinned_home),
+                "ready": work.work_broker.ready_for_recovery(),
+                "known_to_authority": row.session_id in broker.live_session_ids(),
+                "running": bool(live and live[1].get("running"))}
+
+    return await asyncio.to_thread(drive)
+
+
 @router.get("/work-send")
 async def work_send(session: str, text: str, bot: str = "") -> Dict[str, Any]:
     return await asyncio.to_thread(_work_send, bot, session, text)

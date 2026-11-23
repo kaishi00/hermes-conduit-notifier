@@ -743,6 +743,20 @@ def test_the_work_panels_approval_read_takes_no_snapshot_the_view_can_answer(tmp
     assert [frame["method"] for frame in api.requests] == ["session.resume", "session.resume"]
 
 
+def test_recovery_protects_active_turns_but_not_idle_open_chats(monkeypatch):
+    from types import SimpleNamespace
+
+    authority = SimpleNamespace(
+        sessions={"idle": SimpleNamespace(task=None),
+                  "queued": SimpleNamespace(task=SimpleNamespace(done=lambda: False)),
+                  "running": SimpleNamespace(task=None),
+                  "finished": SimpleNamespace(task=SimpleNamespace(done=lambda: True))},
+        executing={"running": 1},
+    )
+    monkeypatch.setattr(gateway_chats, "authority_for_home", lambda home: authority)
+    assert gateway_chats.authority_active_session_ids("/test") == {"queued", "running"}
+
+
 class _AuthorityApi:
     """gateway_chats' session API as work_broker sees it: answers by method."""
 

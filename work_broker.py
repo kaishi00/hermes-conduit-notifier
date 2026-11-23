@@ -376,6 +376,16 @@ class Broker:
         return {str(record.get("session_key") or "") for record in list(sessions.values())
                 if isinstance(record, dict) and not record.get("_finalized")}
 
+    def recovery_protected_session_ids(self) -> set[str]:
+        """Sessions to leave alone during restart recovery."""
+        if on_authority(self.api):
+            from . import gateway_chats
+
+            active = gateway_chats.authority_active_session_ids(self.home)
+            if active is not None:
+                return active
+        return self.live_session_ids()
+
     def start(self, *, title: str, prompt: str, idempotency_key: str, cwd: str = "",
               created: Optional[Callable[[str], None]] = None, yolo: Optional[bool] = None,
               model: Optional[dict] = None) -> Started:

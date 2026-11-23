@@ -369,7 +369,25 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
                         if resp.status == 200:
                             break
             time.sleep(0.5)
-        yield Listener(port, home, speech)
+        endpoint = Listener(port, home, speech)
+
+        def restart_gateway():
+            nonlocal proc
+            os.killpg(proc.pid, signal.SIGTERM)
+            assert proc.wait(90) in (0, 1, -signal.SIGTERM)
+            assert "Gateway stopped (total teardown" in (home / "logs" / "agent.log").read_text()
+            proc = subprocess.Popen([hermes, "gateway", "run"], env=env, stdout=log,
+                                    stderr=subprocess.STDOUT, start_new_session=True)
+            deadline = time.monotonic() + READY_TIMEOUT_S
+            while time.monotonic() < deadline and proc.poll() is None:
+                with contextlib.suppress(OSError):
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=5):
+                        return
+                time.sleep(0.5)
+            raise AssertionError(log_path.read_text()[-4000:])
+
+        endpoint.restart_gateway = restart_gateway
+        yield endpoint
     finally:
         if proc is not None:
             with contextlib.suppress(ProcessLookupError):
@@ -391,6 +409,42 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
             speech.stop()
         if os.environ.get("UPSTREAM_CONTRACT_LOG"):
             print(log_path.read_text()[-8000:])
+
+
+def test_disposable_workstream_clean_restart_and_manual_stop(listener):
+    def drive(query):
+        status, payload = listener.plugin_call("rehearsal-work?" + query, plugin=DRIVER)
+        assert status == 200, payload
+        return payload
+
+    def wait_for(query, predicate):
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            value = drive(query)
+            if predicate(value):
+                return
+            time.sleep(0.25)
+        pytest.fail(str(value))
+
+    stopped = drive("action=start&title=Manual-stop")["ref"]
+    wait_for("action=read&ref=" + stopped, lambda row: row["running"])
+    assert drive("action=stop&ref=" + stopped)["ok"]
+    wait_for("action=read&ref=" + stopped, lambda row: not row["running"] and row["status"] == "stopped")
+    recovering = drive("action=start&title=Clean-restart")["ref"]
+    wait_for("action=read&ref=" + recovering, lambda row: row["running"] and row["started"])
+    listener.restart_gateway()
+    wait_for("action=passive&ref=" + recovering, lambda row: row["continued"])
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if any("Hermes restarted while you were working on this" in json.dumps(call["messages"])
+               for call in _FakeModel.seen):
+            break
+        time.sleep(0.25)
+    else:
+        pytest.fail("The resumed turn never reached the local test model")
+    stopped_row = drive("action=read&ref=" + stopped)
+    assert stopped_row["status"] == "stopped" and not stopped_row["running"] and not stopped_row["continued"]
+    assert "The gateway's loop isn't running" not in (listener.home / "gateway.log").read_text()
 
 
 def test_ready_names_the_session_authority_and_the_plugin_is_served(listener):
