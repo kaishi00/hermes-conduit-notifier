@@ -3501,7 +3501,7 @@ def start_recovery(home: Optional[Path] = None) -> None:
         logger.debug("conduit_push: couldn't retire workstream turn markers at load", exc_info=True)
     def run() -> None:
         deadline = time.monotonic() + RECOVERY_WAIT_S
-        while work_broker.server() is None:
+        while not work_broker.ready_for_recovery():
             if time.monotonic() > deadline:
                 return
             time.sleep(RECOVERY_POLL_S)

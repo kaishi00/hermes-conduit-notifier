@@ -160,6 +160,17 @@ def unavailable_reason() -> str:
     return UNAVAILABLE_NO_API
 
 
+def ready_for_recovery() -> bool:
+    """Wait for the local authority's event loop before replaying queued work."""
+    api = server()
+    if api is None:
+        return False
+    if not on_authority(api):
+        return True
+    loop = getattr(api.runner, "_gateway_loop", None)
+    return loop is not None and loop.is_running() and not loop.is_closed()
+
+
 def profile_of(home: Path) -> str:
     """The profile a Hermes home is: profiles/<name>, else "default"."""
     home = Path(home)

@@ -4418,6 +4418,29 @@ def test_markers_are_retired_at_load_before_a_client_can_resume(on, hermes, home
     assert cleared == [WORKER_1]
 
 
+def test_recovery_waits_for_the_authority_loop(on, hermes, home, monkeypatch):
+    threads, events = [], []
+    loop = types.SimpleNamespace(is_running=lambda: False, is_closed=lambda: False)
+    authority = types.SimpleNamespace(
+        serves_authority=True, runner=types.SimpleNamespace(_gateway_loop=loop)
+    )
+    monkeypatch.setattr(work.work_broker, "server", lambda: authority)
+    monkeypatch.setattr(work.threading, "Thread", lambda *a, **k: threads.append(k)
+                        or types.SimpleNamespace(start=lambda: None))
+    monkeypatch.setattr(work, "_watch_shutdown", lambda: True)
+    monkeypatch.setattr(work, "policy", lambda home: "on")
+    monkeypatch.setattr(work, "_sweep", lambda *args: events.append("sweep"))
+
+    def start_loop(_delay):
+        events.append("loop started")
+        loop.is_running = lambda: True
+
+    monkeypatch.setattr(work.time, "sleep", start_loop)
+    work.start_recovery(home)
+    threads[0]["target"]()
+    assert events == ["loop started", "sweep"]
+
+
 def test_markers_are_retired_at_load_with_workstreams_off(on, hermes, home, monkeypatch):
     cleared = []
     markers = types.ModuleType("tui_gateway.turn_marker")
@@ -4838,6 +4861,10 @@ def test_a_users_stop_still_leaves_the_work_interrupted(on, hermes, monkeypatch)
     work.turn_started(WORKER_1)
     work.turn_finished(WORKER_1, failed=False, interrupted=True)
     assert on.get("W1").status == "interrupted"
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert on.get("W1").status == "interrupted"
+    assert submitted_to(hermes, WORKER_1) == []
 
 
 def test_a_workstream_cant_save_to_the_bots_memory(on, hermes):
