@@ -1111,6 +1111,62 @@ def test_new_workstreams_start_on_the_workstream_model_picked(on, home, hermes, 
     assert refused["ok"] is False and "claude-sonet-5-5" in refused["note"] and "Edit Bot > Work" in refused["note"]
 
 
+def _bot_chat_on(home, model, provider):
+    """The Bot Chat's stored row, on ``model`` and ``provider`` (the columns Hermes reads its model back from)."""
+    with sqlite3.connect(home / "state.db") as db:
+        db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, title TEXT, hidden INTEGER, model TEXT, "
+                   "model_config TEXT, billing_provider TEXT, billing_base_url TEXT, billing_mode TEXT, "
+                   "parent_session_id TEXT, source TEXT, started_at REAL)")
+        db.execute("INSERT OR REPLACE INTO sessions VALUES (?, 'Bot Chat', 1, ?, ?, ?, '', '', NULL, 'desktop', 1)",
+                   (BOT_CHAT, model, json.dumps({"model": model, "provider": provider}), provider))
+
+
+def test_same_as_bot_chat_starts_workstreams_on_the_bot_chats_own_pick(on, home, hermes, monkeypatch, caplog):
+    # With the Workstream Model on "Same as bot chat", workstreams ran on the profile's model.default
+    # while the Bot Chat was on a different model picked in the chat.
+    import logging
+
+    server = sys.modules["tui_gateway.server"]
+    profile_model = ("gpt-6.1-sol", "openai-codex")
+    read = []
+
+    def read_back(row):  # Hermes' reader of the route a chat reopens on; a provider no longer set up is dropped
+        read.append(row["id"])
+        provider = json.loads(row.get("model_config") or "{}").get("provider")
+        return {"model_override": {"model": row["model"], "provider": None if provider == "gone" else provider}}
+
+    monkeypatch.setattr(server, "_stored_session_runtime_overrides", read_back, raising=False)
+    monkeypatch.setattr(server, "_config_model_target", lambda: profile_model, raising=False)
+    on.set_max_running(5)
+    _bot_chat_on(home, "claude-opus-5-5[1m]", "claude-subscription")
+    assert start()["ok"]
+    params = hermes.named("session.create")[-1][1]
+    assert (params.get("model"), params.get("provider")) == ("claude-opus-5-5[1m]", "claude-subscription")
+    assert "reasoning_effort" not in params and read == [BOT_CHAT]
+    # The Bot Chat on the profile's own model: nothing named, so the workstream follows the profile as before.
+    _bot_chat_on(home, *profile_model)
+    assert start("Two", "Count the invoices sent in March.")["ok"]
+    assert "model" not in hermes.named("session.create")[-1][1]
+    # A provider Hermes dropped names no model to run.
+    _bot_chat_on(home, "claude-opus-5-5[1m]", "gone")
+    assert start("Three", "Tidy the garden shed photos.")["ok"]
+    assert "model" not in hermes.named("session.create")[-1][1]
+    # A Workstream Model the user picked still wins over the Bot Chat's.
+    _bot_chat_on(home, "claude-opus-5-5[1m]", "claude-subscription")
+    work.app_set_settings(home, {"workstream_model": {"model": "gpt-6.1-terra", "provider": "openai-codex"}})
+    assert start("Four", "List the open invoices.")["ok"]
+    assert hermes.named("session.create")[-1][1]["model"] == "gpt-6.1-terra"
+    work.app_set_settings(home, {"workstream_model": None})
+    # A reader that fails, or none in this process: the profile's model, as before, and the log says why.
+    monkeypatch.setattr(server, "_stored_session_runtime_overrides", lambda row: 1 / 0)
+    with caplog.at_level(logging.WARNING):
+        assert start("Five", "Sort the receipts.")["ok"]
+    assert "model" not in hermes.named("session.create")[-1][1]
+    assert "couldn't read the Bot Chat's model" in caplog.text
+    monkeypatch.delattr(server, "_stored_session_runtime_overrides")
+    assert work.work_models.bot_chat(home, "default", BOT_CHAT) == {}
+
+
 def test_a_workstream_runs_on_the_model_the_users_words_named(on, home, hermes, monkeypatch):
     # Issue 2788: the bot names a model for one workstream, checked as Hermes' /model checks it; the
     # Workstream Model stays the default for every other.

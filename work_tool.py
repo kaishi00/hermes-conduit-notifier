@@ -1443,6 +1443,10 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
                  and not other.closed_at]
     same_repo.sort(key=lambda other: other.created_at)
     item = None
+    # "Same as bot chat" (no Workstream Model): the Bot Chat's own pick when it has one; without it,
+    # session.create alone starts the workstream on the profile's model.default instead.
+    chat_model = {} if picked or store.workstream_model() else work_models.bot_chat(
+        home, work_broker.profile_of(home), coordinator)
 
     def created(session_id: str) -> None:
         # Kept before the prompt goes in, so the turn's end finds its row.
@@ -1455,7 +1459,7 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         store.update(work.ref, host=_host_stamp())
         started = broker.start(title=work.title, prompt=prompt, idempotency_key=work.idempotency_key, cwd=cwd,
                                created=created, yolo=_yolo(home, store, work.ref),
-                               model=picked or store.workstream_model())
+                               model=picked or store.workstream_model() or chat_model)
     except Exception as error:  # noqa: BLE001 — the row never holds a slot it isn't using
         if item is not None:
             store.outbox_done(item, "refused")
@@ -1476,6 +1480,9 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
             # The user's pick may be the cause: say where it's changed.
             note += (f" New workstreams are set to run on {default['model']}, which the user picked in Edit "
                      "Bot > Work; if Hermes can't run that model, they can change it there.")
+        elif chat_model:
+            note += (f" It was to run on {chat_model['model']}, the model the Bot Chat is on (Workstream Model: "
+                     "Same as bot chat); the user can pick another in Edit Bot > Work.")
         return {"ok": False, "ref": work.ref, "error": "hermes", "note": note}
     # The session runs from here on, so a write that fails now never marks it
     # failed: its row already has the id (`created` stored it inside the
