@@ -131,7 +131,12 @@ def bot_chat(home: Path, profile: str, chat_id: str) -> dict:
     ``model.default`` while the Bot Chat was on its own pick."""
     server = sys.modules.get("tui_gateway.server")
     read_back = getattr(server, "_stored_session_runtime_overrides", None)
-    if not chat_id or not callable(read_back):
+    if not chat_id:
+        return {}
+    if not callable(read_back):
+        # Not silent: on a Webapp whose TUI gateway module isn't loaded, Same as Bot Chat runs the profile's model.
+        logger.info("conduit_push: this process can't read the Bot Chat's model (no Hermes session host here); "
+                    "the workstream starts on the profile's model")
         return {}
     from . import pulse_hermes, room_setup
 

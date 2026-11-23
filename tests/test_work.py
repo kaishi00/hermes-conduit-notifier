@@ -1173,7 +1173,10 @@ def test_same_as_bot_chat_starts_workstreams_on_the_bot_chats_own_pick(on, home,
     assert "model" not in hermes.named("session.create")[-1][1]
     assert "couldn't read the Bot Chat's model" in caplog.text
     monkeypatch.delattr(server, "_stored_session_runtime_overrides")
-    assert work.work_models.bot_chat(home, "default", BOT_CHAT) == {}
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert work.work_models.bot_chat(home, "default", BOT_CHAT) == {}
+    assert "can't read the Bot Chat's model" in caplog.text
 
 
 def test_a_workstream_runs_on_the_model_the_users_words_named(on, home, hermes, monkeypatch):
