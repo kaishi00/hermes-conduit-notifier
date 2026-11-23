@@ -110,7 +110,11 @@ FORM_HINT = ("When you need several details only the user can give (like dates o
 # (a farm Local voice call read one out, 2026-10-28). A file the user asked
 # for still goes: the chat shows it as a card.
 SPOKEN_HINT = ("The answer is heard: say it in words, never with text_to_speech or a sound file of your own. "
-               "A file the user asks for is still fine.")
+               "A file the user asks for is still fine. Reply in short natural speech (1-2 sentences, about 150 "
+               "characters), with no lists or markdown. If the task is long, say you will do it and carry on in the "
+               "background. Greetings, small talk and loose phrases get a direct short answer, with no tools or code. "
+               "Use a tool only when the request needs an action or data. If the speech sounds like other people talking "
+               "(not addressed to you), answer at most once, briefly, or stay silent.")
 # Said for a typed message whose reply Conduit reads aloud as well as shows
 # (its Read replies aloud setting, notifier issue 674): a sound file of the
 # agent's own would be a second voice under Conduit's, and its MEDIA: tag

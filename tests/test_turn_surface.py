@@ -173,6 +173,15 @@ def test_a_typed_message_read_aloud_hears_that_the_answer_is_heard():
     assert surfaces.SPOKEN_HINT in spoken and surfaces.HEARD_HINT not in spoken
 
 
+def test_spoken_hint_guides_a_concise_spoken_reply():
+    hint = surfaces.SPOKEN_HINT
+    assert "1-2 sentences" in hint and "150 characters" in hint
+    assert "no lists or markdown" in hint
+    assert "no tools or code" in hint
+    assert "action or data" in hint
+    assert "other people talking" in hint
+
+
 def test_a_report_keeps_whether_its_reply_is_heard():
     session = {}
     surfaces.record(session, surfaces.parse({**_report("iphone", entry="typed"), "heard": True}), clock=lambda: 1.0)
