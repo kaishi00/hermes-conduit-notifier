@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.195.8 (2026-11-24)
+
+### Fixes
+
+- Clearing a field of Hermes' speech settings (a provider's model, voice, language or endpoint) puts Hermes' default back. Before, the old value stayed, because Hermes' own save keeps a setting that's left out. The same goes for old gateway routing left behind when you pick another speech provider. Needs a Conduit that asks for it.
+
 ## 0.195.7 (2026-11-24)
 
 ### Fixes

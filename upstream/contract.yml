@@ -132,6 +132,14 @@ notes:
     hermes-conduit#2871, #2909). Hermes reads group_router from the install's default profile for
     every auto-routed room. Without the list, the rows aren't offered and the models stay a
     config.yaml edit (upstream/test_helper_models.py).
+  clearing a config key: >-
+    dashboard/api/config_unset.py reads a profile's config.yaml with
+    hermes_cli.config.require_readable_config_before_write (read_raw_config before it), takes keys
+    under stt and tts out and writes the rest with save_config, which must not merge the file back
+    in, holding hermes_cli.web_server._CONFIG_MUTATION_LOCK (read through sys.modules) in the
+    dashboard's process (feature map: "Profile config saves", hermes-conduit issue 3155). Hermes'
+    PUT /api/config deep-merges, so without the route a cleared speech field keeps its old value
+    (upstream/test_speech_config_unset.py).
   prediction fork lifecycle: >-
     dashboard/api/chats.py uses agent.background_review.release_cache_parity_fork
     when available to attribute prediction usage and release only fork clients
@@ -471,7 +479,7 @@ imports:
   gateway.warning_notifications:
     required: ["warning_notifications_enabled"]
   hermes_cli:
-    optional: ["__version__", "_launchers", "active_sessions", "lifecycle", "providers", "web_server_config"]
+    optional: ["__version__", "_launchers", "active_sessions", "config", "lifecycle", "providers", "web_server_config"]
   hermes_cli._launchers:
     optional: ["runtime_command"]
   hermes_cli.active_sessions:
@@ -680,6 +688,7 @@ routes:
   - GET /conduit-prefs/export
   - POST /conduit-prefs/import
   - PUT /conduit-settings
+  - POST /config/unset
   - GET /cron/notifications
   - PUT /cron/notifications
   - GET /e2e

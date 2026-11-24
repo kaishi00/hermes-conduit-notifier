@@ -368,6 +368,9 @@ ROUTE_CAPABILITIES = (
     # GET /boards/reviews: a review card's round with the pages its options
     # open; its marks go as a tap with action review (Cards Hermes shows).
     "review-cards",
+    # POST /config/unset: keys under stt and tts taken out of a profile's
+    # config.yaml, which Hermes' own save can't do (hermes-conduit#3155).
+    "config-unset",
 )
 
 

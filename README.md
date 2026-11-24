@@ -2450,6 +2450,28 @@ Conduit's Models & providers > Helper models and Hermes' Models page show and
 set it; Conduit sets `enabled` and the intervals through `/api/config`. A Hermes that lists it
 already keeps its own list.
 
+## Clearing a Hermes speech setting (plugin 0.195.8+)
+
+Hermes' `PUT /api/config` merges what it's sent over `config.yaml`, so a key a
+save leaves out keeps its old value, and Hermes reads its speech providers'
+settings with a default only when the key is absent. So a speech field Conduit
+says to leave blank for the default (a provider's model, voice, language or
+endpoint) couldn't be cleared, and a provider pick couldn't drop a stale
+`use_gateway` (hermes-conduit issue 3155).
+
+- `POST /api/plugins/conduit_push/config/unset?profile=<name>` with
+  `{"keys": ["tts.openai.voice", "tts.use_gateway"]}` takes those keys out of
+  the profile's `config.yaml`, with any section that leaves empty, and answers
+  `{ok, removed}`: the keys that were there. With none, the file isn't written.
+- Only keys under `stt` and `tts` are taken (400 otherwise), at most 20 at a
+  time. A managed Hermes answers 409.
+- `GET /capabilities` lists `config-unset`.
+- In the dashboard's process it holds the lock Hermes' own config routes
+  hold, so a save from the dashboard at the same moment can't put a key back.
+  A `?profile=` request Hermes serves in that profile's own plugin host
+  (0.22.3+) runs outside that lock; Conduit queues its own saves of a
+  profile, so they don't overlap.
+
 ## Group router in Helper models (plugin 0.187+)
 
 A group room set to pick who answers automatically (Who answers > Pick who

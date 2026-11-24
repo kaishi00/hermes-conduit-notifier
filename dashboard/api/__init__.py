@@ -55,6 +55,7 @@ MODULES = (
     "bot_plugin",
     "helper_models",
     "hermes_update",
+    "config_unset",
 )
 
 
