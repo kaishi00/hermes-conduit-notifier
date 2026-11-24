@@ -1001,7 +1001,7 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any, ch
             return refusal
         # "New since the last no" only on a question about work the user said no
         # to: kept, or replaced when there's more, and cleared otherwise.
-        declined = store.proposal_about(had + added, status="declined", since=time.time() - PROPOSAL_CLOSED_AGE_S)
+        declined = _refused(store, had + added, text, chat)[0]
         # Its choices, recommended one and going ahead are as this call gives
         # them, under the same rules as a new question's; left out, they stay
         # as they were (a reword that only adds evidence keeps its choices).

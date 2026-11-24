@@ -860,6 +860,11 @@ def test_a_question_dismissed_without_an_answer_is_told_as_no_answer(on, hermes,
         # What's new since a no stays on the question.
         kept = next(row for row in store_mod.Store(on.home).proposals_open() if row["id"] == asked["id"])
         assert kept["new"] == ("Finance asked for it today." if error == "declined" else "")
+        # Reworded, it keeps it too.
+        assert call("work_propose", {"text": f"Start a {error} audit of the billing exports this week?",
+                                     "replaces": asked["id"], "new": "Finance asked for it today."})["ok"]
+        kept = next(row for row in store_mod.Store(on.home).proposals_open() if row["id"] == asked["id"])
+        assert kept["new"] == ("Finance asked for it today." if error == "declined" else "")
         assert work.app_act(on.home, asked["id"], "approve")["ok"]
     # Answers elsewhere since don't push the no out of what's compared.
     monkeypatch.setattr(coord, "CLOSED_COMPARED", 1)

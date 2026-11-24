@@ -2715,8 +2715,13 @@ def _bound(path, handset, at, batch_id, **sharing):
     _paired(path)
     store = phone.PhoneStore(path, clock=lambda: at)
     handset.accept(store.register_key(handset.key_request()))
-    store.ingest(handset.seal(_batch(batch_id=batch_id, sharing=_sharing(**sharing))))
+    store.ingest(handset.seal(_batch(batch_id=batch_id, sent_at=_sent(at), sharing=_sharing(**sharing))))
     return store
+
+
+def _sent(at):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(at, timezone.utc).isoformat()
 
 
 def test_a_profile_whose_sharing_was_turned_off_reads_the_one_it_moved_to(home):
@@ -2747,6 +2752,12 @@ def test_a_profile_the_phone_stopped_syncing_to_reads_the_one_it_moved_to(home):
         assert owner == "work" and found.path == work.path
     # The live profile reads its own.
     assert phone.store_for(work.path.parent)[1] is None
+    # A retry of an older batch that reaches the old profile late changes
+    # nothing there, and doesn't make its row the newer sync.
+    late = phone.PhoneStore(home.path, clock=lambda: NOW + 2 * 86400)
+    assert late.ingest(handset.seal(_batch(batch_id="batch-0000", sent_at=_sent(NOW - 60),
+                                           sharing=_sharing(other_profiles=True))))["stale"] is True
+    assert phone.store_for(home.path)[1] == "work" and phone.store_for(work.path.parent)[1] is None
 
 
 def test_a_profile_keeps_its_own_store_beside_another_devices_or_an_off_row(home):

@@ -1794,7 +1794,11 @@ def _synced_devices(path: Path) -> list[tuple[str, float, bool, bool]]:
         version = _meta(connection, "schema")
         if not (version or "").isdigit() or int(version) > SCHEMA_VERSION:
             return []
-        rows = connection.execute("SELECT id, last_seen, sharing FROM devices WHERE last_seen IS NOT NULL").fetchall()
+        # When the phone sent what's stored, not when a batch last arrived:
+        # a late retry to a profile the phone moved away from (stale, so it
+        # changes no sharing) mustn't look like the newer sync.
+        rows = connection.execute("SELECT id, COALESCE(last_sent, last_seen), sharing FROM devices"
+                                  " WHERE last_seen IS NOT NULL").fetchall()
     except sqlite3.DatabaseError:
         return []
     finally:
