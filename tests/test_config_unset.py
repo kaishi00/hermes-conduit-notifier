@@ -153,3 +153,21 @@ def test_it_runs_in_the_profile_named(hermes, client, monkeypatch):
     monkeypatch.setattr(api.core, "_profile_scope", Scope)
     answer = client.post(f"{BASE}/config/unset?profile=second", json={"keys": ["tts.openai.voice"]})
     assert answer.status_code == 200 and len(hermes.saves) == 1
+
+
+@pytest.mark.parametrize("missing, status", [("hermes_cli.config", 501), ("hermes_cli", 501), ("yaml", 500)])
+def test_only_a_hermes_without_the_module_says_to_update(hermes, client, monkeypatch, missing, status):
+    """A broken import inside Hermes' config module is the host's error, not 'update Hermes'."""
+    real_import = __import__
+
+    def refuse(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "hermes_cli" and "config" in (fromlist or ()):
+            raise ImportError(f"No module named {missing!r}", name=missing)
+        return real_import(name, globals, locals, fromlist, level)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("builtins.__import__", refuse)
+        response = client.post(f"{BASE}/config/unset", json={"keys": ["tts.openai.voice"]})
+    assert response.status_code == status
+    assert ("update Hermes" in response.json()["detail"]) == (status == 501)
+    assert hermes.saves == []
