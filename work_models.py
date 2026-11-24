@@ -73,6 +73,7 @@ def _switch(home: Path, profile: str, model: str, provider: str) -> dict:
     broke): the name goes to Hermes as given, whose session.create still
     refuses a model its provider can't serve."""
     try:
+        from hermes_cli import providers as hermes_providers
         from hermes_cli.inventory import load_picker_context
         from hermes_cli.model_switch import switch_model
         from hermes_cli.models_validate import static_model_provider_conflict
@@ -81,6 +82,7 @@ def _switch(home: Path, profile: str, model: str, provider: str) -> dict:
         return {}
     from . import room_setup
 
+    asked = model
     try:
         with room_setup.profile_scope(profile):
             ctx = load_picker_context()
@@ -92,7 +94,11 @@ def _switch(home: Path, profile: str, model: str, provider: str) -> dict:
                 for index in reversed(cuts):
                     head, rest = model[:index].strip(), model[index + 1:].strip()
                     if head and rest and resolve_provider_full(head, ctx.user_providers, ctx.custom_providers):
-                        provider, model = head, rest
+                        # On an aggregator (OpenRouter) Hermes reads ``vendor:model`` as the slug
+                        # ``vendor/model`` on that same provider, never as a switch to the vendor
+                        # (issue 1055): the name stays whole and Hermes converts it.
+                        if not _vendor_slug(head, model, ctx, hermes_providers):
+                            provider, model = head, rest
                         break
             result = switch_model(model, ctx.current_provider, ctx.current_model,
                                   current_base_url=ctx.current_base_url, explicit_provider=provider,
@@ -110,10 +116,48 @@ def _switch(home: Path, profile: str, model: str, provider: str) -> dict:
         logger.warning("conduit_push: checking a workstream's model failed", exc_info=True)
         return {}
     if not getattr(result, "success", False):
-        raise Refused(f"Hermes can't run {model}" + (f" here: {reason}" if reason else " here.")
+        # The name as the bot gave it, not the half left after a provider was taken off it.
+        raise Refused(f"Hermes can't run {asked}" + (f" here: {reason}" if reason else " here.")
                       + " Nothing was started. Use a name from that, or leave model out to run it on the "
                         "Workstream Model.")
     return picked
+
+
+def _vendor_slug(head: str, model: str, ctx: Any, hermes_providers: Any) -> bool:
+    """Whether Hermes' /model reads ``head:rest`` as a model slug on the
+    profile's current provider rather than as a provider and its model: on an
+    aggregator "every left:right is a slug" (Hermes' _convert_vendor_colon_slug:
+    ``anthropic:claude-sonnet-4.6`` runs as ``anthropic/claude-sonnet-4.6`` on
+    OpenRouter, ``deepseek:deepseek-r1:free`` keeps its variant tag). Split off
+    as a provider there, the name was refused for the vendor's own key, or
+    pinned to the vendor's direct route when that key existed. Hermes' own
+    guards apply: a name with a slash is already a slug (its colon a variant
+    tag, and a provider before it is still taken apart), and a custom or Ollama
+    current provider converts nothing. A head that is the user's own endpoint
+    (``custom:<name>``, a configured provider with a base_url) or the current
+    provider itself is always a provider. A Hermes that can't say keeps the
+    split."""
+    try:
+        is_aggregator = getattr(hermes_providers, "is_aggregator", None)
+        current = str(getattr(ctx, "current_provider", "") or "").strip().lower()
+        low = head.strip().lower()
+        if not callable(is_aggregator) or "/" in model or not current:
+            return False
+        if current.startswith("custom") or current == "ollama" or low.startswith("custom") or low == current:
+            return False
+        users = ctx.user_providers if isinstance(ctx.user_providers, dict) else {}
+        for key, entry in users.items():
+            names = {str(key).strip().lower(), str((entry or {}).get("name") or "").strip().lower()
+                     if isinstance(entry, dict) else ""}
+            if low in names and isinstance(entry, dict) and str(entry.get("base_url") or "").strip():
+                return False
+        for entry in ctx.custom_providers if isinstance(ctx.custom_providers, (list, tuple)) else ():
+            if isinstance(entry, dict) and str(entry.get("name") or "").strip().lower() == low:
+                return False
+        return bool(is_aggregator(ctx.current_provider))
+    except Exception:  # noqa: BLE001 — a Hermes that can't say: the split, as before
+        logger.debug("conduit_push: couldn't tell an aggregator's vendor slug", exc_info=True)
+        return False
 
 
 def bot_chat(home: Path, profile: str, chat_id: str) -> dict:

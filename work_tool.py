@@ -6991,9 +6991,6 @@ def stop() -> None:
         _not_work.clear()
         _not_compacted.clear()
     work_coord.forget_open_questions()
-    from . import clarify_loop  # imported where it's used: it imports far more
-
-    clarify_loop.forget_sources()
     with _wake_lock:
         pending = list(_wakes.values())
         _wakes.clear()
@@ -7042,6 +7039,14 @@ def stop() -> None:
     for timer in held_timers:
         timer.cancel()
     work_watch.stop()
+    # Last, and guarded: an import that failed on the way out would otherwise
+    # skip the wakes and timers above (#999's review, issue 1000).
+    try:
+        from . import clarify_loop  # imported where it's used: it imports far more
+
+        clarify_loop.forget_sources()
+    except Exception:  # noqa: BLE001 — unloading goes on
+        logger.debug("conduit_push: couldn't forget the question sources on unload", exc_info=True)
 
 
 def flush_wakes() -> None:

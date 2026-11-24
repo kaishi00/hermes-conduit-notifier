@@ -782,6 +782,14 @@ def _slot(session_id: str, task_id: Any = None, key: str = "", *, turn_id: Any =
                 _key_writers[seed] = session_id
                 while len(_key_writers) > MAX_TURN_STARTS:
                     del _key_writers[next(iter(_key_writers))]
+            if job and isinstance(task_id, str):
+                # Each run's own chat, by its task id (cron:<job>:<execution>):
+                # a report that didn't land opens the chat of its run, not of
+                # a newer one that ended meanwhile (cron_bot_chat._run_chat).
+                _run_chats.pop(task_id, None)
+                _run_chats[task_id] = session_id
+                while len(_run_chats) > MAX_TURN_STARTS:
+                    del _run_chats[next(iter(_run_chats))]
             if job and (job, session_id) not in _job_run_chats:
                 # The job's newest run is the one whose turn ended first
                 # most recently: a later turn in an older run doesn't take it
@@ -817,6 +825,8 @@ def _started_slot(session_id: str, turn_id: Any) -> tuple[str, str]:
 _turn_slots: dict[tuple[str, str], tuple[str, str]] = {}
 # job -> the chat of its newest run, and every (job, chat) seen so far.
 _job_runs: dict[str, str] = {}
+# A run's task id (cron:<job>:<execution>) -> its chat.
+_run_chats: dict[str, str] = {}
 _job_run_chats: dict[tuple[str, str], None] = {}
 # key slot -> the chat that wrote it last, whose notification a task from
 # another chat mustn't replace.

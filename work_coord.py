@@ -718,21 +718,34 @@ def _asked_before(store: work_store.Store, refs: list[str], new: str, *, besides
                         "Wait for the user's answer, or call again with replaces "
                         f"{pending['id']} to reword it with what's new."}
     # A no stands for a day unless something new came up.
-    declined = store.proposal_about(refs, status="declined", since=time.time() - PROPOSAL_CLOSED_AGE_S)
+    since = time.time() - PROPOSAL_CLOSED_AGE_S
+    declined = store.proposal_about(refs, status="declined", since=since)
+    # So does a question they took off their list without answering.
+    dismissed = store.proposal_about(refs, status="dismissed", since=since)
+    if not refs and text:
+        # About no workstream there's no work to find the no by: nearly the
+        # same words in the same chat are the same question (issue 1031).
+        closed = [row for row in reversed(store.proposals_answered(since=since, limit=CLOSED_COMPARED))
+                  if not work_store.proposal_refs(row) and (row.get("chat") or "") == chat
+                  and _same_words(row["text"], text)]
+        declined = next((row for row in closed if row["status"] == "declined"), None)
+        dismissed = next((row for row in closed if row["status"] == "dismissed"), None)
+    about = "about this work" if refs else "that asked nearly the same"
     if declined is not None and not new:
         return {"ok": False, "id": declined["id"], "error": "declined",
-                "note": f"The user declined {declined['id']} about this work. Ask again only with what came "
+                "note": f"The user declined {declined['id']} {about}. Ask again only with what came "
                         "up since, in new, and say it to them; otherwise leave it."}
-    # So does a question they took off their list without answering.
-    dismissed = store.proposal_about(refs, status="dismissed", since=time.time() - PROPOSAL_CLOSED_AGE_S)
     if dismissed is not None and not new:
         return {"ok": False, "id": dismissed["id"], "error": "dismissed",
-                "note": f"The user dismissed {dismissed['id']} about this work without answering. Ask again only "
+                "note": f"The user dismissed {dismissed['id']} {about} without answering. Ask again only "
                         "with what came up since, in new, and say it to them; otherwise leave it."}
     return None
 
 
 CHOICES_MIN, CHOICES_MAX, CHOICE_CHARS = 2, 4, 60
+# How many of the day's answered questions a new one about no workstream is
+# held against, newest first.
+CLOSED_COMPARED = 50
 # Under Ask Me First the bot waits for every answer; only Auto lets it carry
 # on with its recommendation meanwhile (Eric, 2026-11-21).
 WAIT_UNDER_ASK = (" The coordination setting is Ask Me First, so you don't go ahead: wait for their answer "
