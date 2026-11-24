@@ -14,13 +14,16 @@ A run stays quiet when:
   run anywhere else either. Chats keep Hermes' interactive rule, the marker
   as the whole reply (events.is_silent_response, the exact ``[SILENT]`` on
   a Hermes without it).
-- on a delivered leg (the reply or the failure push, not a background
-  task's), the job delivers to a Bot Chat: the report or failure notice
-  reaches the user through the Bot Chat (the note's push from
-  cron_bot_chat.show, or the Bot Chat's own turn's reply when the bot acts
-  on the report), so the run chat's push would be the second one
+- on a delivered leg (the reply or the failure push of the run's own turn,
+  not a background task's), the job delivers to a Bot Chat: the report or
+  failure notice reaches the user through the Bot Chat (the note's push
+  from cron_bot_chat.show, or the Bot Chat's own turn's reply when the bot
+  acts on the report), so the run chat's push would be the second one
   (Eric, 2026-11-23, issue 1047: one notification per run, wherever the
-  job delivers).
+  job delivers). Only the run's own turn, told by its task id: a follow-up
+  the user asks in the run's chat later is a chat reply like any other,
+  and nothing is delivered for it (issue 1053). The first two rules hold
+  for the whole chat.
 """
 
 from __future__ import annotations
@@ -127,9 +130,11 @@ def quiet(session_id: Any, task_id: Any, response: Any = None, *,
     (cron_store), or its output is Hermes' silence marker by the cron rule
     (``[SILENT]``, SILENT / NO_REPLY, "…[SILENT] No changes").
 
-    On a delivered leg (`delivered`, the reply or the failure push — never
-    a background task's, which reports on its own), a run delivered to a
-    Bot Chat is quiet too (Eric, 2026-11-23, issue 1047: one notification
+    On a delivered leg (`delivered`, the reply or the failure push of the
+    run's own turn — never a background task's, which reports on its own,
+    nor a later turn in the run's chat, which carries no ``cron:`` task id
+    and for which Hermes delivers nothing, issue 1053), a run delivered to
+    a Bot Chat is quiet too (Eric, 2026-11-23, issue 1047: one notification
     per run, wherever the job delivers): the report or failure notice
     reaches the user through the Bot Chat, so the run chat's push would be
     the second one — the Bot Chat's own turn's reply push when the bot acts
@@ -146,7 +151,7 @@ def quiet(session_id: Any, task_id: Any, response: Any = None, *,
         return False
     if muted(job) or (response is not None and is_silent(response)):
         return True
-    if not delivered:
+    if not delivered or job_id(None, task_id) is None:
         return False
     targets = _bot_chat_targets(_job_deliver(job, failure))
     if not targets:
