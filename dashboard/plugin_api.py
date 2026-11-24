@@ -78,6 +78,9 @@ they run:
                           Group router)
     hermes_update         Update Hermes: hermes update runs in a systemd
                           scope of its own, so it outlives the dashboard
+    config_unset          Clearing a Hermes speech setting: keys taken out of
+                          a profile's config.yaml, which Hermes' own save
+                          can't do
 
 A module takes what it uses from another by module (``core.TokenError``), never
 by name, so a test that replaces ``plugin_api.core._calls_home`` replaces it
