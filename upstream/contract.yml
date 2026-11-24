@@ -345,7 +345,9 @@ notes:
     providers, hermes_cli.providers.resolve_provider_full to take a leading provider name apart,
     hermes_cli.model_switch.switch_model (nothing saved) and
     models_validate.static_model_provider_conflict, session.create's own gate, said before a row is
-    kept. Without them the name goes to session.create as given. upstream/test_bot_work.py's
+    kept. hermes_cli.providers.is_aggregator (read by name) says the profile's provider is an
+    aggregator, where a vendor:model name stays whole as /model keeps it; without it the name is
+    split as before. Without them the name goes to session.create as given. upstream/test_bot_work.py's
     test_a_model_the_bot_names_is_checked_as_hermes_model_command_checks_it holds it.
   a chat's model pick: >-
     dashboard/api/session_route.py wraps tui_gateway.server._runtime_model_config, reached by name

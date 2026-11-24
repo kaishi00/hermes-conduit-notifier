@@ -961,12 +961,17 @@ class Store:
                           (since, *(() if chat is None else (chat,)), limit))
         return sorted(rows, key=lambda row: row["created_at"])
 
-    def proposals_answered(self, *, since: float = 0.0, limit: int = 20) -> list[dict]:
+    def proposals_answered(self, *, since: float = 0.0, limit: int = 20, refused_in: str | None = None) -> list[dict]:
         """The ``limit`` the user answered most recently since then (not
         withdrawn ones), oldest asked first: one asked long ago and
-        answered last is among them."""
-        rows = self._read("SELECT * FROM proposals WHERE status NOT IN ('open', 'withdrawn') AND answered_at >= ? "
-                          "ORDER BY answered_at DESC LIMIT ?", (since, limit))
+        answered last is among them. ``refused_in`` keeps only the ones
+        they declined or dismissed in that chat, so other answers don't use
+        up the limit."""
+        where, args = "status NOT IN ('open', 'withdrawn')", [since]
+        if refused_in is not None:
+            where, args = "status IN ('declined', 'dismissed') AND COALESCE(chat, '') = ?", [since, refused_in]
+        rows = self._read(f"SELECT * FROM proposals WHERE answered_at >= ? AND {where} "
+                          "ORDER BY answered_at DESC LIMIT ?", (*args, limit))
         return sorted(rows, key=lambda row: row["created_at"])
 
     def proposals_open(self) -> list[dict]:

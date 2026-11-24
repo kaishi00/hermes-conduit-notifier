@@ -854,8 +854,31 @@ def test_a_question_dismissed_without_an_answer_is_told_as_no_answer(on, hermes,
         # Another question, another chat, or something new, is asked.
         assert call("work_propose", {"text": f"Start a {error} audit of the billing exports now?"},
                     session_id=OTHER_CHAT)["ok"]
-        assert call("work_propose", {"text": f"Start a {error} audit of the billing exports now?",
-                                     "new": "Finance asked for it today."})["ok"]
+        asked = call("work_propose", {"text": f"Start a {error} audit of the billing exports now?",
+                                      "new": "Finance asked for it today."})
+        assert asked["ok"]
+        # What's new since a no stays on the question.
+        kept = next(row for row in store_mod.Store(on.home).proposals_open() if row["id"] == asked["id"])
+        assert kept["new"] == ("Finance asked for it today." if error == "declined" else "")
+        # Reworded, it keeps it too.
+        assert call("work_propose", {"text": f"Start a {error} audit of the billing exports this week?",
+                                     "replaces": asked["id"], "new": "Finance asked for it today."})["ok"]
+        kept = next(row for row in store_mod.Store(on.home).proposals_open() if row["id"] == asked["id"])
+        assert kept["new"] == ("Finance asked for it today." if error == "declined" else "")
+        # So does one reworded past the words of the no.
+        assert call("work_propose", {"text": "Shall I look over how invoices leave the system?",
+                                     "replaces": asked["id"]})["ok"]
+        kept = next(row for row in store_mod.Store(on.home).proposals_open() if row["id"] == asked["id"])
+        assert kept["new"] == ("Finance asked for it today." if error == "declined" else "")
+        assert work.app_act(on.home, asked["id"], "approve")["ok"]
+    # Answers elsewhere since don't push the no out of what's compared.
+    monkeypatch.setattr(coord, "CLOSED_COMPARED", 1)
+    loose = call("work_propose", {"text": "Start a rewrite of the importer in Rust?"})["id"]
+    assert work.app_act(on.home, loose, "decline")["ok"]
+    other = call("work_propose", {"text": "Archive the old staging database?"}, session_id=OTHER_CHAT)["id"]
+    assert work.app_act(on.home, other, "decline")["ok"]
+    again = call("work_propose", {"text": "Start a rewrite of the importer in Rust now?"})
+    assert (again["error"], again["id"]) == ("declined", loose)
 
 
 def test_going_ahead_under_auto_and_a_no_to_it_is_told(on, hermes, home, monkeypatch):

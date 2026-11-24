@@ -3487,7 +3487,10 @@ workouts, body, vitals, fitness), with how far back to start.
   and its overview names the sharing profile. A profile that a phone syncs
   health to itself always reads its own, and if several profiles share
   with the others the first wins (default, then named ones
-  alphabetically). Voice reads stay with the sharing profile, whose key
+  alphabetically). When you move health to another profile, the old one
+  stops counting (plugin 0.195.7+): a device that turned every category
+  off there, or has since synced into another paired profile's store, is
+  no longer that profile's own data, so it reads the shared store too. Voice reads stay with the sharing profile, whose key
   they're sealed with.
 
 Limits: 4 devices per profile, 6,000 items and 4 MiB per batch, 120 uploads
@@ -3866,7 +3869,11 @@ whether notes and attendees are included (off by default).
   changes too, and only the first to ask sees them as `new`. Devices that
   left the switch off stay out of its reads and changes. A profile that a phone
   syncs to itself always reads its own, and if several profiles share with
-  the others the first wins (default, then named ones alphabetically).
+  the others the first wins (default, then named ones alphabetically). When
+  you move sharing to another profile, the old one stops counting (plugin
+  0.195.7+): a device that shares nothing there any more, or has since
+  synced into another paired profile's store, is no longer that profile's
+  own data, so it reads the shared store too.
   Voice reads stay with the sharing profile, whose key they're sealed with.
 - **With each message (plugin 0.167+).** When the user turns on "With each
   message" under Focus and phone status (`sharing.turn_status`, capability

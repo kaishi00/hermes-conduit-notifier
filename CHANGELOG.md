@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.195.7 (2026-11-24)
+
+### Fixes
+
+- After you move calendar and phone or health sharing to another profile with "Share with this host's other profiles" on, the old profile reads the new one's data. Before, the rows the phone left behind kept the old profile reading its own, frozen copy.
+- A question about no workstream that you declined stays held for the day however many other questions you answered since, and when the bot asks again with something new, the question shows what's new.
+
 ## 0.195.6 (2026-11-24)
 
 ### Fixes
@@ -20,6 +27,7 @@ checks it). The format is fixed, because Conduit reads it:
 - On OpenRouter and other aggregators, a workstream the bot starts on a model named like anthropic:claude-sonnet-4.6 runs on that model through your aggregator, as Hermes' /model does. Before, the start was refused for a missing Anthropic key, or ran directly on Anthropic when you had one.
 - A question about no workstream that you declined or dismissed isn't asked again that day in nearly the same words, unless something new came up.
 - A scheduled job's report that couldn't be written into the Bot Chat opens the chat of its own run, not of a newer run that finished meanwhile. With no chat to open, no notification is sent.
+- A scheduled job's report still lands in the bot's chat history when Hermes' own note to the open chat fails. Before, that report was lost.
 
 ## 0.195.5 (2026-11-24)
 

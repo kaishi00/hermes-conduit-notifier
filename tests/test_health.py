@@ -491,6 +491,50 @@ def test_another_profile_on_the_host_reads_health_shared_with_it(home):
     assert _call({"action": "sleep"})["nights"][0]["deep"] == 71
 
 
+def _bound(path, phone, at, batch_id, **batch):
+    """``phone`` syncs health into the profile at ``path`` at ``at``."""
+    _paired(path)
+    store = health.HealthStore(path, clock=lambda: at)
+    phone.accept(store.register_key(phone.key_request()))
+    store.ingest(phone.seal(_batch(batch_id=batch_id, computed_at=_computed(at), **batch)))
+    return store
+
+
+def _computed(at):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(at, timezone.utc).isoformat()
+
+
+def test_a_profile_the_phone_moved_its_health_from_reads_the_one_it_moved_to(home):
+    # Issue 1021: health is bound to one profile. Moved to `work`, the old
+    # profile keeps the device's row, turned off or just left: the same
+    # device syncing into another paired profile since leaves it behind, for
+    # the old profile and for every other one.
+    for leaves in ({"categories": []}, {"other_profiles": True}):
+        root = home / ("off" if "categories" in leaves else "left")
+        phone = Phone()
+        old = _bound(root, phone, NOW, "batch-0001", **leaves)
+        work = _bound(root / "profiles" / "work", Phone(), NOW + 86400, "batch-0002", other_profiles=True)
+        fresh = root / "profiles" / "fresh"
+        _paired(fresh)
+        for reader in (root, fresh):
+            found, owner = health.store_for(reader)
+            assert owner == "work" and found.path == work.path, leaves
+        assert health.store_for(root / "profiles" / "work")[1] is None
+        # A retry of an older batch that reaches the old profile late
+        # isn't the newer sync.
+        old.clock = lambda: NOW + 2 * 86400
+        old.ingest(phone.seal(_batch(batch_id="batch-0000", computed_at=_computed(NOW - 60))))
+        assert health.store_for(root)[1] == "work" and health.store_for(root / "profiles" / "work")[1] is None
+
+
+def test_a_profile_keeps_its_own_health_beside_another_devices(home):
+    _bound(home, Phone(), NOW, "batch-0001")
+    _bound(home / "profiles" / "work", Phone(device_id="ipad-installation-2"), NOW + 86400, "batch-0002",
+           other_profiles=True)
+    assert health.store_for(home)[1] is None
+
+
 def test_health_stays_with_its_profile_unless_shared_with_the_others(home):
     _work_shares(home, other_profiles=False)
     assert tool.available() is False
