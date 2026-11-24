@@ -1001,7 +1001,10 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any, ch
             return refusal
         # "New since the last no" only on a question about work the user said no
         # to: kept, or replaced when there's more, and cleared otherwise.
-        declined = _refused(store, had + added, text, chat)[0]
+        # About no workstream the no is found by its words, which a reword
+        # may leave behind: what the question already carries is kept then.
+        declined = _refused(store, had + added, text, chat)[0] or (
+            asked if asked.get("new") and not had and not added else None)
         # Its choices, recommended one and going ahead are as this call gives
         # them, under the same rules as a new question's; left out, they stay
         # as they were (a reword that only adds evidence keeps its choices).

@@ -496,8 +496,13 @@ def _bound(path, phone, at, batch_id, **batch):
     _paired(path)
     store = health.HealthStore(path, clock=lambda: at)
     phone.accept(store.register_key(phone.key_request()))
-    store.ingest(phone.seal(_batch(batch_id=batch_id, **batch)))
+    store.ingest(phone.seal(_batch(batch_id=batch_id, computed_at=_computed(at), **batch)))
     return store
+
+
+def _computed(at):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(at, timezone.utc).isoformat()
 
 
 def test_a_profile_the_phone_moved_its_health_from_reads_the_one_it_moved_to(home):
@@ -507,7 +512,8 @@ def test_a_profile_the_phone_moved_its_health_from_reads_the_one_it_moved_to(hom
     # the old profile and for every other one.
     for leaves in ({"categories": []}, {"other_profiles": True}):
         root = home / ("off" if "categories" in leaves else "left")
-        _bound(root, Phone(), NOW, "batch-0001", **leaves)
+        phone = Phone()
+        old = _bound(root, phone, NOW, "batch-0001", **leaves)
         work = _bound(root / "profiles" / "work", Phone(), NOW + 86400, "batch-0002", other_profiles=True)
         fresh = root / "profiles" / "fresh"
         _paired(fresh)
@@ -515,6 +521,11 @@ def test_a_profile_the_phone_moved_its_health_from_reads_the_one_it_moved_to(hom
             found, owner = health.store_for(reader)
             assert owner == "work" and found.path == work.path, leaves
         assert health.store_for(root / "profiles" / "work")[1] is None
+        # A retry of an older batch that reaches the old profile late
+        # isn't the newer sync.
+        old.clock = lambda: NOW + 2 * 86400
+        old.ingest(phone.seal(_batch(batch_id="batch-0000", computed_at=_computed(NOW - 60))))
+        assert health.store_for(root)[1] == "work" and health.store_for(root / "profiles" / "work")[1] is None
 
 
 def test_a_profile_keeps_its_own_health_beside_another_devices(home):

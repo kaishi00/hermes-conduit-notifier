@@ -65,6 +65,10 @@ FILE_NAME = "conduit-health.sqlite3"
 SCHEMA_VERSION = 1
 # A device's "Share with this host's other profiles", one meta row each.
 OTHER_PROFILES_KEY = "other_profiles:"
+# When the phone computed the newest batch a device sent here, beside the
+# store like the choice above: store_for orders a device's rows in two
+# profiles by it, so a late retry to the profile it left isn't the newer sync.
+SENT_KEY = "sent:"
 
 SALT = b"conduit-health-v1"
 INFO_INGEST = b"conduit-health-v1 ingest device-to-host"
@@ -415,6 +419,7 @@ class HealthStore:
                     db.execute(f"DELETE FROM {table} WHERE device=?", (device_id,))
                 db.execute("DELETE FROM meta WHERE key=?", (_readers_key(device_id),))
                 db.execute("DELETE FROM meta WHERE key=?", (OTHER_PROFILES_KEY + device_id,))
+                db.execute("DELETE FROM meta WHERE key=?", (SENT_KEY + device_id,))
             db.execute(
                 "INSERT INTO devices(id, name, device_public, host_private, host_public, kid, created_at, last_seen)"
                 " VALUES(?,?,?,?,?,?,?,NULL)"
@@ -560,9 +565,11 @@ class HealthStore:
             if device_id is None:
                 db.execute("DELETE FROM meta WHERE key LIKE 'voice_readers:%'")
                 db.execute("DELETE FROM meta WHERE key LIKE ?", (OTHER_PROFILES_KEY + "%",))
+                db.execute("DELETE FROM meta WHERE key LIKE ?", (SENT_KEY + "%",))
             else:
                 db.execute("DELETE FROM meta WHERE key=?", (_readers_key(device_id),))
                 db.execute("DELETE FROM meta WHERE key=?", (OTHER_PROFILES_KEY + device_id,))
+                db.execute("DELETE FROM meta WHERE key=?", (SENT_KEY + device_id,))
         # The file goes once no device is left. Counted again under the
         # writers' lock, so a key registered since the delete stays.
         with self._locked():
@@ -798,7 +805,8 @@ def _synced_devices(path: Path) -> list[tuple[str, float, bool, bool]]:
                 shares = categories is None or bool(json.loads(categories))
             except ValueError:
                 shares = True
-            found.append((device_id, float(last_seen or 0), shares, shares_out(connection, device_id)))
+            found.append((device_id, _sent(connection, device_id) or float(last_seen or 0), shares,
+                          shares_out(connection, device_id)))
         return found
     except sqlite3.DatabaseError:
         return []
@@ -812,6 +820,14 @@ def _meta(db: sqlite3.Connection, key: str) -> str | None:
     except sqlite3.OperationalError:
         return None
     return row[0] if row else None
+
+
+def _sent(db: sqlite3.Connection, device_id: str) -> float:
+    """When the phone computed the newest batch this device sent, or 0."""
+    try:
+        return float(_meta(db, SENT_KEY + device_id) or 0)
+    except ValueError:
+        return 0.0
 
 
 def _readers_key(device_id: str) -> str:
@@ -988,6 +1004,8 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
         db.execute("INSERT OR REPLACE INTO meta VALUES(?, '1')", (OTHER_PROFILES_KEY + device_id,))
     elif other_profiles is False:
         db.execute("DELETE FROM meta WHERE key=?", (OTHER_PROFILES_KEY + device_id,))
+    if computed_at > _sent(db, device_id):
+        db.execute("INSERT OR REPLACE INTO meta VALUES(?, ?)", (SENT_KEY + device_id, str(computed_at)))
     db.execute("UPDATE devices SET last_seen=?, tz=COALESCE(?, tz), categories=COALESCE(?, categories),"
                " detailed=COALESCE(?, detailed) WHERE id=?",
                (now, tz, None if categories is None else json.dumps(categories),
