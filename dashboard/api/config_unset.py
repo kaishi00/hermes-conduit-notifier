@@ -82,8 +82,14 @@ def _take(config: Dict[str, Any], path: List[str]) -> bool:
 
 def _dashboard_config_lock() -> Any:
     """The lock Hermes' config routes hold across a read and its save; none outside the dashboard's process."""
-    lock = getattr(sys.modules.get("hermes_cli.web_server"), "_CONFIG_MUTATION_LOCK", None)
-    return lock if hasattr(lock, "__enter__") else nullcontext()
+    web_server = sys.modules.get("hermes_cli.web_server")
+    lock = getattr(web_server, "_CONFIG_MUTATION_LOCK", None)
+    if hasattr(lock, "__enter__"):
+        return lock
+    if web_server is not None:
+        # A Hermes that renamed it: the save still has save_config's own lock, not the routes'.
+        logger.warning("conduit_push: Hermes' dashboard has no _CONFIG_MUTATION_LOCK; clearing config keys without it")
+    return nullcontext()
 
 
 def unset_config_keys(body: Any) -> Dict[str, Any]:

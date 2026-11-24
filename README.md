@@ -2465,8 +2465,11 @@ endpoint) couldn't be cleared, and a provider pick couldn't drop a stale
   `{ok, removed}`: the keys that were there. With none, the file isn't written.
 - Only keys under `stt` and `tts` are taken (400 otherwise), at most 20 at a
   time. A managed Hermes answers 409.
-- It holds the lock Hermes' own config routes hold, so a save from the
-  dashboard at the same moment can't put a key back.
+- In the dashboard's process it holds the lock Hermes' own config routes
+  hold, so a save from the dashboard at the same moment can't put a key back.
+  A `?profile=` request Hermes serves in that profile's own plugin host
+  (0.22.3+) runs outside that lock; Conduit queues its own saves of a
+  profile, so they don't overlap.
 
 ## Group router in Helper models (plugin 0.187+)
 
