@@ -139,7 +139,7 @@ notes:
     in, holding hermes_cli.web_server._CONFIG_MUTATION_LOCK (read through sys.modules) in the
     dashboard's process (feature map: "Profile config saves", hermes-conduit issue 3155). Hermes'
     PUT /api/config deep-merges, so without the route a cleared speech field keeps its old value
-    (upstream/test_config_unset.py).
+    (upstream/test_speech_config_unset.py).
   prediction fork lifecycle: >-
     dashboard/api/chats.py uses agent.background_review.release_cache_parity_fork
     when available to attribute prediction usage and release only fork clients

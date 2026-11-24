@@ -1,6 +1,11 @@
 """Clearing a Hermes speech setting (hermes-conduit issue 3155): Hermes'
 PUT /api/config merges what it's sent over the file, so a key a save leaves
-out stays; the plugin's /config/unset takes it out of the profile named."""
+out stays; the plugin's /config/unset takes it out of the profile named.
+
+The file's name sorts after the modules that start a dashboard of their own
+(test_bot_work, test_compaction_skip, test_cron_bot_chat): Hermes 0.23.4
+refuses a second dashboard while the shared one here is running, and that one
+starts with the first test that asks for it."""
 
 from __future__ import annotations
 
