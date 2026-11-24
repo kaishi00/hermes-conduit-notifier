@@ -2707,6 +2707,59 @@ def test_turning_other_profiles_off_takes_the_calendar_back(home):
     assert _cal({"action": "overview"})["error"] == "nothing_shared"
 
 
+_OFF = dict(calendar="off", reminders=False, status=False, focus=False)
+
+
+def _bound(path, handset, at, batch_id, **sharing):
+    """``handset`` syncs into the profile at ``path`` at ``at``."""
+    _paired(path)
+    store = phone.PhoneStore(path, clock=lambda: at)
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_batch(batch_id=batch_id, sharing=_sharing(**sharing))))
+    return store
+
+
+def test_a_profile_whose_sharing_was_turned_off_reads_the_one_it_moved_to(home):
+    # Issue 1021: Conduit binds phone data to one profile. Moved to `work`,
+    # the old profile was told to stop: its device's row shares nothing, and
+    # isn't data of its own that keeps it from the shared store.
+    handset = Phone()
+    old = _bound(home.path, handset, NOW, "batch-0001")
+    old.ingest(handset.seal(_batch(batch_id="batch-0002", sharing=_sharing(**_OFF))))
+    work = _bound(home.path / "profiles" / "work", Phone(), NOW + 60, "batch-0003", other_profiles=True)
+    found, owner = phone.store_for(home.path)
+    assert owner == "work" and found.path == work.path
+    assert tool.calendar_available() is True and "through the work profile" in _cal({"action": "overview"})["note"]
+
+
+def test_a_profile_the_phone_stopped_syncing_to_reads_the_one_it_moved_to(home):
+    # The other way the binding moves: the old profile is never told, and
+    # keeps a row that still says it shares. The same device syncing into
+    # another paired profile since leaves that row behind, for the old
+    # profile and for every other one (the default wins by name otherwise).
+    handset = Phone()
+    _bound(home.path, handset, NOW, "batch-0001", other_profiles=True)
+    work = _bound(home.path / "profiles" / "work", Phone(), NOW + 86400, "batch-0002", other_profiles=True)
+    fresh = home.path / "profiles" / "fresh"
+    _paired(fresh)
+    for reader in (home.path, fresh):
+        found, owner = phone.store_for(reader)
+        assert owner == "work" and found.path == work.path
+    # The live profile reads its own.
+    assert phone.store_for(work.path.parent)[1] is None
+
+
+def test_a_profile_keeps_its_own_store_beside_another_devices_or_an_off_row(home):
+    # Its own data still wins: another device syncing elsewhere, later, is
+    # another binding, and a later row that shares nothing takes nothing over.
+    _bound(home.path, Phone(), NOW, "batch-0001")
+    ipad = Phone(device_id="ipad-installation-2", name="Eric's iPad")
+    _bound(home.path / "profiles" / "work", ipad, NOW + 86400, "batch-0002", other_profiles=True)
+    assert phone.store_for(home.path)[1] is None
+    _bound(home.path / "profiles" / "side", Phone(), NOW + 86400, "batch-0003", other_profiles=True, **_OFF)
+    assert phone.store_for(home.path)[1] is None
+
+
 def test_another_profile_looking_never_upgrades_or_locks_the_sharing_store(home, monkeypatch):
     store, _ = _work_shares(home)
     monkeypatch.setattr(phone.PhoneStore, "_write", lambda self: (_ for _ in ()).throw(AssertionError("locked")))

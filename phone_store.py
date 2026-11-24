@@ -1764,41 +1764,54 @@ def _expire(db: sqlite3.Connection, now: int) -> None:
 
 def store_for(home: Any, clock: Callable[[], float] = time.time) -> tuple["PhoneStore", str | None]:
     """The store this profile's tools read, and the name of the profile it
-    belongs to when that's another one (None for its own): its own once a
-    device has synced here, else the one another profile paired with the
-    same iPhone shares with this host's other profiles (profile_sharing)."""
+    belongs to when that's another one (None for its own): its own while a
+    device shares something into it, else the one another profile paired
+    with the same iPhone shares with this host's other profiles
+    (profile_sharing.reading_profile, which leaves out a device's row once
+    the device shares nothing there or has moved on to another profile)."""
     own = PhoneStore(home, clock)
-    if _synced(own.path):
-        return own, None
-    found = profile_sharing.sharing_profile(home, lambda path: _synced(Path(path) / FILE_NAME, shared_out=True))
+    found = profile_sharing.reading_profile(home, lambda path: _synced_devices(Path(path) / FILE_NAME))
     if found is None:
         return own, None
     name, path = found
     return PhoneStore(path, clock, owner=name), name
 
 
-def _synced(path: Path, *, shared_out: bool = False) -> bool:
-    """Whether a device has synced into the store at ``path`` (sharing with
-    the other profiles too, with ``shared_out``). Read-only: never upgrades
-    the file or takes its write lock, which may be another profile's."""
+def _synced_devices(path: Path) -> list[tuple[str, float, bool, bool]]:
+    """The devices that have synced into the store at ``path``, for
+    profile_sharing.reading_profile: (id, last synced, shares something,
+    shares it with the other profiles). Read-only: never upgrades the file
+    or takes its write lock, which may be another profile's."""
     if not path.exists():
-        return False
+        return []
     try:
         connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=5)
     except sqlite3.DatabaseError:
-        return False
+        return []
     try:
         # A newer plugin's file reads as nothing here (_read), so it isn't
         # a store to read; an older one is upgraded when it's read.
         version = _meta(connection, "schema")
         if not (version or "").isdigit() or int(version) > SCHEMA_VERSION:
-            return False
-        rows = connection.execute("SELECT sharing FROM devices WHERE last_seen IS NOT NULL").fetchall()
+            return []
+        rows = connection.execute("SELECT id, last_seen, sharing FROM devices WHERE last_seen IS NOT NULL").fetchall()
     except sqlite3.DatabaseError:
-        return False
+        return []
     finally:
         connection.close()
-    return any(not shared_out or _shares_out(_decode(row[0], {})) for row in rows)
+    found = []
+    for device_id, last_seen, sharing in rows:
+        decoded = _decode(sharing, {})
+        found.append((device_id, float(last_seen or 0), _shares_any(decoded), _shares_out(decoded)))
+    return found
+
+
+def _shares_any(sharing: Any) -> bool:
+    """A device shares at least one kind of phone data with its profile."""
+    return isinstance(sharing, dict) and (
+        sharing.get("calendar") in ("full", "write_only")
+        or any(sharing.get(kind) is True for kind in (
+            "reminders", "status", "focus", "alarms", "contacts", "shortcuts", "photos")))
 
 
 def _shares_out(sharing: Any) -> bool:

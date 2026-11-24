@@ -756,13 +756,13 @@ def _round(value: Any) -> Any:
 
 def store_for(home: Any, clock: Callable[[], float] = time.time) -> tuple[HealthStore, str | None]:
     """The store this profile's tool reads, and the name of the profile it
-    belongs to when that's another one (None for its own): its own once a
-    device has synced here, else the one another profile paired with the
-    same iPhone shares with this host's other profiles (profile_sharing)."""
+    belongs to when that's another one (None for its own): its own while a
+    device shares health into it, else the one another profile paired with
+    the same iPhone shares with this host's other profiles
+    (profile_sharing.reading_profile, which leaves out a device's row once
+    the device shares nothing there or has moved on to another profile)."""
     own = HealthStore(home, clock)
-    if _synced(own.path):
-        return own, None
-    found = profile_sharing.sharing_profile(home, lambda path: _synced(Path(path) / FILE_NAME, shared_out=True))
+    found = profile_sharing.reading_profile(home, lambda path: _synced_devices(Path(path) / FILE_NAME))
     if found is None:
         return own, None
     name, path = found
@@ -775,23 +775,33 @@ def shares_out(db: sqlite3.Connection, device_id: str) -> bool:
     return _meta(db, OTHER_PROFILES_KEY + device_id) == "1"
 
 
-def _synced(path: Path, *, shared_out: bool = False) -> bool:
-    """Whether a device has synced into the store at ``path`` (sharing with
-    the other profiles too, with ``shared_out``). Read-only: never takes the
-    write lock, which may be another profile's."""
+def _synced_devices(path: Path) -> list[tuple[str, float, bool, bool]]:
+    """The devices that have synced into the store at ``path``, for
+    profile_sharing.reading_profile: (id, last synced, shares health,
+    shares it with the other profiles). A device that turned every category
+    off shares nothing; one that never named its categories (an older app)
+    shares. Read-only: never takes the write lock, which may be another
+    profile's."""
     if not path.exists():
-        return False
+        return []
     try:
         connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=5)
     except sqlite3.DatabaseError:
-        return False
+        return []
     try:
         if _meta(connection, "schema") != str(SCHEMA_VERSION):
-            return False
-        ids = [row[0] for row in connection.execute("SELECT id FROM devices WHERE last_seen IS NOT NULL")]
-        return any(not shared_out or shares_out(connection, device_id) for device_id in ids)
+            return []
+        found = []
+        for device_id, last_seen, categories in connection.execute(
+                "SELECT id, last_seen, categories FROM devices WHERE last_seen IS NOT NULL").fetchall():
+            try:
+                shares = categories is None or bool(json.loads(categories))
+            except ValueError:
+                shares = True
+            found.append((device_id, float(last_seen or 0), shares, shares_out(connection, device_id)))
+        return found
     except sqlite3.DatabaseError:
-        return False
+        return []
     finally:
         connection.close()
 

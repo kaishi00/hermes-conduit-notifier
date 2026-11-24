@@ -694,6 +694,22 @@ def _same_words(one: str, other: str) -> bool:
     return not (names(first - second) and names(second - first))
 
 
+def _refused(store: work_store.Store, refs: list[str], text: str, chat: str) -> tuple[dict | None, dict | None]:
+    """The question about this the user declined in the last day, and the
+    one they dismissed: the newest of each."""
+    since = time.time() - PROPOSAL_CLOSED_AGE_S
+    if refs or not text:
+        return (store.proposal_about(refs, status="declined", since=since),
+                store.proposal_about(refs, status="dismissed", since=since))
+    # About no workstream there's no work to find the no by: nearly the
+    # same words in the same chat are the same question (issue 1031).
+    closed = sorted((row for row in store.proposals_answered(since=since, limit=CLOSED_COMPARED, refused_in=chat)
+                     if not work_store.proposal_refs(row) and _same_words(row["text"], text)),
+                    key=lambda row: row.get("answered_at") or 0.0, reverse=True)
+    return (next((row for row in closed if row["status"] == "declined"), None),
+            next((row for row in closed if row["status"] == "dismissed"), None))
+
+
 def _asked_before(store: work_store.Store, refs: list[str], new: str, *, besides: str = "",
                   text: str = "", chat: str = "") -> Optional[dict]:
     """Why a question about ``refs`` isn't asked now, or None: another open
@@ -717,19 +733,9 @@ def _asked_before(store: work_store.Store, refs: list[str], new: str, *, besides
                 "note": f"{pending['id']} about {_listed(work_store.proposal_refs(pending))} is still open. "
                         "Wait for the user's answer, or call again with replaces "
                         f"{pending['id']} to reword it with what's new."}
-    # A no stands for a day unless something new came up.
-    since = time.time() - PROPOSAL_CLOSED_AGE_S
-    declined = store.proposal_about(refs, status="declined", since=since)
-    # So does a question they took off their list without answering.
-    dismissed = store.proposal_about(refs, status="dismissed", since=since)
-    if not refs and text:
-        # About no workstream there's no work to find the no by: nearly the
-        # same words in the same chat are the same question (issue 1031).
-        closed = [row for row in reversed(store.proposals_answered(since=since, limit=CLOSED_COMPARED))
-                  if not work_store.proposal_refs(row) and (row.get("chat") or "") == chat
-                  and _same_words(row["text"], text)]
-        declined = next((row for row in closed if row["status"] == "declined"), None)
-        dismissed = next((row for row in closed if row["status"] == "dismissed"), None)
+    # A no stands for a day unless something new came up. So does a
+    # question they took off their list without answering.
+    declined, dismissed = _refused(store, refs, text, chat)
     about = "about this work" if refs else "that asked nearly the same"
     if declined is not None and not new:
         return {"ok": False, "id": declined["id"], "error": "declined",
@@ -1028,7 +1034,7 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any, ch
                         "Reword one that covers it (replaces), or wait for their answers."}
     wants_ahead = bool(args.get("going_ahead")) and (bool(recommended) or not choices)
     going_ahead = wants_ahead and mode(store) == "auto"
-    declined = store.proposal_about(refs, status="declined", since=time.time() - PROPOSAL_CLOSED_AGE_S)
+    declined = _refused(store, refs, text, chat)[0]
     made = store.proposal_add(refs, text, new if declined is not None else "", chat=chat, choices=choices,
                               recommended=recommended, going_ahead=going_ahead)
     covers = f" It covers {_listed(refs)}; their answer is for each." if len(refs) > 1 else ""
