@@ -62,22 +62,30 @@ def _keys(body: Any) -> List[List[str]]:
     return paths
 
 
-def _take(config: Dict[str, Any], path: List[str]) -> bool:
-    """Takes ``path`` out of ``config``, with each section that leaves empty. Whether it was there."""
+def _has(config: Dict[str, Any], path: List[str]) -> bool:
+    at: Any = config
+    for part in path:
+        if not isinstance(at, dict) or part not in at:
+            return False
+        at = at[part]
+    return True
+
+
+def _take(config: Dict[str, Any], path: List[str]) -> None:
+    """Takes ``path`` out of ``config``, with each section that leaves empty."""
     parents = [config]
     for part in path[:-1]:
         child = parents[-1].get(part)
         if not isinstance(child, dict):
-            return False
+            return
         parents.append(child)
     if path[-1] not in parents[-1]:
-        return False
+        return
     del parents[-1][path[-1]]
     for depth in range(len(parents) - 1, 0, -1):
         if parents[depth]:
             break
         del parents[depth - 1][path[depth - 1]]
-    return True
 
 
 def _dashboard_config_lock() -> Any:
@@ -98,7 +106,10 @@ def unset_config_keys(body: Any) -> Dict[str, Any]:
     paths = _keys(body)
     try:
         from hermes_cli import config as hermes_config
-    except ImportError:
+    except ImportError as exc:
+        # Only a Hermes without the module; a broken import inside it is the host's error, logged as one.
+        if exc.name not in ("hermes_cli", "hermes_cli.config"):
+            raise
         raise core.TokenError(501, "This Hermes can't change its config from the plugin; update Hermes")
     if getattr(hermes_config, "is_managed", lambda: False)():
         raise core.TokenError(409, "This Hermes is managed, so its settings can't be changed from Conduit")
@@ -108,7 +119,11 @@ def unset_config_keys(body: Any) -> Dict[str, Any]:
         config = read()
         if not isinstance(config, dict):
             raise core.TokenError(409, "This profile's config.yaml isn't a mapping")
-        removed = [".".join(path) for path in paths if _take(config, path)]
+        # Asked before any goes: one key can take another's section with it.
+        present = [path for path in paths if _has(config, path)]
+        for path in present:
+            _take(config, path)
+        removed = [".".join(path) for path in present]
         if removed:
             hermes_config.save_config(config)
     return {"removed": removed}

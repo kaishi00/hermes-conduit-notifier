@@ -108,6 +108,20 @@ def test_a_managed_hermes_refuses(hermes, client):
     assert hermes.saves == []
 
 
+def test_a_key_and_the_section_it_empties_are_both_listed(hermes, client):
+    answer = client.post(f"{BASE}/config/unset", json={"keys": ["tts.openai.voice", "tts.openai"]})
+    assert answer.json()["removed"] == ["tts.openai.voice", "tts.openai"]
+    assert hermes.file["tts"] == {"provider": "openai", "use_gateway": True}
+
+
+def test_the_strict_read_is_what_gets_changed_and_saved(hermes, client):
+    hermes.require_readable_config_before_write = lambda: {"tts": {"edge": {"voice": "v"}, "provider": "edge"}}
+    hermes.read_raw_config = None
+    answer = client.post(f"{BASE}/config/unset", json={"keys": ["tts.edge.voice"]})
+    assert answer.json()["removed"] == ["tts.edge.voice"]
+    assert hermes.saves == [{"tts": {"provider": "edge"}}]
+
+
 def test_the_strict_read_is_used_when_hermes_has_one(hermes, client):
     def strict():
         raise RuntimeError("config.yaml can't be parsed")
