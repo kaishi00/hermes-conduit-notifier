@@ -469,7 +469,7 @@ imports:
   gateway.warning_notifications:
     required: ["warning_notifications_enabled"]
   hermes_cli:
-    optional: ["__version__", "_launchers", "active_sessions", "lifecycle", "web_server_config"]
+    optional: ["__version__", "_launchers", "active_sessions", "lifecycle", "providers", "web_server_config"]
   hermes_cli._launchers:
     optional: ["runtime_command"]
   hermes_cli.active_sessions:

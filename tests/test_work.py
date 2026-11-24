@@ -1248,6 +1248,97 @@ def test_a_model_hermes_cant_run_starts_nothing(on, home, hermes, monkeypatch):
     assert "Edit Bot > Work" not in failed["note"]
 
 
+def _hermes_model_check(monkeypatch, current, *, aggregators=("openrouter",), users=None, customs=(),
+                        known=("anthropic", "deepseek", "openrouter", "custom:fake", "relay"), refuse=None):
+    """Hermes' /model pieces work_models._switch reads, recording what switch_model was handed."""
+    import contextlib
+    import types
+
+    from conduit_push import room_setup
+
+    handed = []
+
+    def switch_model(model, current_provider, current_model, **kwargs):
+        handed.append((model, kwargs["explicit_provider"]))
+        if refuse:
+            return types.SimpleNamespace(success=False, error_message=refuse, new_model="", target_provider="")
+        return types.SimpleNamespace(success=True, error_message="", new_model=model,
+                                     target_provider=kwargs["explicit_provider"] or current_provider)
+
+    ctx = types.SimpleNamespace(current_provider=current, current_model="m", current_base_url="",
+                                user_providers=users or {}, custom_providers=list(customs))
+    modules = {
+        "hermes_cli": {},
+        "hermes_cli.inventory": {"load_picker_context": lambda: ctx},
+        "hermes_cli.model_switch": {"switch_model": switch_model},
+        "hermes_cli.models_validate": {"static_model_provider_conflict": lambda model, provider: None},
+        "hermes_cli.providers": {
+            "resolve_provider_full": lambda name, users, customs: name.lower() in known or None,
+            "is_aggregator": lambda name: str(name).lower() in aggregators or str(name).lower().startswith("custom:")},
+    }
+    for name, names in modules.items():
+        module = types.ModuleType(name)
+        module.__dict__.update(names)
+        if name == "hermes_cli":
+            module.__path__ = []
+        else:
+            setattr(sys.modules["hermes_cli"], name.rpartition(".")[2], module)
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(room_setup, "profile_scope", lambda profile: contextlib.nullcontext())
+    return handed
+
+
+@pytest.mark.parametrize("name, handed", [
+    # Issue 1055: on an aggregator Hermes reads vendor:model as the slug vendor/model on that same
+    # provider, so the name goes to it whole; split off, it was refused for the vendor's own key.
+    ("anthropic:claude-sonnet-4.6", ("anthropic:claude-sonnet-4.6", "")),
+    ("deepseek:deepseek-r1:free", ("deepseek:deepseek-r1:free", "")),
+    # Already a slug: its colon is a variant tag, and a provider before one is still taken apart.
+    ("anthropic/claude-sonnet-4.6:extended", ("anthropic/claude-sonnet-4.6:extended", "")),
+    ("openrouter:anthropic/claude-sonnet-4.6:free", ("anthropic/claude-sonnet-4.6:free", "openrouter")),
+    # The current provider itself, and the user's own endpoints, are always providers.
+    ("openrouter:deepseek-r1", ("deepseek-r1", "openrouter")),
+    ("custom:fake:fake-big", ("fake-big", "custom:fake")),
+    ("relay:big", ("big", "relay")),
+    ("llama3:8b", ("llama3:8b", "")),
+])
+def test_on_an_aggregator_a_vendor_colon_name_goes_to_hermes_whole(home, monkeypatch, name, handed):
+    from conduit_push import work_models
+
+    seen = _hermes_model_check(monkeypatch, "openrouter", users={"relay": {"base_url": "http://relay/v1"}},
+                               customs=[{"name": "fake"}])
+    picked = work_models.check(home, "default", {"model": name})
+    assert seen == [handed]
+    assert picked == {"model": handed[0], "provider": handed[1] or "openrouter"}
+
+
+@pytest.mark.parametrize("current", ["anthropic", "custom:fake", "ollama"])
+def test_off_an_aggregator_a_leading_provider_is_still_taken_apart(home, monkeypatch, current):
+    from conduit_push import work_models
+
+    seen = _hermes_model_check(monkeypatch, current, aggregators=("openrouter", "ollama"))
+    work_models.check(home, "default", {"model": "deepseek:deepseek-r1"})
+    assert seen == [("deepseek-r1", "deepseek")]
+
+
+def test_a_refused_model_is_named_as_the_bot_named_it(home, monkeypatch):
+    from conduit_push import work_models
+
+    _hermes_model_check(monkeypatch, "anthropic", refuse="DeepSeek is not connected.")
+    with pytest.raises(work_models.Refused) as refused:
+        work_models.check(home, "default", {"model": "deepseek:deepseek-r1"})
+    assert str(refused.value).startswith("Hermes can't run deepseek:deepseek-r1 here: DeepSeek is not connected.")
+
+
+def test_a_hermes_without_the_aggregator_check_keeps_the_split(home, monkeypatch):
+    from conduit_push import work_models
+
+    seen = _hermes_model_check(monkeypatch, "openrouter")
+    monkeypatch.delattr(sys.modules["hermes_cli.providers"], "is_aggregator")
+    work_models.check(home, "default", {"model": "anthropic:claude-sonnet-4.6"})
+    assert seen == [("claude-sonnet-4.6", "anthropic")]
+
+
 def test_a_secondary_bot_starts_on_its_own_profile(tmp_path, monkeypatch, hermes):
     home = tmp_path / "root" / "profiles" / "nahida"
     home.mkdir(parents=True)

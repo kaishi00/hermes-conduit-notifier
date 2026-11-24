@@ -756,14 +756,28 @@ sys.modules["conduit_push"] = package
 spec.loader.exec_module(package)
 from conduit_push import work_models
 
+import hermes_cli.model_switch as model_switch
+
+handed, real = [], model_switch.switch_model
+
+
+def spy(model, *args, **kwargs):
+    handed.append([model, kwargs.get("explicit_provider")])
+    return real(model, *args, **kwargs)
+
+
+model_switch.switch_model = spy
 seen = {}
-for name, asked in (("declared", {"model": "fake-big", "reasoning_effort": "high"}),
-                    ("prefixed", {"model": "custom:fake:fake-big"}),
-                    ("unknown_provider", {"model": "fake-big", "provider": "no-such-provider"})):
+cases = json.loads(sys.argv[4]) if len(sys.argv) > 4 else {
+    "declared": {"model": "fake-big", "reasoning_effort": "high"},
+    "prefixed": {"model": "custom:fake:fake-big"},
+    "unknown_provider": {"model": "fake-big", "provider": "no-such-provider"}}
+for name, asked in cases.items():
     try:
         seen[name] = work_models.check(home, "default", asked)
     except work_models.Refused as error:
         seen[name] = "refused: " + str(error)
+seen["handed"] = handed
 out.write_text(json.dumps(seen))
 """
 
@@ -790,4 +804,35 @@ def test_a_model_the_bot_names_is_checked_as_hermes_model_command_checks_it(tmp_
     assert seen["prefixed"] == {"model": "fake-big", "provider": "custom:fake"}
     assert seen["unknown_provider"].startswith("refused: Hermes can't run fake-big here: ")
     assert "no-such-provider" in seen["unknown_provider"]
+
+
+def test_on_an_aggregator_a_vendor_colon_name_is_hermes_slug_not_a_provider_switch(tmp_path: Path) -> None:
+    """Notifier issue 1055: on an aggregator profile Hermes' /model reads
+    ``vendor:model`` as the slug ``vendor/model`` on that same provider
+    (_convert_vendor_colon_slug), so work_start's check hands the name over
+    whole: Hermes' own is_aggregator and provider resolver say so here. Taken
+    apart as a provider, the name was refused for the vendor's own key. A
+    provider before a slug, and the aggregator's own name, are still taken
+    apart. What Hermes answers for the whole name depends on its catalog, so
+    only the handoff and the absence of the vendor-key refusal are checked."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text("model:\n  default: anthropic/claude-sonnet-4.6\n  provider: openrouter\n")
+    python = Path(_hermes_bin()).with_name("python")
+    out = tmp_path / "seen.json"
+    cases = {"legacy": {"model": "anthropic:claude-sonnet-4.6"}, "variant": {"model": "deepseek:deepseek-r1:free"},
+             "slash": {"model": "anthropic/claude-sonnet-4.6"},
+             "own": {"model": "openrouter:anthropic/claude-sonnet-4.6"}}
+    env = {key: value for key, value in os.environ.items() if not key.endswith("_API_KEY")}
+    done = subprocess.run([str(python), "-c", MODEL_PROBE, str(ROOT), str(home), str(out), json.dumps(cases)],
+                          capture_output=True, text=True, timeout=120, cwd=str(tmp_path),
+                          env={**env, "HERMES_HOME": str(home), "OPENROUTER_API_KEY": "sk-or-not-a-key"})
+    assert done.returncode == 0 and out.is_file(), done.stderr[-2000:]
+    seen = json.loads(out.read_text())
+    assert seen["handed"] == [["anthropic:claude-sonnet-4.6", ""], ["deepseek:deepseek-r1:free", ""],
+                              ["anthropic/claude-sonnet-4.6", ""], ["anthropic/claude-sonnet-4.6", "openrouter"]]
+    for name in ("legacy", "variant"):
+        assert "is not connected" not in str(seen[name]), seen[name]
+        if isinstance(seen[name], dict):
+            assert seen[name]["provider"] == "openrouter" and "/" in seen[name]["model"], seen[name]
 

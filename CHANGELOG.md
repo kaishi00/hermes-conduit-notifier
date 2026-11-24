@@ -13,12 +13,20 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.195.6 (2026-11-24)
+
+### Fixes
+
+- On OpenRouter and other aggregators, a workstream the bot starts on a model named like anthropic:claude-sonnet-4.6 runs on that model through your aggregator, as Hermes' /model does. Before, the start was refused for a missing Anthropic key, or ran directly on Anthropic when you had one.
+- A question about no workstream that you declined or dismissed isn't asked again that day in nearly the same words, unless something new came up.
+- A scheduled job's report that couldn't be written into the Bot Chat opens the chat of its own run, not of a newer run that finished meanwhile. With no chat to open, no notification is sent.
+
 ## 0.195.5 (2026-11-24)
 
 ### Fixes
 
 - A scheduled job delivered to a Bot Chat notifies once per run, with a notification that opens the Bot Chat. Before, each run notified twice: once for the report in the Bot Chat and once for the run's own chat.
-- When such a report can't be written into the Bot Chat (there is none yet, or it stayed busy for a minute), you still get a notification, and it opens the run's own chat.
+- When such a report can't be written into the Bot Chat (there is none yet, or it stayed busy for a minute), you still get a notification, and it opens the run's own chat, or the Bot Chat when the run's chat isn't known.
 
 ## 0.195.4 (2026-11-23)
 
@@ -156,7 +164,7 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### Fixes
 
-- While your Bot Chat's own question waits on you, the questions waiting on you are no longer read from disk again every couple of seconds, which slowed each step of a reply a little. 0.193.1 kept them only while nothing waited.
+- While only your Bot Chat's own questions wait on you, the questions waiting on you are no longer read from disk again every couple of seconds, which slowed each step of a reply a little. 0.193.1 kept them only while nothing waited.
 
 ## 0.193.1 (2026-11-22)
 

@@ -257,13 +257,18 @@ def _load_profile() -> str:
     return session_titles._profile_of(session_titles._home()) or "default"
 
 
-def _run_chat(job_id: str) -> Optional[str]:
-    """The chat of the job's newest run, when its turn ended in this
-    process (the entry module's record, which a run's own turn fills)."""
+def _run_chat(job: dict) -> Optional[str]:
+    """The chat of this run, when its turn ended in this process (the entry
+    module's record, which a run's own turn fills): by the run's execution,
+    as its task id names it (``cron:<job>:<execution>``), so a report whose
+    delivery waited while a newer run ended still opens its own run's chat.
+    A delivery that names no execution takes the job's newest run."""
+    job_id = str(job.get("id") or "")
     try:
-        from . import _job_runs
+        from . import _job_runs, _run_chats
 
-        chat = _job_runs.get(job_id)
+        execution = job.get("execution_id")
+        chat = _run_chats.get(f"cron:{job_id}:{execution}") if execution else _job_runs.get(job_id)
         return chat if isinstance(chat, str) and chat else None
     except Exception:  # noqa: BLE001 — loaded without the entry module
         return None
@@ -337,7 +342,7 @@ def _push_unlanded(job: dict, bot_chat: Optional[str], name: str, report: str, k
     end; else the Bot Chat, with the report's opening as its body. With
     neither there is nothing to open, and Hermes' delivery error and the
     job's run history hold the report."""
-    chat = _run_chat(str(job.get("id") or "")) or bot_chat
+    chat = _run_chat(job) or bot_chat
     if not chat:
         logger.info("conduit_push: job '%s': report not delivered and no chat to open, so no push",
                     job.get("id", "?"))
@@ -370,7 +375,12 @@ def show(job: dict, content: str, profile: str, *, for_failure: bool = False,
             return f"{target}: no Bot Chat yet, so the report has nowhere to show"
         text = HEADER.format(name=name) + "\n\n" + reference_tags(report)
         here = in_process(home) if in_process is not None else _owned_here(home)
-        error = _note_from_here(home, chat, text, for_failure) if here else "its owner runs elsewhere"
+        error = "its owner runs elsewhere"
+        if here:
+            try:
+                error = _note_from_here(home, chat, text, for_failure)
+            except Exception as exc:  # noqa: BLE001 — Hermes' own write can raise (its store): the history is next
+                error = f"local chat {chat}: {exc!r}"
         if error is not None:
             # The owner here doesn't hold the chat as a local one (a Bot
             # Chat Hermes' own door hasn't adopted yet refuses), or it runs

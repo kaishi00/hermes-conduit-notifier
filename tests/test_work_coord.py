@@ -845,6 +845,17 @@ def test_a_question_dismissed_without_an_answer_is_told_as_no_answer(on, hermes,
     again = call("work_propose", {"text": "Stop W1 now?", "ref": "W1"})
     assert again["error"] == "dismissed" and again["id"] == second
     assert call("work_propose", {"text": "Stop W1 now?", "ref": "W1", "new": "It's spending fast."})["ok"]
+    # One about no workstream is held by its words, in its chat (issue 1031).
+    for answer, error in (("dismiss", "dismissed"), ("decline", "declined")):
+        loose = call("work_propose", {"text": f"Start a {error} audit of the billing exports?"})["id"]
+        assert work.app_act(on.home, loose, answer)["ok"]
+        again = call("work_propose", {"text": f"Start a {error} audit of the billing exports now?"})
+        assert (again["error"], again["id"]) == (error, loose) and "asked nearly the same" in again["note"]
+        # Another question, another chat, or something new, is asked.
+        assert call("work_propose", {"text": f"Start a {error} audit of the billing exports now?"},
+                    session_id=OTHER_CHAT)["ok"]
+        assert call("work_propose", {"text": f"Start a {error} audit of the billing exports now?",
+                                     "new": "Finance asked for it today."})["ok"]
 
 
 def test_going_ahead_under_auto_and_a_no_to_it_is_told(on, hermes, home, monkeypatch):
@@ -1089,6 +1100,36 @@ def _seconds_later():
     with coord._open_lock:
         for key, (stamp, until, rows) in list(coord._open_kept.items()):
             coord._open_kept[key] = (stamp, until - coord.OPEN_QUESTIONS_TTL_S - 1, rows)
+
+
+def test_the_kept_questions_seconds_count_from_the_end_of_a_slow_read(on, hermes, home, monkeypatch):
+    # Issue 1000: a read slower than OPEN_QUESTIONS_TTL_S still keeps what it
+    # read; counted from the read's start, the next call would read again.
+    import types
+
+    monkeypatch.setattr(sys.modules["conduit_push.stamps"], "SETTLED_NS", 0)
+    coord.forget_open_questions()
+    store = store_mod.Store(on.home)
+    store.proposal_add([], "Ship it?", "", chat=OTHER_CHAT)
+    monkeypatch.setattr(coord, "_chat_gone", lambda home, chat: False)
+    clock = {"now": 100.0, "reads": 0}
+    monkeypatch.setattr(coord, "time", types.SimpleNamespace(monotonic=lambda: clock["now"], time=time.time))
+    real = coord._open_questions
+
+    def slow(store):
+        clock["reads"] += 1
+        clock["now"] += coord.OPEN_QUESTIONS_TTL_S + 1
+        return real(store)
+
+    monkeypatch.setattr(coord, "_open_questions", slow)
+    assert [row["text"] for row in coord.open_questions(store)] == ["Ship it?"]
+    clock["now"] += coord.OPEN_QUESTIONS_TTL_S - 0.5
+    assert [row["text"] for row in coord.open_questions(store)] == ["Ship it?"]
+    assert clock["reads"] == 1, "still inside the seconds counted from the read's end"
+    clock["now"] += 1
+    coord.open_questions(store)
+    assert clock["reads"] == 2
+    coord.forget_open_questions()
 
 
 def test_the_asked_note_reads_the_registry_only_when_it_changes(on, hermes, home, monkeypatch):

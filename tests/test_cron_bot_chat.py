@@ -173,6 +173,9 @@ def _sent(monkeypatch):
 def _run_chats(monkeypatch, **chats):
     """The entry module's record of each job's newest run chat (a run's own turn fills it)."""
     monkeypatch.setattr(sys.modules["conduit_push"], "_job_runs", dict(chats), raising=False)
+    # And each run's own, by its task id: JOB's execution is run-7.
+    monkeypatch.setattr(sys.modules["conduit_push"], "_run_chats",
+                        {f"cron:{job}:run-7": chat for job, chat in chats.items()}, raising=False)
 
 
 def test_a_report_with_no_bot_chat_to_land_in_pushes_for_the_runs_own_chat(hermes, monkeypatch):
@@ -212,6 +215,41 @@ def test_an_unlanded_report_opens_the_bot_chat_when_the_runs_chat_isnt_known_her
     assert cron_bot_chat.install()
     assert "not written" in hermes.delivery.deliver(dict(JOB), "Rain at 9.", "")
     assert [event["session_id"] for event in sent] == ["bot-chat-tip"]
+
+
+def test_an_unlanded_report_opens_its_own_runs_chat_not_a_newer_runs(hermes, monkeypatch):
+    # From #1056's reviews: the delivery can wait a minute, and another run of
+    # the job may end meanwhile. The push opens the chat of the run it reports.
+    sent = _sent(monkeypatch)
+    _job_reader(monkeypatch)
+    monkeypatch.setattr(sys.modules["conduit_push"], "_job_runs", {JOB["id"]: "local-run-newer"}, raising=False)
+    monkeypatch.setattr(sys.modules["conduit_push"], "_run_chats",
+                        {f"cron:{JOB['id']}:run-7": "local-run-1", f"cron:{JOB['id']}:run-8": "local-run-newer"},
+                        raising=False)
+    assert cron_bot_chat.install()
+    hermes.chat = None
+    assert "no Bot Chat yet" in hermes.delivery.deliver(dict(JOB), "Rain at 9.", "")
+    # A run this process didn't see end has no chat of its own here: nothing to open without a Bot Chat.
+    assert "no Bot Chat yet" in hermes.delivery.deliver(dict(JOB, execution_id="run-9"), "Rain at 9.", "")
+    # A delivery that names no execution takes the job's newest run.
+    job = {key: value for key, value in JOB.items() if key != "execution_id"}
+    assert "no Bot Chat yet" in hermes.delivery.deliver(job, "Rain at 9.", "")
+    assert [event["session_id"] for event in sent] == ["local-run-1", "local-run-newer"]
+
+
+def test_a_local_note_that_raises_still_goes_to_the_history(hermes, monkeypatch):
+    # From #1056's reviews: Hermes' own write can raise instead of answering
+    # with its error; the history write and the push follow all the same.
+    sent = _sent(monkeypatch)
+    _job_reader(monkeypatch)
+
+    def raises(home, chat_id, text, *, diagnostic=False):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(sys.modules["gateway.session_cron"], "deliver_to_local_chat", raises)
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB), "Rain at 9.", "") is None
+    assert len(hermes.written) == 1 and [event["session_id"] for event in sent] == ["bot-chat-tip"]
 
 
 def test_an_unlanded_report_for_another_profile_or_a_muted_job_sends_nothing(hermes, monkeypatch):

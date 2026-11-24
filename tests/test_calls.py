@@ -1406,6 +1406,7 @@ def test_a_follow_up_in_a_classic_run_chat_notifies_like_any_reply(cron_home, fa
     CronStore(cron_home).set_act("a1b2c3d4e5f6", acts)
     _reply(session_id=RUN_CHAT, task_id="cron:a1b2c3d4e5f6:x", turn_id="t1", assistant_response="Sunny, 59 degrees.")
     assert fake.enqueued == []  # the run's own turn: the Bot Chat notifies
+    assert plugin._run_chats["cron:a1b2c3d4e5f6:x"] == RUN_CHAT  # where a report that didn't land would open
     _reply(session_id=RUN_CHAT, task_id="6f1c2c1e-uuid", turn_id="t2", assistant_response="Yes, bring a coat.")
     _reply(session_id=RUN_CHAT, turn_id="t3", assistant_response="And an umbrella.")
     assert [event["type"] for event in fake.enqueued] == ["response.ready", "response.ready"]

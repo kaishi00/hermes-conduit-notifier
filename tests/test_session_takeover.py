@@ -673,7 +673,7 @@ def test_a_detached_claim_and_another_process_claim_are_both_let_go(tmp_path):
 
 
 @pytest.mark.parametrize("case", ["attached", "running", "isolated_turn", "building", "pending", "delegating",
-                                  "writing", "marked", "other_chat", "other_profile", "finalized"])
+                                  "writing", "marked", "other_chat", "other_profile", "finalized", "closing"])
 def test_a_claim_with_a_client_or_work_on_it_stays(tmp_path, case):
     import threading
     registry = FakeRegistry(tmp_path)
@@ -684,7 +684,7 @@ def test_a_claim_with_a_client_or_work_on_it_stays(tmp_path, case):
     building = threading.Event()
     fields = {"attached": {"transport": LIVE}, "running": {"running": True},
               "isolated_turn": {"_compute_host_turn_id": "t1"}, "building": {"agent_ready": building},
-              "finalized": {"_finalized": True}}.get(case, {})
+              "finalized": {"_finalized": True}, "closing": {"_closing": True}}.get(case, {})
     lease = _runtime(gateway, registry, tmp_path, "sid", "other" if case == "other_chat" else "chat", **fields)
     if case == "other_chat":
         lease.session_id = "other"
