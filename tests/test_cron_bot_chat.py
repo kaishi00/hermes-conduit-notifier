@@ -163,6 +163,104 @@ def test_a_suppressed_failure_notice_and_a_note_that_never_lands_send_no_push(he
     assert sent == []
 
 
+def _sent(monkeypatch):
+    sent = []
+    client = importlib.import_module("conduit_push.client")
+    monkeypatch.setattr(client, "enqueue", lambda event: sent.append(event) or True)
+    return sent
+
+
+def _run_chats(monkeypatch, **chats):
+    """The entry module's record of each job's newest run chat (a run's own turn fills it)."""
+    monkeypatch.setattr(sys.modules["conduit_push"], "_job_runs", dict(chats), raising=False)
+
+
+def test_a_report_with_no_bot_chat_to_land_in_pushes_for_the_runs_own_chat(hermes, monkeypatch):
+    # Issue 1052: the run chat's push stood down for the note's, so a note
+    # that never lands sends the run's one push itself, opening the run's chat.
+    sent = _sent(monkeypatch)
+    _job_reader(monkeypatch)
+    _run_chats(monkeypatch, a1b2c3d4e5f6="local-run-1")
+    assert cron_bot_chat.install()
+    hermes.chat = None
+    assert "no Bot Chat yet" in hermes.delivery.deliver(dict(JOB), "Rain at 9. sk-secret", "")
+    (event,) = sent
+    assert (event["type"], event["session_id"]) == ("response.ready", "local-run-1")
+    assert event["title"] == 'Cron job "Morning \'news\'"' and event["body"] == "Rain at 9. [REDACTED]"
+
+
+def test_a_note_its_owner_refuses_past_the_wait_pushes_for_the_run_and_a_failure_says_so(hermes, monkeypatch):
+    sent = _sent(monkeypatch)
+    _job_reader(monkeypatch)
+    _run_chats(monkeypatch, a1b2c3d4e5f6="local-run-1")
+    monkeypatch.setattr(cron_bot_chat, "NOTE_WAIT_S", 0.0)
+    hermes.owned, hermes.refusals = False, 99
+    assert cron_bot_chat.install()
+    assert "not written" in hermes.delivery.deliver(dict(JOB), "It failed.", "", for_failure=True)
+    (event,) = sent
+    assert (event["type"], event["session_id"]) == ("turn.failed", "local-run-1")
+    # The same run delivered again (a second target, a retry) is the same push.
+    assert "not written" in hermes.delivery.deliver(dict(JOB), "It failed.", "", for_failure=True)
+    assert [again["event_id"] for again in sent] == [event["event_id"]] * 2
+
+
+def test_an_unlanded_report_opens_the_bot_chat_when_the_runs_chat_isnt_known_here(hermes, monkeypatch):
+    sent = _sent(monkeypatch)
+    _job_reader(monkeypatch)
+    monkeypatch.setattr(cron_bot_chat, "NOTE_WAIT_S", 0.0)
+    hermes.owned, hermes.refusals = False, 99
+    assert cron_bot_chat.install()
+    assert "not written" in hermes.delivery.deliver(dict(JOB), "Rain at 9.", "")
+    assert [event["session_id"] for event in sent] == ["bot-chat-tip"]
+
+
+def test_an_unlanded_report_for_another_profile_or_a_muted_job_sends_nothing(hermes, monkeypatch):
+    cron_runs = importlib.import_module("conduit_push.cron_runs")
+    sent = _sent(monkeypatch)
+    _job_reader(monkeypatch)
+    _run_chats(monkeypatch, a1b2c3d4e5f6="local-run-1")
+    monkeypatch.setattr(cron_runs, "get_hermes_home", lambda: hermes.home)
+    monkeypatch.setattr(cron_bot_chat, "NOTE_WAIT_S", 0.0)
+    hermes.owned, hermes.refusals = False, 99
+    assert cron_bot_chat.install()
+    # Another profile's Bot Chat: the run chat's push never stood down.
+    assert "not written" in hermes.delivery.deliver(dict(JOB), "Rain at 9.", "furina")
+    CronStore(hermes.home).set_notify(JOB["id"], False)
+    assert "not written" in hermes.delivery.deliver(dict(JOB), "Rain at 9.", "")
+    assert sent == []
+
+
+@pytest.mark.parametrize("status, pushes", [(None, 1), ("failed", 1), ("queued", 0), ("claimed", 0), ("ambiguous", 0)])
+def test_a_turn_hermes_didnt_admit_for_a_job_the_bot_acts_on_pushes_for_the_run(hermes, monkeypatch, status, pushes):
+    sent = _sent(monkeypatch)
+    _job_reader(monkeypatch, deliver="bot-chat:furina")
+    _run_chats(monkeypatch, a1b2c3d4e5f6="local-run-1")
+
+    def refused(job, content, profile, *, for_failure=False):
+        if status:
+            job.setdefault("_bot_chat_delivery_receipts", {})[f"bot-chat:{profile}"] = {"status": status}
+        return f"bot-chat:{profile} unverified"
+
+    monkeypatch.setattr(hermes.delivery, "_deliver_to_bot_chat", refused)
+    CronStore(hermes.home).set_act(JOB["id"], True)
+    assert cron_bot_chat.install()
+    assert "unverified" in hermes.delivery.deliver(dict(JOB), "Rain at 9.", "furina")
+    assert [event["session_id"] for event in sent] == ["local-run-1"] * pushes
+
+
+def test_the_notes_slot_is_spelled_as_the_run_chats(hermes, monkeypatch):
+    # Issue 1052: one spelling of the load's profile for the job's slot, the
+    # entry module's, so the note's push and a run chat's replace each other.
+    sent = _sent(monkeypatch)
+    _job_reader(monkeypatch)
+    monkeypatch.setattr(sys.modules["conduit_push"], "_profile", "Atlas", raising=False)
+    events = importlib.import_module("conduit_push.events")
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB), "Rain at 9.", "") is None
+    (event,) = sent
+    assert event["slot"] == events.slot_token(f"cron:Atlas:{JOB['id']}") and event["profile"] == "Atlas"
+
+
 def test_another_profiles_bot_chat_keeps_the_run_chats_push_instead(hermes, monkeypatch):
     sent = []
     client = importlib.import_module("conduit_push.client")

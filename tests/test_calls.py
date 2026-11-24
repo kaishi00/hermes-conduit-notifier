@@ -1335,8 +1335,31 @@ def test_a_delivery_naming_a_profile_whose_home_is_not_this_one_keeps_the_push(c
     jobs = types.ModuleType("cron.jobs")
     jobs.get_job = lambda job_id: {"id": job_id, "deliver": "bot-chat:default"}
     monkeypatch.setitem(sys.modules, "cron.jobs", jobs)
+    # Hermes' profile resolver, stubbed so the test reads the same inside a
+    # Hermes install and without one: "default" is another home, "here" is
+    # this one, and a name it can't resolve raises.
+    here = pathlib.Path(sys.modules["hermes_constants"].get_hermes_home())
+
+    def get_profile_dir(name):
+        if name == "gone":
+            raise ValueError(name)
+        return here if name == "here" else here / "profiles" / name
+
+    package = types.ModuleType("hermes_cli")
+    package.__path__ = []
+    profiles = types.ModuleType("hermes_cli.profiles")
+    profiles.get_profile_dir = get_profile_dir
+    package.profiles = profiles
+    monkeypatch.setitem(sys.modules, "hermes_cli", package)
+    monkeypatch.setitem(sys.modules, "hermes_cli.profiles", profiles)
     _reply(session_id="local-1", task_id="cron:a1b2c3d4e5f6:x", turn_id="t1", assistant_response="Sunny, 59 degrees.")
     assert [event["type"] for event in fake.enqueued] == ["response.ready"]
+    jobs.get_job = lambda job_id: {"id": job_id, "deliver": "bot-chat:gone"}
+    _reply(session_id="local-2", task_id="cron:a1b2c3d4e5f6:y", turn_id="t2", assistant_response="Rain at 9.")
+    assert [event["type"] for event in fake.enqueued] == ["response.ready", "response.ready"]
+    jobs.get_job = lambda job_id: {"id": job_id, "deliver": "bot-chat:here"}
+    _reply(session_id="local-3", task_id="cron:a1b2c3d4e5f6:z", turn_id="t3", assistant_response="Fog.")
+    assert len(fake.enqueued) == 2  # a name that resolves to this home is quiet: its note's push goes
 
 
 @pytest.mark.parametrize("deliver", ["bot-chat:atlas,bot-chat:", "bot-chat:,bot-chat:atlas"])
@@ -1367,6 +1390,46 @@ def test_the_failure_leg_reads_failure_deliver_first(cron_home, monkeypatch):
     assert cron_runs.quiet("local-1", "cron:a1b2c3d4e5f6:x", delivered=True)
     jobs.get_job = lambda job_id: {"id": job_id, "deliver": "bot-chat:"}
     assert cron_runs.quiet("local-1", "cron:a1b2c3d4e5f6:x", delivered=True, failure=True)
+
+
+RUN_CHAT = "cron_a1b2c3d4e5f6_20261123_090000"
+
+
+@pytest.mark.parametrize("acts", [False, True])
+def test_a_follow_up_in_a_classic_run_chat_notifies_like_any_reply(cron_home, fake, monkeypatch, acts):
+    # Issue 1053: the delivered rule is the run's own turn's (its cron: task
+    # id). A later turn in the run's chat, which the classic session id still
+    # names the job for, is a chat reply, and nothing is delivered for it.
+    jobs = types.ModuleType("cron.jobs")
+    jobs.get_job = lambda job_id: {"id": job_id, "deliver": "bot-chat:"}
+    monkeypatch.setitem(sys.modules, "cron.jobs", jobs)
+    CronStore(cron_home).set_act("a1b2c3d4e5f6", acts)
+    _reply(session_id=RUN_CHAT, task_id="cron:a1b2c3d4e5f6:x", turn_id="t1", assistant_response="Sunny, 59 degrees.")
+    assert fake.enqueued == []  # the run's own turn: the Bot Chat notifies
+    _reply(session_id=RUN_CHAT, task_id="6f1c2c1e-uuid", turn_id="t2", assistant_response="Yes, bring a coat.")
+    _reply(session_id=RUN_CHAT, turn_id="t3", assistant_response="And an umbrella.")
+    assert [event["type"] for event in fake.enqueued] == ["response.ready", "response.ready"]
+
+
+@pytest.mark.parametrize("acts", [False, True])
+def test_a_failed_follow_up_in_a_classic_run_chat_reports_its_failure(cron_home, fake, monkeypatch, acts):
+    jobs = types.ModuleType("cron.jobs")
+    jobs.get_job = lambda job_id: {"id": job_id, "deliver": "bot-chat:"}
+    monkeypatch.setitem(sys.modules, "cron.jobs", jobs)
+    CronStore(cron_home).set_act("a1b2c3d4e5f6", acts)
+    plugin._on_session_end(session_id=RUN_CHAT, task_id="cron:a1b2c3d4e5f6:x", turn_id="t1",
+                           completed=False, interrupted=False)
+    assert fake.enqueued == []  # the run's own failure: its notice went to the Bot Chat
+    plugin._on_session_end(session_id=RUN_CHAT, turn_id="t2", completed=False, interrupted=False)
+    assert [event["type"] for event in fake.enqueued] == ["turn.failed"]
+
+
+def test_a_muted_or_silent_job_keeps_its_run_chat_quiet_for_follow_ups_too(cron_home, fake, monkeypatch):
+    # The mute and the silence marker are the chat's, by the classic session id.
+    assert cron_runs.quiet(RUN_CHAT, None, "[SILENT] No changes", delivered=True)
+    CronStore(cron_home).set_notify("a1b2c3d4e5f6", False)
+    _reply(session_id=RUN_CHAT, turn_id="t2", assistant_response="Yes, bring a coat.")
+    assert fake.enqueued == []
 
 
 def test_chats_keep_the_interactive_silence_rule(home, fake):

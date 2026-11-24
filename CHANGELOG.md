@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.195.5 (2026-11-24)
+
+### Fixes
+
+- A scheduled job delivered to a Bot Chat notifies once per run, with a notification that opens the Bot Chat. Before, each run notified twice: once for the report in the Bot Chat and once for the run's own chat.
+- When such a report can't be written into the Bot Chat (there is none yet, or it stayed busy for a minute), you still get a notification, and it opens the run's own chat.
+
 ## 0.195.4 (2026-11-23)
 
 ### Fixes

@@ -358,11 +358,13 @@ notes:
   automation turns: >-
     _automation_turn in __init__.py keeps a turn in a session that isn't a conversation (a script's
     `hermes chat --source tool`, a one-shot `chat -q`/`-z`, a Kanban worker) from sending a reply or
-    failure or background-task push or starting a Live Activity (notifier#660). It first reads the
-    source Hermes stored for the session (the session row's source, through hermes_store's
-    get_session), so a Kanban worker's chat a watch wakes later in the dashboard's gateway, whose
-    turn says tui, stays quiet (notifier#1023); then agent.session_source.session_source_for and,
-    for a one-shot the gateway runs, gateway.session_finite.finite_turn_required.
+    failure or background-task push or starting a Live Activity (notifier#660); a push the turn
+    wrote itself with conduit_notify still goes. It first reads the source Hermes stored for the
+    session (the session row's source, through hermes_store's get_session), so a Kanban worker's
+    chat a watch wakes later in the dashboard's gateway, whose turn says tui, stays quiet
+    (notifier#1023); then, for a one-shot the gateway runs,
+    gateway.session_finite.finite_turn_required, and last agent.session_source.session_source_for.
+    Any one of the three makes the turn an automation turn.
     upstream/test_automation_turns.py checks all three.
   detached claim release: >-
     chat_takeover.release_detached_claims lets go of this process's claim on a chat whose runtime
