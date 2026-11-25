@@ -218,16 +218,23 @@ def test_it_runs_in_the_profile_named(hermes, client, monkeypatch):
 
 
 def test_xais_video_backend_reads_only_the_sections_key(hermes, client):
-    CATALOGS["xai-video"] = ({"grok-imagine-video": {}, "grok-imagine-video-1.5": {}}, "grok-imagine-video")
+    video = ({"grok-imagine-video": {}, "grok-imagine-video-1.5": {}, "grok-imagine-video-pro": {}},
+             "grok-imagine-video")
     hermes.tools._toolset_model_catalog = lambda section, plugin, cfg: copy.deepcopy(
-        CATALOGS["xai-video" if section == "video_gen" and plugin == "xai" else plugin])
-    hermes.file["video_gen"] = {"provider": "xai", "model": "grok-imagine-video",
-                                "xai": {"model": "an-old-pick"}}
-    assert client.get(f"{BASE}/media-models/video_gen").json()["current"] == "grok-imagine-video"
-    answer = client.put(f"{BASE}/media-models/video_gen", json={"model": "grok-imagine-video-1.5"})
+        video if section == "video_gen" and plugin == "xai" else CATALOGS[plugin])
+    hermes.file["video_gen"] = {"provider": "xai", "model": "grok-imagine-video-1.5",
+                                "xai": {"model": "grok-imagine-video-pro"}}
+    assert client.get(f"{BASE}/media-models/video_gen").json()["current"] == "grok-imagine-video-1.5", \
+        "An on-catalog model in its own key is passed over"
+    answer = client.put(f"{BASE}/media-models/video_gen", json={"model": "grok-imagine-video"})
     assert answer.status_code == 200, answer.text
-    assert hermes.file["video_gen"]["model"] == "grok-imagine-video-1.5"
-    assert hermes.file["video_gen"]["xai"] == {"model": "an-old-pick"}, "A key it never reads is left as it was"
+    assert hermes.file["video_gen"]["model"] == "grok-imagine-video"
+    assert hermes.file["video_gen"]["xai"] == {"model": "grok-imagine-video-pro"}, "A key it never reads is left as it was"
+
+
+def test_a_model_that_isnt_text_says_so(hermes, client):
+    answer = client.put(f"{BASE}/media-models/image_gen", json={"model": 7})
+    assert answer.status_code == 400 and "must be text" in answer.json()["detail"]
 
 
 def test_an_over_long_model_says_so(hermes, client):
