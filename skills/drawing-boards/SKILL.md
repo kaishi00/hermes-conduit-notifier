@@ -8,11 +8,15 @@ description: Recipes for boards in Conduit (conduit_show cards) - a trip plan, c
 A board is one `conduit_show` call: a title, up to 12 cards, an optional
 `layout` and up to four `next` follow-ups. You say what to show; Conduit
 draws it natively on the user's iPhone, iPad, Mac and call screen, and
-shows the cards' Markdown wherever a card can't be drawn. In Hermes Desktop
-with the plugin's "Conduit boards" half on, the tool answers with a
-`::conduit-board{id="…"}` line: write it once in your reply, on a line of its
-own, and Desktop draws the board there. Anywhere else outside Conduit the
-tool hands you that Markdown for your reply instead.
+shows the cards' Markdown wherever a card can't be drawn. In a chat the
+board is drawn above your reply. When the tool's answer gives you a
+`::conduit-board{id="…"}` line, you can write it once in your reply, on a
+line of its own, under the words the board goes with, and Conduit draws the
+board there instead; never write a line the answer didn't give you. In
+Hermes Desktop with the plugin's "Conduit boards" half on,
+the tool answers with the same line, and Desktop draws the board only where
+you write it. Anywhere else outside Conduit the tool hands you that Markdown
+for your reply instead.
 
 ## Ground rules
 

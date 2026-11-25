@@ -117,6 +117,18 @@ def test_a_review_keeps_its_pages_on_the_host_and_the_card_carries_labels(tool_h
     assert review["id"] in answer["note"], "the answer names the id to show the next round under"
 
 
+def test_a_review_whose_board_the_reply_can_place_is_still_one_to_mark(tool_home):
+    # A Conduit that places boards gets the board's line, as Hermes Desktop
+    # does; only Desktop's half takes no marks (hermes-conduit issue 3215).
+    _exchange(tool_home, features=[*FEATURES, tool.PLACED_BOARDS_FEATURE])
+    host = Host(tool_home)
+    answer = _call({"cards": [_review()]}, reviews=host, line_board=lambda board: "cb-0123456789ab")
+    assert answer["ok"] and answer["directive"] == '::conduit-board{id="cb-0123456789ab"}', answer
+    review = answer["cards"][0]["review"]
+    assert host.store().read(review["id"])["pages"], "the round is kept"
+    assert review["id"] in answer["note"], "and the answer says how it's marked"
+
+
 def test_a_page_file_and_a_picture_file_are_read_on_the_host(tool_home, tmp_path):
     page = tmp_path / "a.html"
     page.write_text(PAGE, encoding="utf-8")

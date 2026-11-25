@@ -59,6 +59,10 @@ TEXT_DRAFTS_FEATURE = "text-drafts"
 EMAIL_TEXTS_FEATURE = "email-texts"
 # Conduit draws a room's boards under its agents' messages (room_boards).
 ROOM_BOARDS_FEATURE = "room-boards"
+# A Conduit that draws a board where the reply holds its line
+# (``::conduit-board{id="cb-…"}``), and leaves it out of the tool call's row
+# (hermes-conduit issue 3215).
+PLACED_BOARDS_FEATURE = "placed-boards"
 TOOLSET = "conduit"
 
 SCHEMA: dict[str, Any] = {
@@ -177,6 +181,8 @@ ROOM_PROBLEMS_NOTE = ("Some of it was left out; problems says what and why. Give
 DESKTOP_SHOWN_NOTE = ("Hermes Desktop draws these cards where your reply holds this line, on a line of its own: "
                       "{line} Write it once, where the board goes, and give the gist in a sentence or two; don't "
                       "repeat the cards.")
+PLACED_NOTE = ("They're drawn above your reply. To put them at a place in your reply instead (under the paragraph "
+               "they illustrate), write this line there, once, on a line of its own: {line}")
 TEXT_LAYOUT_NOTE = "layout: these messages show no tabs, left out"
 DIFF_NOT_KEPT_NOTE = ("cards: a diff was too long to send whole and couldn't be kept on the host, so its card lists "
                       "the files without their lines: give the changes that matter in your reply")
@@ -208,8 +214,8 @@ BOARD_RULE = ("[Conduit draws boards, but most answers read best as plain text: 
               "something or the answer would be hard to read without it (the weather or a forecast, places on a map, a plan by "
               "day, numbers to compare across options or over time, a list to tick off, changes to code or a "
               "config as a diff): show it with conduit_show as cards (through tool_search and tool_call when it's "
-              "deferred), with next for the obvious follow-ups, and keep your reply to the gist. At most one "
-              "board a reply. When the user has said how they want cards used, do as they say. Never draw data "
+              "deferred), with next for the obvious follow-ups, and keep your reply to the gist. Draw a second "
+              "board in a reply only when it shows something the first doesn't. When the user has said how they want cards used, do as they say. Never draw data "
               "as an HTML ::preview page.]")
 TEMPLATES_RULE = "[Your saved card templates (conduit_show type template): {names}.]"
 
@@ -267,6 +273,7 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False,
              is_room: Callable[[Any], bool] = lambda _: False,
              room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False,
              desktop_board: Callable[[dict[str, Any]], str | None] = lambda _: None,
+             line_board: Callable[[dict[str, Any]], str | None] = lambda _: None,
              keep_diff: Callable[[dict[str, Any]], str | None] = lambda _: None, skill_path: Any = None,
              reviews: ReviewHost | None = None) -> None:
     """Registers the tool and its recipes, if this Hermes supports plugin
@@ -281,7 +288,7 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False,
 
     def handler(args: Any, session_id: Any = None, **_: Any) -> str:
         return handle(args, session_id=session_id, is_child=is_child, is_room=is_room, room_board=room_board,
-                      desktop_board=desktop_board, keep_diff=keep_diff, reviews=reviews)
+                      desktop_board=desktop_board, line_board=line_board, keep_diff=keep_diff, reviews=reviews)
 
     tool = {"name": TOOL_NAME, "toolset": TOOLSET, "schema": SCHEMA, "handler": handler, "check_fn": available}
     try:
@@ -330,10 +337,11 @@ def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool]
            room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False,
            desktop_board: Callable[[dict[str, Any]], str | None] = lambda _: None,
            keep_diff: Callable[[dict[str, Any]], str | None] = lambda _: None,
-           reviews: ReviewHost | None = None) -> str:
+           reviews: ReviewHost | None = None,
+           line_board: Callable[[dict[str, Any]], str | None] = lambda _: None) -> str:
     try:
         return json.dumps(_handle(args if isinstance(args, dict) else {}, session_id, is_child, is_room, room_board,
-                                  desktop_board, keep_diff, reviews), ensure_ascii=False)
+                                  desktop_board, keep_diff, reviews, line_board), ensure_ascii=False)
     except Exception:  # noqa: BLE001 — a tool must never raise
         logger.warning("conduit_show failed", exc_info=True)
         return json.dumps({"ok": False, "error": "unavailable",
@@ -345,7 +353,8 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
             room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False,
             desktop_board: Callable[[dict[str, Any]], str | None] = lambda _: None,
             keep_diff: Callable[[dict[str, Any]], str | None] = lambda _: None,
-            reviews: ReviewHost | None = None) -> dict[str, Any]:
+            reviews: ReviewHost | None = None,
+            line_board: Callable[[dict[str, Any]], str | None] = lambda _: None) -> dict[str, Any]:
     session = session_id.strip() if isinstance(session_id, str) else ""
     # The user's screen belongs to the conversation they're in, not to a
     # subagent's work.
@@ -393,15 +402,18 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     if saved and not cards and not (isinstance(args.get("markdown"), str) and args["markdown"].strip()):
         return _with_problems({"ok": True, "saved": saved, "note": SAVED_NOTE}, problems)
     try:
-        answer = _handle_cards(args, session, cards, problems, is_room, room_board, desktop_board, keep_diff)
+        answer = _handle_cards(args, session, cards, problems, is_room, room_board, desktop_board, keep_diff,
+                               line_board)
     except BaseException:
         _drop_unshown(reviews, kept, [])  # a show that failed keeps no round
         raise
     if saved:
         answer["saved"] = saved
     # Hermes Desktop's half draws the card but takes no marks (an open gap).
+    # Conduit's own answer names a line too, and its review is marked.
+    for_desktop = answer.pop(_FOR_DESKTOP, False)
     shown = [card["review"] for card in answer.get("cards", []) if card.get("type") == "review"] \
-        if answer.get("ok") and not answer.get("directive") else []
+        if answer.get("ok") and not for_desktop else []
     # A round no card shows (this Conduit draws no reviews, the turn went to
     # Desktop, the card was dropped) isn't kept as one to mark.
     _drop_unshown(reviews, kept, shown)
@@ -814,7 +826,8 @@ def _filled_templates(given: Any, templates: card_templates.TemplateStore, probl
 def _handle_cards(args: dict[str, Any], session: str, cards: list[dict[str, Any]], problems: list[str],
                   is_room: Callable[[Any], bool], room_board: Callable[[Any, dict[str, Any]], bool],
                   desktop_board: Callable[[dict[str, Any]], str | None],
-                  keep_diff: Callable[[dict[str, Any]], str | None]) -> dict[str, Any]:
+                  keep_diff: Callable[[dict[str, Any]], str | None],
+                  line_board: Callable[[dict[str, Any]], str | None] = lambda _: None) -> dict[str, Any]:
     cards = _diffs_answered(cards, keep_diff, problems)
     layout = card_schema.normalize_layout(args.get("layout"), problems)
     follow_ups = card_schema.normalize_next(args.get("next"), problems)
@@ -882,16 +895,10 @@ def _handle_cards(args: dict[str, Any], session: str, cards: list[dict[str, Any]
         # "desktop" too) draws a board through the plugin's Desktop half,
         # where the reply holds the board's line (Eric, 2026-11-04); without
         # the half the board goes in the reply as Markdown.
-        board = {"cards": cards, "card_markdown": [_fallback([card]) for card in cards],
-                 "markdown": _fallback(cards)}
-        if layout and len(cards) > 1:
-            board["layout"] = layout
-        if follow_ups:
-            board["next"] = follow_ups
-        board_id = desktop_board(board)
+        board_id = desktop_board(_kept_board(cards, layout, follow_ups))
         if board_id:
             line = f'::conduit-board{{id="{board_id}"}}'
-            return _board({"ok": True, "directive": line}, cards, layout, follow_ups, problems,
+            return _board({"ok": True, "directive": line, _FOR_DESKTOP: True}, cards, layout, follow_ups, problems,
                           DESKTOP_SHOWN_NOTE.format(line=line))
     if cards and source not in (None, "conduit"):
         # Desktop without its half, a messaging app or the terminal draws no
@@ -959,8 +966,8 @@ def _handle_cards(args: dict[str, Any], session: str, cards: list[dict[str, Any]
         # call's job that ends after the hang-up (notifier#1002). The chat
         # draws the cards from this answer; Markdown goes in the reply.
         if cards and store.has_feature(CHAT_CARDS_FEATURE):
-            return _board({"ok": True}, cards, layout, follow_ups, problems,
-                          _with_left_out(IN_CHAT_NOTE, left_out, no_texts))
+            return _in_chat(cards, layout, follow_ups, problems, _with_left_out(IN_CHAT_NOTE, left_out, no_texts),
+                            store, line_board)
         if cards:
             return _as_text("typed_chat", CHAT_NO_CARDS_NOTE, cards, problems)
         return _with_problems({"ok": False, "error": "typed_chat",
@@ -972,8 +979,8 @@ def _handle_cards(args: dict[str, Any], session: str, cards: list[dict[str, Any]
         if error.code == "no_device" and cards and store.has_feature(CHAT_CARDS_FEATURE):
             # No call screen to put it on, but the chat draws it from this
             # answer.
-            return _board({"ok": True}, cards, layout, follow_ups, problems,
-                          _with_left_out(IN_CHAT_NOTE, left_out, no_texts))
+            return _in_chat(cards, layout, follow_ups, problems, _with_left_out(IN_CHAT_NOTE, left_out, no_texts),
+                            store, line_board)
         note = str(error)
         if error.code in ("no_device", "rate_limited"):
             note += " Tell the user the gist instead."
@@ -981,6 +988,42 @@ def _handle_cards(args: dict[str, Any], session: str, cards: list[dict[str, Any]
                               problems)
     return _board({"ok": True, "id": card["id"]}, cards, layout, follow_ups, problems,
                   _with_left_out(SHOWN_NOTE, left_out, no_texts))
+
+
+# Marks conduit_show's answer for Hermes Desktop inside the plugin; taken
+# off before the answer leaves (_handle).
+_FOR_DESKTOP = "_for_desktop"
+
+
+def _kept_board(cards: list[dict[str, Any]], layout: str | None, follow_ups: list[str]) -> dict[str, Any]:
+    """A board as the host keeps it for a reply's line to name: its cards,
+    each card's own Markdown and the whole board's, its layout and
+    follow-ups."""
+    board: dict[str, Any] = {"cards": cards, "card_markdown": [_fallback([card]) for card in cards],
+                             "markdown": _fallback(cards)}
+    if layout and len(cards) > 1:
+        board["layout"] = layout
+    if follow_ups:
+        board["next"] = follow_ups
+    return board
+
+
+def _in_chat(cards: list[dict[str, Any]], layout: str | None, follow_ups: list[str], problems: list[str], note: str,
+             store: Any, line_board: Callable[[dict[str, Any]], str | None]) -> dict[str, Any]:
+    """The answer for cards the chat draws. Where every Conduit in use
+    places a board by its line, the answer names that line, and the reply
+    can put the board under the words it goes with; without the line in the
+    reply the chat draws the board above it, as before (hermes-conduit issue
+    3215). The board is kept on the host too, so Hermes Desktop's half and a
+    chat that no longer holds the call's row can draw it by the line."""
+    answer: dict[str, Any] = {"ok": True}
+    if store.has_feature_everywhere(PLACED_BOARDS_FEATURE):
+        board_id = line_board(_kept_board(cards, layout, follow_ups))
+        if board_id:
+            line = f'::conduit-board{{id="{board_id}"}}'
+            answer["directive"] = line
+            note = f"{note} {PLACED_NOTE.format(line=line)}"
+    return _board(answer, cards, layout, follow_ups, problems, note)
 
 
 def _board(answer: dict[str, Any], cards: list[dict[str, Any]], layout: str | None, follow_ups: list[str],
