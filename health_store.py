@@ -70,6 +70,7 @@ OTHER_PROFILES_KEY = "other_profiles:"
 # profiles by it, so a late retry to the profile it left isn't the newer sync.
 SENT_KEY = "sent:"
 # How far past this host's clock that time is kept (phone_store holds a phone's clock to the same).
+# Read only through _sent and _synced_devices, which hold an older row to last_seen as well.
 MAX_CLOCK_SKEW_S = 5 * 60
 
 SALT = b"conduit-health-v1"
@@ -1011,9 +1012,15 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
         db.execute("DELETE FROM meta WHERE key=?", (OTHER_PROFILES_KEY + device_id,))
     # Held to this host's clock: a phone whose clock ran ahead when it last synced here would
     # otherwise look newer than the profile it moved to until that one caught up.
+    # A stored time is first held as _synced_devices holds it, to when this host last heard from
+    # the device: one kept far ahead by 0.195.8 or earlier would otherwise outrank the profile the
+    # device moved to as soon as this batch, a late retry say, moves last_seen (notifier#1070).
     sent_at = min(computed_at, now + MAX_CLOCK_SKEW_S)
-    if sent_at > _sent(db, device_id):
-        db.execute("INSERT OR REPLACE INTO meta VALUES(?, ?)", (SENT_KEY + device_id, str(sent_at)))
+    stored = _sent(db, device_id)
+    seen = db.execute("SELECT last_seen FROM devices WHERE id=?", (device_id,)).fetchone()
+    held = min(stored, float(seen[0]) + MAX_CLOCK_SKEW_S) if seen and seen[0] is not None else stored
+    if max(sent_at, held) != stored:
+        db.execute("INSERT OR REPLACE INTO meta VALUES(?, ?)", (SENT_KEY + device_id, str(max(sent_at, held))))
     db.execute("UPDATE devices SET last_seen=?, tz=COALESCE(?, tz), categories=COALESCE(?, categories),"
                " detailed=COALESCE(?, detailed) WHERE id=?",
                (now, tz, None if categories is None else json.dumps(categories),

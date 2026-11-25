@@ -1845,6 +1845,23 @@ def test_context_lines_left_out_are_whole_speaker_lines_and_never_a_follow_ups_w
     assert trim("just this", set()) == ("just this", {"User: just this"}), "no block: as it is"
 
 
+def test_a_blank_line_inside_a_speakers_words_does_not_end_the_block():
+    """notifier#1075: a speaker's words can hold a blank line, as on the phone
+    (requestWithoutContextSent); only a blank line no speaker's line follows
+    ends the block, and the block's closing newline isn't a line."""
+    trim = api.watch_jobs.watch_request_without_context_sent
+    two = "Assistant: two things broke this morning.\n\nthe build cache went stale first"
+    block = "User: what broke on the build box\n" + two + "\nUser: understood, clear the cache first\n"
+    text, lines = trim("clear it" + WATCH_CONTEXT + block, set())
+    assert text == "clear it" + WATCH_CONTEXT + block.rstrip("\n")
+    assert two in lines and "User: understood, clear the cache first" in lines
+
+    again, _ = trim("and rebuild" + WATCH_CONTEXT + block + "\nand rebuild it after", lines)
+    assert again == "and rebuild\n\nand rebuild it after", "every line sent: the block goes, the follow-up stays"
+    spaced, _ = trim("and rebuild" + WATCH_CONTEXT + "User: understood, clear the cache first  \n", lines)
+    assert spaced == "and rebuild", "a line's key ends at its words"
+
+
 def test_a_calls_later_ordinary_requests_run_in_the_chat_its_first_one_made():
     grant = make_jobs()
     server = grant.jobs.server

@@ -138,18 +138,29 @@ def watch_request_without_context_sent(instructions: str, sent: Set[str]) -> Tup
     line is one speaker's words, words after the block's blank line stay, and
     a request with no block comes back as it is."""
     def key(line: str) -> str:
+        # A line's key ends at its words, so a line counts as sent whether or
+        # not a blank line followed it then.
+        line = line.strip()
         return "User: " + line[len(_WATCH_CONTEXT_HANDLED):] if line.startswith(_WATCH_CONTEXT_HANDLED) else line
 
     cut = _WATCH_CONTEXT_MARKER.search(instructions)
     if cut is None:
         return instructions, {"User: " + instructions.strip()}
     own, marker, rest = instructions[:cut.start()], cut.group(0), instructions[cut.end():]
+    # A follow-up said while the request waited comes after a blank line. A
+    # speaker's words can hold blank lines too (hermes-conduit-notifier#1075),
+    # so the block runs to the first blank line no speaker's line follows.
     end = rest.find("\n\n")
+    while end >= 0 and any(line.startswith(_WATCH_CONTEXT_SPEAKERS) for line in rest[end + 2:].split("\n")):
+        end = rest.find("\n\n", end + 2)
     block, tail = (rest, "") if end < 0 else (rest[:end], rest[end:])
+    # The block ends with a newline (WatchBridgeDelegation.request): only the
+    # blank lines inside it are kept.
+    block_lines = block.split("\n")
+    while block_lines and not block_lines[-1]:
+        block_lines.pop()
     lines: List[str] = []
-    for line in block.split("\n"):
-        if not line:
-            continue
+    for line in block_lines:
         if not lines or line.startswith(_WATCH_CONTEXT_SPEAKERS):
             lines.append(line)
         else:

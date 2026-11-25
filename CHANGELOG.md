@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.196.5 (2026-11-25)
+
+### Fixes
+
+- In a call on the Apple Watch, a later request no longer sends the call's chat the recent conversation again when an earlier answer in it ran over more than one paragraph.
+- Health from a phone whose clock once ran ahead, read by another profile, no longer goes back to the profile the phone left when an old sync reaches that profile late.
+
 ## 0.196.4 (2026-11-25)
 
 ### Fixes

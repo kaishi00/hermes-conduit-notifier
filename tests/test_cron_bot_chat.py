@@ -390,6 +390,22 @@ def test_a_run_whose_push_never_stood_down_keeps_it_alone_after_an_earlier_run_t
     assert sent == []
 
 
+def test_what_is_kept_of_runs_that_stood_down_is_bounded_and_keeps_the_newest(monkeypatch):
+    # notifier#1070: past _STOOD_DOWN_KEPT keys the oldest go, and a key noted again is newest.
+    cron_runs = importlib.import_module("conduit_push.cron_runs")
+    monkeypatch.setattr(cron_runs, "_stood_down", {})
+    monkeypatch.setattr(cron_runs, "_STOOD_DOWN_KEPT", 6)
+    for run in range(5):
+        cron_runs._note_stood_down(f"job-{run}", f"cron:job-{run}:run-{run}")
+    assert len(cron_runs._stood_down) == 6
+    assert not cron_runs.stood_down("job-1", "run-1") and not cron_runs.stood_down("job-1", None)
+    assert cron_runs.stood_down("job-2", None) and cron_runs.stood_down("job-4", "run-4")
+    cron_runs._note_stood_down("job-2", "cron:job-2:run-2")
+    cron_runs._note_stood_down("job-5", "cron:job-5:run-5")
+    assert cron_runs.stood_down("job-2", "run-2"), "noted again: newest, kept"
+    assert not cron_runs.stood_down("job-3", "run-3")
+
+
 def test_a_muted_bot_chat_holds_the_notes_push(hermes, monkeypatch):
     ChatMute = importlib.import_module("conduit_push.chat_mute")
     sent = []

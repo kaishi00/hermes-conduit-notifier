@@ -1595,9 +1595,12 @@ def test_a_profile_left_out_by_name_is_not_read(live, db, tmp_path, request, cap
     assert "leave out profile work." in capsys.readouterr().out
     assert run("exclude:nobody") == 1 and "The others: nahida, work." in capsys.readouterr().out
     live.store.set("enabled", True)
+    live.store.set("report_excluded", ["work", "gone"])  # notifier#1071: a kept name for an absent profile
     cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
     out = capsys.readouterr().out
     assert "also read profiles: nahida\n" in out and "Left out of the report and memory: work\n" in out
+    assert "gone" not in out
+    live.store.set("report_excluded", ["work"])
     assert run("include:nahida") == 1 and run("include:work") == 0 and live.store.excluded_profiles() == []
     live.store.set("report_profiles", "this")
     assert run("exclude:work") == 0 and "`pulse report all-profiles` reads the others" in capsys.readouterr().out
