@@ -185,7 +185,8 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
 EXCLUDED_LIMIT = 64
 PROFILE_NAME_LIMIT = 40
 
-SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "excluded_profiles", "report_times",
+SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "excluded_profiles",
+            "exclude_profile", "include_profile", "report_times",
             "time_zone",
             "brief_time", "model", "nudge", "memory_daily_tokens", "followup_daily_tokens", "note",
             "quiet_days", "quiet_until", "night", "look_ahead", "inbox_deadlines", "look_first", "where",
@@ -196,6 +197,12 @@ MAX_DAILY_TOKENS = 5_000_000
 # How long the user's note to Pulse may be: a few paragraphs, and a bounded
 # share of every prompt it goes into.
 NOTE_LIMIT = 1_500
+
+
+def _toggled(excluded: list[str], field: str, name: str) -> list[str]:
+    """``excluded`` with ``name`` left out ("exclude_profile") or read again."""
+    kept = [each for each in excluded if each != name]
+    return kept + [name] if field == "exclude_profile" else kept
 
 
 def _encodes(text: str) -> bool:
@@ -219,7 +226,11 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
     for "report_profiles"; a list of at most EXCLUDED_LIMIT profile names
     for "excluded_profiles", the other profiles "all" leaves out (the whole
     list; a name kept for a profile that isn't there now stays, when
-    ``home`` can tell); a list of "HH:MM" for "report_times"; an IANA
+    ``home`` can tell); one profile name for "exclude_profile" or
+    "include_profile", which leaves it out or reads it again and keeps the
+    rest of the stored list as it is, so a pick from a page read before
+    another device changed the list drops nothing (hermes-conduit issue
+    3269); a list of "HH:MM" for "report_times"; an IANA
     name, or "" for the phone's, for "time_zone"; {"provider", "model"} for
     "model" (the model Pulse's turns run on), or null for the chat's own;
     "gentle", "balanced" or "eager" for "nudge"; a whole number of tokens,
@@ -263,6 +274,19 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
         if len(kept) > EXCLUDED_LIMIT:  # never a kept name dropped quietly
             raise Refused("invalid", field="excluded_profiles")
         changes["report_excluded"] = kept
+    toggle: tuple[str, str] | None = None  # (field, name): one name in or out
+    for field in ("exclude_profile", "include_profile"):
+        if field not in body:
+            continue
+        name = body[field]
+        if "excluded_profiles" in body or toggle is not None or not (
+                isinstance(name, str) and name and len(name) <= PROFILE_NAME_LIMIT and _encodes(name)):
+            raise Refused("invalid", field=field)
+        toggle = (field, name)
+        toggled = _toggled(pulse_store.excluded_profiles(), field, name)
+        if len(toggled) > EXCLUDED_LIMIT:
+            raise Refused("invalid", field=field)
+        changes["report_excluded"] = toggled
     if "report_times" in body:
         times = body["report_times"]
         parsed = pulse.report.parse_times(",".join(times)) if isinstance(times, list) and 0 < len(times) <= 12 \
@@ -320,6 +344,17 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
             raise Refused("invalid", field="night")
         changes[pulse_hours.SETTING] = night
     for key, value in changes.items():
+        if key == "report_excluded" and toggle is not None:
+            # Changed against the list as it is when written, so two devices
+            # picking at once both keep their pick.
+            for _ in range(8):
+                raw = pulse_store.get("report_excluded")
+                value = _toggled(pulse_store.excluded_profiles(), *toggle)
+                if len(value) > EXCLUDED_LIMIT:
+                    raise Refused("invalid", field=toggle[0])
+                if pulse_store.swap("report_excluded", raw, value):
+                    break
+            continue
         pulse_store.set(key, value)
     if changes.get("inbox_deadlines") is False:
         pulse_memory.stop_inbox(pulse_store)  # off forgets what it kept from the inbox

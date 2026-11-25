@@ -1586,6 +1586,26 @@ def test_a_profile_left_out_by_name_is_not_read(live, db, tmp_path, request, cap
     assert live.store.excluded_profiles()[0] == "gone"
     live.store.set("report_excluded", "work")  # not a list: nothing is left out
     assert live.store.excluded_profiles() == []
+    # One name in or out keeps the rest of the stored list, so a pick from a
+    # page read before another device changed it drops nothing (issue 3269).
+    live.store.set("report_excluded", ["work", "gone"])
+    control.update(live.store, {"exclude_profile": "nahida"}, tmp_path)
+    assert live.store.excluded_profiles() == ["work", "gone", "nahida"]
+    control.update(live.store, {"exclude_profile": "nahida"}, tmp_path)
+    assert live.store.excluded_profiles() == ["work", "gone", "nahida"]
+    control.update(live.store, {"include_profile": "work"}, tmp_path)
+    assert live.store.excluded_profiles() == ["gone", "nahida"]
+    control.update(live.store, {"include_profile": "nobody"}, tmp_path)
+    assert live.store.excluded_profiles() == ["gone", "nahida"]
+    for bad in ({"exclude_profile": ""}, {"include_profile": ["work"]}, {"exclude_profile": "x" * (control.PROFILE_NAME_LIMIT + 1)},
+                {"exclude_profile": "work", "excluded_profiles": []}, {"exclude_profile": "work", "include_profile": "gone"}):
+        with pytest.raises(control.Refused) as refused:
+            control.update(live.store, bad, tmp_path)
+        assert refused.value.data["field"] in ("exclude_profile", "include_profile")
+    live.store.set("report_excluded", [f"p{n}" for n in range(control.EXCLUDED_LIMIT)])
+    with pytest.raises(control.Refused):
+        control.update(live.store, {"exclude_profile": "one-more"}, tmp_path)
+    live.store.set("report_excluded", [])
     # The CLI's two words for it.
     live.store.set("report_profiles", "all")
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
@@ -3891,6 +3911,7 @@ def test_pulse_routes(remembering, db, monkeypatch):
     # Single profiles left out of what Pulse reads (issue 3241).
     assert "pulse_profile_exclusions" in api.capabilities.ROUTE_CAPABILITIES
     assert http.put(base, json={"excluded_profiles": []}).json()["excluded_profiles"] == []
+    assert "pulse_profile_exclusion_toggle" in api.capabilities.ROUTE_CAPABILITIES  # issue 3269
     # Quiet times: weekdays, and a spell until the end of today or a day.
     assert "pulse_quiet" in api.capabilities.ROUTE_CAPABILITIES
     hushed = http.put(base, json={"quiet_days": [6, 5], "quiet_until": "today"}).json()

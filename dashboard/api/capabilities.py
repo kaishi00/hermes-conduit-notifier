@@ -167,6 +167,9 @@ ROUTE_CAPABILITIES = (
     # 3241): GET /pulse lists "excluded_profiles" beside "other_profiles",
     # and PUT /pulse takes "excluded_profiles", the whole list.
     "pulse_profile_exclusions",
+    # PUT /pulse also takes "exclude_profile" or "include_profile", one
+    # name, changing the stored list in place (hermes-conduit issue 3269).
+    "pulse_profile_exclusion_toggle",
     "present-v1",
     "health-sync",
     "voice-tools",
