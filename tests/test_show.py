@@ -912,6 +912,8 @@ def test_the_model_draws_cards_only_when_they_help():
     # Eric, 2026-11-24: nothing stops a reply drawing several boards.
     assert "At most one board" not in tool.BOARD_RULE
     assert "a second board in a reply only when it shows something the first doesn't" in tool.BOARD_RULE
+    assert "One board per answer" not in skill
+    assert "second board in a reply only when" in " ".join(skill.split())
     for text in (tool.BOARD_RULE, tool.SCHEMA["description"], skill):
         assert "the weather" in text, "the three set the same bar"
     # The user's wishes stand as their own sentence, not inside the "never" list.

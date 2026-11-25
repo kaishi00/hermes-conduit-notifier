@@ -30,8 +30,9 @@ for your reply instead.
   a table with guesses.
 - **Short reply.** The board carries the detail; your reply gives the gist in
   a sentence or two and never repeats the cards.
-- **One board per answer.** To change it, show the whole board again. A card
-  with a `live` name replaces the earlier one of that name.
+- **One board is usually enough.** Draw a second board in a reply only when
+  it shows something the first doesn't. To change a board, show the whole
+  board again. A card with a `live` name replaces the earlier one of that name.
 - **Fix what's listed.** If the answer lists `problems`, fix those parts and
   show the board again, or give them in your reply.
 - **Follow-ups are the user's words.** `next` holds messages the user would

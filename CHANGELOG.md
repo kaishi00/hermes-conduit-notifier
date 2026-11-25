@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.196.1 (2026-11-25)
+
+### Fixes
+
+- The board-drawing skill no longer tells the bot to stop at one board per answer, which 0.196.0 changed everywhere else.
+
 ## 0.196.0 (2026-11-25)
 
 ### New and improved
