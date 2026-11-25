@@ -789,6 +789,31 @@ def test_what_is_left_out_is_said_wherever_the_board_goes(tool_home, monkeypatch
     assert room["error"] == "group_room" and room["problems"] == away["problems"]
 
 
+def test_a_conduit_that_places_boards_gets_the_boards_line(tool_home, typed_turn):
+    # hermes-conduit issue 3215: the reply can put the board under the words
+    # it goes with; without the line the chat draws it above the reply.
+    line = '::conduit-board{id="cb-0123456789ab"}'
+    kept = []
+    keep = lambda board: kept.append(board) or "cb-0123456789ab"  # noqa: E731
+    _exchange(PresentStore(tool_home), features=BOARD_FEATURES)
+    older = _call({"title": "Caps", "cards": [TABLE_CARD]}, line_board=keep)
+    assert older["note"] == tool.IN_CHAT_NOTE and "directive" not in older and not kept, \
+        "a Conduit that hides the line is never asked for it"
+    _exchange(PresentStore(tool_home), features=(*BOARD_FEATURES, tool.PLACED_BOARDS_FEATURE))
+    answer = _call({"title": "Caps", "cards": [TABLE_CARD, CALLOUT], "layout": "tabs", "next": ["More"]},
+                   line_board=keep)
+    assert answer["ok"] is True and answer["directive"] == line
+    assert answer["note"] == f"{tool.IN_CHAT_NOTE} {tool.PLACED_NOTE.format(line=line)}"
+    assert "_for_desktop" not in answer
+    [board] = kept
+    assert board["cards"] == answer["cards"] and board["markdown"] == answer["markdown"]
+    assert board["card_markdown"] == [tool.card_schema.fallback_markdown([card]) for card in answer["cards"]]
+    assert board["layout"] == "tabs" and board["next"] == ["More"]
+    unkept = _call({"title": "Caps", "cards": [TABLE_CARD]}, line_board=lambda board: None)
+    assert unkept["ok"] is True and unkept["note"] == tool.IN_CHAT_NOTE and "directive" not in unkept, \
+        "a board the host couldn't keep is drawn above the reply, as before"
+
+
 def test_a_desktop_chat_with_the_half_gets_the_boards_line(tool_home, monkeypatch):
     _exchange(PresentStore(tool_home), features=BOARD_FEATURES)
     monkeypatch.setattr(tool, "_turn_source", lambda: "desktop")
@@ -799,6 +824,7 @@ def test_a_desktop_chat_with_the_half_gets_the_boards_line(tool_home, monkeypatc
     line = '::conduit-board{id="cb-0123456789ab"}'
     assert answer["ok"] is True and answer["directive"] == line and line in answer["note"]
     assert answer["layout"] == "tabs" and answer["next"] == ["More"], "Desktop's half draws tabs and follow-ups"
+    assert "_for_desktop" not in answer, "the plugin's own mark never leaves it"
     [board] = kept
     assert board["cards"] == answer["cards"] and board["markdown"] == answer["markdown"]
     assert board["card_markdown"] == [tool.card_schema.fallback_markdown([card]) for card in answer["cards"]]
@@ -883,7 +909,9 @@ def test_the_model_draws_cards_only_when_they_help():
     for text in (tool.BOARD_RULE, tool.SCHEMA["description"], skill):
         assert "most answers" in text.lower() and "how they want cards used, do as they say" in text
     assert "Prefer cards, which Conduit draws natively, on a call or in a typed chat" not in tool.SCHEMA["description"]
-    assert "At most one board a reply" in tool.BOARD_RULE
+    # Eric, 2026-11-24: nothing stops a reply drawing several boards.
+    assert "At most one board" not in tool.BOARD_RULE
+    assert "a second board in a reply only when it shows something the first doesn't" in tool.BOARD_RULE
     for text in (tool.BOARD_RULE, tool.SCHEMA["description"], skill):
         assert "the weather" in text, "the three set the same bar"
     # The user's wishes stand as their own sentence, not inside the "never" list.

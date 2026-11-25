@@ -168,7 +168,8 @@ def register(ctx: Any) -> None:
     # Hermes puts a table, steps or links on the screen of the user's voice
     # call instead of reading them out.
     show_tool.register(ctx, is_child=_is_child, is_room=_is_room_turn, room_board=_save_room_board,
-                       desktop_board=_save_desktop_board, keep_diff=_keep_diff, reviews=_ReviewHost(),
+                       desktop_board=_save_desktop_board, line_board=_keep_line_board, keep_diff=_keep_diff,
+                       reviews=_ReviewHost(),
                        skill_path=Path(__file__).resolve().parent / "skills" / show_tool.SKILL_NAME / "SKILL.md")
     # Hermes writes the title and body of the push its turn sends when it
     # ends, for a result the user asked to be told about (#1415).

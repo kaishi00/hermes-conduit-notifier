@@ -3281,7 +3281,8 @@ the schema's `board` section.
   turn from a Conduit that draws boards, Hermes gets a short rule on when to
   draw one: only when the user asks to see something or the answer would be
   hard to read without it, never for an explanation, advice or a short
-  answer, at most one a reply, the user's own wishes about cards first, and
+  answer, a second one in a reply only when it shows something the first
+  doesn't, the user's own wishes about cards first, and
   never data as an HTML `::preview` page.
 - **Older Conduits.** A Conduit says `board-cards` in its exchange when it
   draws boards. Until every Conduit that draws cards does, the tool leaves
@@ -3443,6 +3444,14 @@ Plugins as "Conduit boards", off until you turn it on there.
   Without the half, the board goes in the reply as Markdown, as before.
   `conduit_show` is offered only while a Conduit paired with this host has
   been in touch lately, so boards in Desktop need the Conduit app too.
+- **The line in Conduit (plugin 0.196+).** In a chat in Conduit the board
+  is drawn from the tool call, so it never needed the line. A Conduit that
+  says `placed-boards` in its exchange draws the board where the reply
+  holds the line instead, under the words it goes with, and leaves it out
+  of the call's row: `conduit_show` then keeps the board the same way and
+  answers with `directive` on Conduit turns too, telling Hermes the line is
+  optional there. A reply without the line keeps the board above it, as
+  before, and so does an older Conduit, which hides the line.
 - **Drawing.** The half reads the board with `GET /boards/desktop?id=<id>`
   and draws stats, charts, comparisons, steps, status, tables (sortable),
   timelines, checklists, lists, progress, callouts and diffs (each file
