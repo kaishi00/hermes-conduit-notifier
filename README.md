@@ -2159,6 +2159,26 @@ started. A branch is a chat of its own and isn't counted.
   predates the cost columns, 504 past 10 seconds, 429 past 120 reads a minute
   per profile. Every answer is `Cache-Control: no-store`.
 
+## A chat's Kanban tasks (plugin 0.197.0+)
+
+Conduit shows the Kanban cards a chat handed to the board above its composer,
+on the phone and the desktop, so you can tell they're being worked on after
+the turn that made them ended. Hermes stamps each card `kanban_create` makes
+with the session that made it, and a worker's own cards inherit it. This
+route reads every board (archived boards left out) for the cards stamped with
+any of the chat's sessions through its compressions, read-only.
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| GET | `/api/plugins/conduit_push/sessions/kanban-tasks?session_id=&profile=` | `{session_id, supported, tasks: [{id, title, status, assignee, board, board_name, created_at, started_at, completed_at, error}]}` |
+
+- `supported` is false on a Hermes whose cards carry no session: Conduit then
+  shows nothing rather than "no tasks". Archived tasks are left out, and
+  `error` is the last failure only while the task is blocked.
+- 400 without `session_id`, 404 when Hermes has no row for the chat, 504 past
+  10 seconds, 429 past 240 reads a minute per profile. Every answer is
+  `Cache-Control: no-store`.
+
 ## Done chats (plugin 0.183+)
 
 Conduit's Sessions list dims a chat marked done and lists it under the Status

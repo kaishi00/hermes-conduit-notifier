@@ -19,6 +19,8 @@ watch_paths:
   - hermes_cli/plugin_validate_desktop*.py
   - tools/tool_search*.py
   - hermes_cli/profiles*.py
+  # chat_tasks.py reads the boards through hermes_cli.kanban_db (list_boards, kanban_db_path) and each board's tasks table.
+  - hermes_cli/kanban_db*.py
   - hermes_cli/dashboard_auth/
   # capabilities.sign_in_ends_on_restart mirrors the basic provider's signing-secret rule.
   - plugins/dashboard_auth/basic/
