@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.197.2 (2026-11-25)
+
+### Fixes
+
+- On a Hermes that can't find one Kanban board's file, a chat's Kanban line still shows the tasks on its other boards.
+
 ## 0.197.1 (2026-11-25)
 
 ### Fixes
