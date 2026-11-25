@@ -968,6 +968,24 @@ def test_a_clarify_that_ran_out_is_kept_and_answered_in_words_or_with_a_choice(o
     assert call("work_propose", {"withdraw": kept_here[0]["id"]})["status"] == "withdrawn"
 
 
+def test_a_reword_that_attaches_a_workstream_keeps_whats_new_since_the_no(on, hermes, home, monkeypatch):
+    # Notifier issue 1060: the question was about no workstream, so the no is found by its
+    # words, which the reword leaves behind; adding a ref cleared what was new.
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    start()
+    woken(home)
+    loose = call("work_propose", {"text": "Start an audit of the billing exports?"})["id"]
+    assert work.app_act(on.home, loose, "decline")["ok"]
+    again = call("work_propose", {"text": "Start an audit of the billing exports now?",
+                                  "new": "Finance asked for it today."})
+    assert again["ok"], again
+    out = call("work_propose", {"text": "Shall W1 look over how invoices leave the system?",
+                                "replaces": again["id"], "ref": "W1"})
+    assert out["ok"], out
+    row = on.proposal(again["id"])
+    assert work.work_store.proposal_refs(row) == ["W1"] and row["new"] == "Finance asked for it today."
+
+
 def test_a_reworded_question_takes_its_new_choices_and_a_peers_chat_asks_nothing(on, hermes, home, monkeypatch):
     asked(home)
     item = call("work_propose", {"text": "Restart the watcher?"}, session_id=OTHER_CHAT)["id"]

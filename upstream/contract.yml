@@ -277,7 +277,8 @@ notes:
     false). cron.jobs' get_job tells the quiet rule (cron_runs.quiet) which jobs deliver to a Bot
     Chat, so the run chat's push stands down behind the Bot Chat's side (issue 1047); on a Hermes
     without it, or a job it can't find, the note's push is held and the run chat's push is the one
-    notification, as before this. upstream/test_cron_bot_chat.py runs both jobs on the canary and checks the bot has the
+    notification, as before this (unless that push already stood down while the job could be read:
+    a job deleted mid-run still notifies once, notifier #1059). upstream/test_cron_bot_chat.py runs both jobs on the canary and checks the bot has the
     report on the user's next turn.
   plugin update around a running turn: >-
     The host-run update (feature map: "Conduit plugin update") asks
@@ -285,6 +286,13 @@ notes:
     waits for it before the restart, and reads gateway.status' gateway_state.json for a restart
     that is draining. Without them it restarts at once and gives up after 180 s, so an update
     during a turn reports a failure while the gateway refuses new work (notifier #546).
+    The restart itself is `gateway restart --interrupt --detach`, spawned with
+    hermes_cli.web_server_gateway's _spawn_hermes_action and _gateway_subcommand (one already in
+    _ACTION_PROCS is left to _spawn_gateway_restart) when hermes_cli.gateway_runtime_start has
+    start_detached_replacement: a gateway no service manager runs (the Hermes desktop app's) is
+    replaced in the background and the command exits. Without them the command becomes the new
+    gateway, and the update counts a gateway whose pid or start time in gateway_state.json is new
+    as restarted, leaving the command running, where it used to kill it at 180 s (notifier #1062).
     GET /self/gateway-work names that work for Conduit (each chat's session row by its key in
     the session store, a cron job's name by hermes_cli.update_cmd_drain_report._cron_job_name) with the
     gateway's own cap (gateway.restart's parse of agent.restart_after_turn_timeout), so the update

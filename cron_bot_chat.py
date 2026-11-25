@@ -289,7 +289,7 @@ def _push_note(job: dict, chat: str, name: str, report: str, key: str, for_failu
     try:
         from .client import enqueue
         from .chat_mute import ChatMuteStore
-        from .cron_runs import _job_deliver, muted as job_muted
+        from .cron_runs import _job_deliver, muted as job_muted, stood_down
         from .events import event_id, plain_text, push_event
         from . import session_titles
         from hermes_constants import get_hermes_home
@@ -299,7 +299,10 @@ def _push_note(job: dict, chat: str, name: str, report: str, key: str, for_failu
         # The push rides the same delivery read the quiet rule makes: on a
         # Hermes without the job reader (or a job it can't find) it can't
         # know, so the run chat's push stays the one notification, as before.
-        if _job_deliver(str(job.get("id") or ""), for_failure) is None:
+        # Unless that push already stood down for this run, while the job
+        # could still be read (deleted since): then this one is the run's.
+        if (_job_deliver(str(job.get("id") or ""), for_failure) is None
+                and not stood_down(str(job.get("id") or ""), job.get("execution_id"))):
             return
         store = ChatMuteStore(get_hermes_home())
         if store.chats():

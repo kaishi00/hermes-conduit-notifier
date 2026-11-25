@@ -18,6 +18,12 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 
 - Pulse can leave single profiles out of what it reads. While it reads every profile, pick the ones to leave out in Settings > Pulse, under Profiles: Pulse then reads none of their chats, memories or scheduled jobs. What it already remembers from one stays until you remove it. Needs a Conduit that offers it; `hermes conduit-push pulse report exclude:<profile>` does the same.
+### Fixes
+
+- Updating the plugin from Conduit works when the Hermes desktop app runs the gateway. Before, the update shut down the gateway it had just started, said the gateway didn't restart, and left the dashboard on the old plugin.
+- A scheduled job deleted while its run was finishing still sends that run's one notification. Before, the run could finish with no notification at all.
+- Health moved to another profile reads from the new profile right away, also when the phone's clock was running ahead the last time it synced to the old one.
+- A bot's question keeps its "new since the last no" line when the bot rewords it to name a workstream.
 
 ## 0.195.8 (2026-11-24)
 
