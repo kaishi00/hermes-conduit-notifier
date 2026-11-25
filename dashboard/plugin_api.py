@@ -83,6 +83,9 @@ they run:
     config_unset          Clearing a Hermes speech setting: keys taken out of
                           a profile's config.yaml, which Hermes' own save
                           can't do
+    media_models          Image and video generation models: the active
+                          backend's models, and a pick saved where the
+                          backend reads it
 
 A module takes what it uses from another by module (``core.TokenError``), never
 by name, so a test that replaces ``plugin_api.core._calls_home`` replaces it

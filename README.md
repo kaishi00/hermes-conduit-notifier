@@ -2322,7 +2322,7 @@ own switch (Cron runs, above).
   write). A file that can't be read mutes nothing, so a fault only lets a
   push through. Capability `chat-mute`.
 
-## Replies kept quiet, for Conduit for desktop (plugin 0.197.4+)
+## Replies kept quiet, for Conduit for desktop (plugin 0.198.1+)
 
 Conduit for desktop shows your computer's own notification when a chat's
 turn ends, and it stays quiet for the replies the plugin keeps quiet by its
@@ -2512,6 +2512,30 @@ endpoint) couldn't be cleared, and a provider pick couldn't drop a stale
   A `?profile=` request Hermes serves in that profile's own plugin host
   (0.22.3+) runs outside that lock; Conduit queues its own saves of a
   profile, so they don't overlap.
+
+## Image and video generation models (plugin 0.198+)
+
+Hermes keeps a profile's image backend in `image_gen.provider` and its model
+in `image_gen.model` (video: `video_gen.*`). Most backends read a key of their
+own first, `image_gen.<backend>.model`, and xAI's and DeepInfra's image
+backends read only theirs, so Hermes' own model pick, which writes
+`image_gen.model` alone, didn't reach them. An env var such as
+`OPENAI_IMAGE_MODEL` or `XAI_IMAGE_MODEL` beats the config for most backends.
+
+- `GET /api/plugins/conduit_push/media-models/image_gen?profile=<name>` (or
+  `video_gen`) answers the active backend's models from Hermes' catalog:
+  `{kind, has_models, provider, plugin, models: [{id, display, speed,
+  strengths, price}], current, default, override}`. `current` is the model the
+  backend reads from the config (its default when none); `override` is
+  `{env, model}` when the profile sets the env var that backend takes over
+  its config, else null.
+- `PUT` the same path with `{"model": "<id>"}` saves a model the backend
+  lists to `<section>.model`, and to `<section>.<backend>.model` when the
+  backend reads only that key or one is already there. It answers
+  `{ok, kind, model, plugin, override}`. No backend with models answers 409,
+  a model it doesn't list 400, a managed Hermes 409.
+- `GET /capabilities` lists `media-models`. Conduit shows the models on
+  Capabilities > Tools > Image Generation (and Video Generation).
 
 ## Group router in Helper models (plugin 0.187+)
 

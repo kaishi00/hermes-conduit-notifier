@@ -148,6 +148,16 @@ notes:
     dashboard's process (feature map: "Profile config saves", hermes-conduit issue 3155). Hermes'
     PUT /api/config deep-merges, so without the route a cleared speech field keeps its old value
     (upstream/test_speech_config_unset.py).
+  image and video models: >-
+    dashboard/api/media_models.py lists the profile's active image_gen/video_gen backend's models
+    through hermes_cli.web_routers.tools' _find_toolset_provider_row, _resolve_toolset_model_plugin
+    and _toolset_model_catalog (what GET /api/tools/toolsets/<name>/models answers), and saves a pick
+    to <section>.model and, where the backend reads it (xAI's and DeepInfra's image backends read only
+    image_gen.<backend>.model), the backend's own key, with save_config under
+    hermes_cli.web_server._CONFIG_MUTATION_LOCK (feature map: "Image and video generation models").
+    Hermes' own pick writes image_gen.model alone, so an xAI pick never reached xAI; without the
+    helpers the route answers 501 and Conduit falls back to Hermes' route
+    (upstream/test_media_models.py).
   prediction fork lifecycle: >-
     dashboard/api/chats.py uses agent.background_review.release_cache_parity_fork
     when available to attribute prediction usage and release only fork clients
@@ -540,7 +550,7 @@ imports:
   hermes_cli.update_cmd_drain_report:
     optional: ["_cron_job_name"]
   hermes_cli.web_routers:
-    optional: ["sessions"]
+    optional: ["sessions", "tools"]
   hermes_cli.web_routers.files:
     optional: ["_fs_backend", "_fs_profile_home", "_is_sensitive_path"]
   hermes_cli.web_server_chat:
@@ -745,6 +755,8 @@ routes:
   - DELETE /location/rules/{rule_id}
   - GET /location/status
   - POST /location/wipe
+  - GET /media-models/{kind}
+  - PUT /media-models/{kind}
   - GET /memory/context
   - POST /memory/recall
   - GET /notifications/muted-chats

@@ -13,11 +13,21 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.197.4 (2026-11-25)
+## 0.198.1 (2026-11-25)
 
 ### Fixes
 
 - Conduit for desktop showed notifications for replies the phone gets none for, such as a Bot Chat's silent turns while it coordinates its work.
+
+## 0.198.0 (2026-11-25)
+
+### Fixes
+
+- Picking an xAI or DeepInfra image model in Hermes didn't change the model those backends used.
+
+### New and improved
+
+- Conduit can show and change the model a profile's image or video generation uses, and says when a setting on your host overrides it.
 
 ## 0.197.3 (2026-11-25)
 
