@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.195.10 (2026-11-25)
+
+### Fixes
+
+- In a GPT-Live call on the Apple Watch, a later request sent to the call's chat no longer repeats the transcript lines that chat already got with an earlier request.
+
 ## 0.195.9 (2026-11-25)
 
 ### Fixes

@@ -1781,6 +1781,50 @@ def start_joining(grant, instructions):
     return api.watch_jobs.run_watch_job_call(grant, "start_job", {"instructions": instructions, "joins_call": True})
 
 
+WATCH_CONTEXT = ("\n\n[Recent voice conversation, for context only. Do just the request above: earlier requests "
+                 "marked \"handled separately\" were passed on before (to a job, the chat, or an answer, or turned "
+                 "down), so skip them unless the request above asks for them.]\n")
+
+
+def test_a_later_request_leaves_out_the_recent_lines_the_calls_chat_already_has():
+    """Issue 3236: every GPT-Live request carries the recent conversation, so
+    the call's chat read the same exchange again with each one."""
+    grant = make_jobs()
+    server = grant.jobs.server
+    heard = "Assistant: Sure, I can look at the deploy for you."
+    first = "check why the deploy failed last night" + WATCH_CONTEXT + "User: hey there\n" + heard
+    assert start_joining(grant, first)["status"] == "started"
+    server.emit("rt-1", "message.complete", {"text": "It ran out of disk.", "status": "complete"})
+
+    news = "Assistant: Hermes says it ran out of disk."
+    second = ("then clear the old builds" + WATCH_CONTEXT + heard
+              + "\nUser (handled separately): check why the deploy failed last night\n" + news
+              + "\nUser: then clear the old builds")
+    assert start_joining(grant, second)["status"] == "started"
+    server.emit("rt-1", "message.complete", {"text": "Cleared.", "status": "complete"})
+    third = ("and tell me how much space is free" + WATCH_CONTEXT + news
+             + "\nUser (handled separately): then clear the old builds")
+    assert start_joining(grant, third)["status"] == "started"
+
+    prompts = [p["text"] for p in server.methods("prompt.submit")]
+    assert prompts[0].endswith("\n\n" + first), "the first request carries its lines whole"
+    assert prompts[1].endswith("\n\nthen clear the old builds" + WATCH_CONTEXT + news + "\nUser: then clear the old builds")
+    assert prompts[2].endswith("\n\nand tell me how much space is free"), "nothing new: no block at all"
+
+
+def test_context_lines_left_out_are_whole_speaker_lines_and_never_a_follow_ups_words():
+    trim = api.watch_jobs.watch_request_without_context_sent
+    long = "Assistant: Here is the first part of a longer answer"
+    sent = {long + "\nand its second line.", "User: Yes.", "make it the blue one instead please"}
+    request = ("do it" + WATCH_CONTEXT + long + "\nand its second line.\nUser: Yes.\n"
+               "User: something new that was not sent before\n\nmake it the blue one instead please")
+    text, lines = trim(request, sent)
+    assert text == ("do it" + WATCH_CONTEXT + "User: Yes.\nUser: something new that was not sent before"
+                    "\n\nmake it the blue one instead please")
+    assert "User: do it" in lines
+    assert trim("just this", set()) == ("just this", {"User: just this"}), "no block: as it is"
+
+
 def test_a_calls_later_ordinary_requests_run_in_the_chat_its_first_one_made():
     grant = make_jobs()
     server = grant.jobs.server

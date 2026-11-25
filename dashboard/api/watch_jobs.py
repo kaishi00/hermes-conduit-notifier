@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import core, voice_calls, watch_tools
 
@@ -120,6 +120,47 @@ WATCH_JOB_FOLLOW_UP_PROMPT = "(voice) {words}"
 # made (#1250).
 WATCH_JOB_NEXT_PROMPT = ("[The next request from the same Conduit voice conversation. As before, end your final message "
                          "with a plain-language summary that can be read aloud.]\n\n{instructions}")
+# Where a GPT-Live request's recent conversation starts (Conduit's
+# WatchBridgeDelegation.contextMarker): the request's own words come before
+# it, the lines after it, each beginning with one of the speakers.
+_WATCH_CONTEXT_MARKER = re.compile(r"\n\n\[Recent voice conversation, for context only\.[^\]\n]*\]\n")
+_WATCH_CONTEXT_HANDLED = "User (handled separately): "
+_WATCH_CONTEXT_SPEAKERS = ("User: ", _WATCH_CONTEXT_HANDLED, "Assistant: ")
+# Shorter lines stay whatever was sent: "Yes." said again answers something else.
+WATCH_CONTEXT_DEDUP_MIN_CHARS = 24
+
+
+def watch_request_without_context_sent(instructions: str, sent: Set[str]) -> Tuple[str, Set[str]]:
+    """``instructions`` for the call's chat with the lines of its recent
+    conversation that ``sent`` holds left out, and the block itself when none
+    is left; and what this request adds to ``sent``. Mirrors Conduit's
+    VoiceBackgroundJobSupervisor.requestWithoutContextSent (issue 3236): a
+    line is one speaker's words, words after the block's blank line stay, and
+    a request with no block comes back as it is."""
+    def key(line: str) -> str:
+        return "User: " + line[len(_WATCH_CONTEXT_HANDLED):] if line.startswith(_WATCH_CONTEXT_HANDLED) else line
+
+    cut = _WATCH_CONTEXT_MARKER.search(instructions)
+    if cut is None:
+        return instructions, {"User: " + instructions.strip()}
+    own, marker, rest = instructions[:cut.start()], cut.group(0), instructions[cut.end():]
+    end = rest.find("\n\n")
+    block, tail = (rest, "") if end < 0 else (rest[:end], rest[end:])
+    lines: List[str] = []
+    for line in block.split("\n"):
+        if not line:
+            continue
+        if not lines or line.startswith(_WATCH_CONTEXT_SPEAKERS):
+            lines.append(line)
+        else:
+            lines[-1] += "\n" + line
+    kept = [line for line in lines if len(line) < WATCH_CONTEXT_DEDUP_MIN_CHARS or key(line) not in sent]
+    added = {key(line) for line in lines} | {"User: " + own.strip()}
+    if not kept:
+        return own + tail, added
+    return own + marker + "\n".join(kept) + tail, added
+
+
 # How often a request waiting for the call's chat checks it again, besides
 # being woken when a job settles.
 WATCH_JOB_CHAT_WAIT_S = 2.0
@@ -471,6 +512,9 @@ class _WatchJobs:
         # The first ordinary request while its chat is still being made: one
         # that starts meanwhile waits for that chat rather than making its own.
         self.call_chat_claim: Optional[_WatchJob] = None
+        # The recent-conversation lines the call's chat got with its
+        # requests: a later one leaves them out (issue 3236).
+        self.call_chat_context: Set[str] = set()
 
     # Hermes' session API
 
@@ -891,6 +935,7 @@ class _WatchJobs:
             cancelled = job.status == "cancelled"
             if not cancelled and job.joins_call and job.profile is None and self.call_chat is None:
                 self.call_chat = job
+                self.call_chat_context = watch_request_without_context_sent(instructions, set())[1]
             if self.call_chat_claim is job:
                 self.call_chat_claim = None
             self.changed.notify_all()
@@ -965,9 +1010,13 @@ class _WatchJobs:
             with self.lock:
                 cancelled = job.status == "cancelled"
             if not cancelled:
-                self.rpc("prompt.submit", {"session_id": job.session_id,
-                                           "text": WATCH_JOB_NEXT_PROMPT.format(instructions=instructions)})
                 with self.lock:
+                    trimmed, lines = watch_request_without_context_sent(instructions, self.call_chat_context)
+                self.rpc("prompt.submit", {"session_id": job.session_id,
+                                           "text": WATCH_JOB_NEXT_PROMPT.format(instructions=trimmed)})
+                with self.lock:
+                    # Only once Hermes took it.
+                    self.call_chat_context |= lines
                     job.turn_open = True
                     cancelled = job.status == "cancelled"
                 if cancelled:
