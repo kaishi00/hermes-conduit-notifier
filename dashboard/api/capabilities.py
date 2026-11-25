@@ -56,6 +56,9 @@ ROUTE_CAPABILITIES = (
     # GET /sessions/usage: one chat's tokens and cost, its compressions and
     # subagent runs included (hermes-conduit#2699).
     "session-usage",
+    # GET /sessions/kanban-tasks: the Kanban tasks a chat handed to the
+    # board, on every board (hermes-conduit-desktop#553).
+    "chat-kanban-tasks",
     # GET/POST /chats/done: the chats the user or their agent marked done
     # (chat_marks_store), and the conduit_chat_done tool.
     "chat-done",

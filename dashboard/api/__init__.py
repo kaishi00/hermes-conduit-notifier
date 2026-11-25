@@ -29,6 +29,7 @@ MODULES = (
     "chats",
     "history",
     "session_usage",
+    "chat_tasks",
     "chat_marks",
     "pairing",
     "notifications",
