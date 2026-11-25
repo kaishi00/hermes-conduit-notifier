@@ -185,7 +185,8 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
 EXCLUDED_LIMIT = 64
 PROFILE_NAME_LIMIT = 40
 
-SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "excluded_profiles", "report_times",
+SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "excluded_profiles",
+            "exclude_profile", "include_profile", "report_times",
             "time_zone",
             "brief_time", "model", "nudge", "memory_daily_tokens", "followup_daily_tokens", "note",
             "quiet_days", "quiet_until", "night", "look_ahead", "inbox_deadlines", "look_first", "where",
@@ -219,7 +220,11 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
     for "report_profiles"; a list of at most EXCLUDED_LIMIT profile names
     for "excluded_profiles", the other profiles "all" leaves out (the whole
     list; a name kept for a profile that isn't there now stays, when
-    ``home`` can tell); a list of "HH:MM" for "report_times"; an IANA
+    ``home`` can tell); one profile name for "exclude_profile" or
+    "include_profile", which leaves it out or reads it again and keeps the
+    rest of the stored list as it is, so a pick from a page read before
+    another device changed the list drops nothing (hermes-conduit issue
+    3269); a list of "HH:MM" for "report_times"; an IANA
     name, or "" for the phone's, for "time_zone"; {"provider", "model"} for
     "model" (the model Pulse's turns run on), or null for the chat's own;
     "gentle", "balanced" or "eager" for "nudge"; a whole number of tokens,
@@ -263,6 +268,20 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
         if len(kept) > EXCLUDED_LIMIT:  # never a kept name dropped quietly
             raise Refused("invalid", field="excluded_profiles")
         changes["report_excluded"] = kept
+    for field in ("exclude_profile", "include_profile"):
+        if field not in body:
+            continue
+        name = body[field]
+        if "excluded_profiles" in body or not (isinstance(name, str) and name and len(name) <= PROFILE_NAME_LIMIT
+                                                and _encodes(name)):
+            raise Refused("invalid", field=field)
+        stored = changes.get("report_excluded", pulse_store.excluded_profiles())
+        stored = [kept for kept in stored if kept != name]
+        if field == "exclude_profile":
+            stored.append(name)
+        if len(stored) > EXCLUDED_LIMIT:
+            raise Refused("invalid", field=field)
+        changes["report_excluded"] = stored
     if "report_times" in body:
         times = body["report_times"]
         parsed = pulse.report.parse_times(",".join(times)) if isinstance(times, list) and 0 < len(times) <= 12 \

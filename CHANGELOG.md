@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.196.6 (2026-11-25)
+
+### Fixes
+
+- Leaving a profile out of Pulse, or reading it again, no longer undoes a change made to that list on another device since the page was opened.
+
 ## 0.196.5 (2026-11-25)
 
 ### Fixes
