@@ -543,6 +543,20 @@ def test_a_phone_whose_clock_ran_ahead_doesnt_keep_the_profile_it_left_looking_n
     assert owner == "work" and found.path == work.path
 
 
+def test_a_time_kept_ahead_before_the_cap_doesnt_keep_the_profile_it_left_looking_newer(home):
+    # What 0.195.8 and earlier kept: the phone's own time, a day ahead of this host's.
+    phone = Phone()
+    _paired(home)
+    old = health.HealthStore(home, clock=lambda: NOW)
+    phone.accept(old.register_key(phone.key_request()))
+    old.ingest(phone.seal(_batch(batch_id="batch-0001", computed_at=_computed(NOW), other_profiles=True)))
+    with old._write() as db:
+        db.execute("INSERT OR REPLACE INTO meta VALUES(?, ?)", (health.SENT_KEY + DEVICE, str(NOW + 86400)))
+    work = _bound(home / "profiles" / "work", Phone(), NOW + 3600, "batch-0002", other_profiles=True)
+    found, owner = health.store_for(home)
+    assert owner == "work" and found.path == work.path
+
+
 def test_a_profile_keeps_its_own_health_beside_another_devices(home):
     _bound(home, Phone(), NOW, "batch-0001")
     _bound(home / "profiles" / "work", Phone(device_id="ipad-installation-2"), NOW + 86400, "batch-0002",

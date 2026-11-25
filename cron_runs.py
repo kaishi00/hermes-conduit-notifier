@@ -133,7 +133,7 @@ def _note_stood_down(job: str, task_id: Any) -> None:
         _stood_down.pop(key, None)
         _stood_down[key] = None
     while len(_stood_down) > _STOOD_DOWN_KEPT:
-        del _stood_down[next(iter(_stood_down))]
+        _stood_down.pop(next(iter(_stood_down), None), None)
 
 
 def stood_down(job: str, execution: Any) -> bool:

@@ -1812,6 +1812,26 @@ def test_a_later_request_leaves_out_the_recent_lines_the_calls_chat_already_has(
     assert prompts[2].endswith("\n\nand tell me how much space is free"), "nothing new: no block at all"
 
 
+def test_a_request_hermes_did_not_take_leaves_its_lines_unsent():
+    """Lines count as sent only once Hermes took the request: one that failed
+    never reached the chat, so the next request still carries them."""
+    grant = make_jobs()
+    server = grant.jobs.server
+    first = "check why the deploy failed last night" + WATCH_CONTEXT + "User: hey there, are you with me now"
+    assert start_joining(grant, first)["status"] == "started"
+    server.emit("rt-1", "message.complete", {"text": "It ran out of disk.", "status": "complete"})
+    kept = set(grant.jobs.call_chat_context)
+
+    news = "Assistant: Hermes says it ran out of disk."
+    second = "then clear the old builds" + WATCH_CONTEXT + news
+    server.fail["prompt.submit"] = "model not configured"
+    start_joining(grant, second)
+    assert grant.jobs.call_chat_context == kept
+    del server.fail["prompt.submit"]
+    assert start_joining(grant, second)["status"] == "started"
+    assert server.methods("prompt.submit")[-1]["text"].endswith("\n\n" + second), "its lines go whole on the retry"
+
+
 def test_context_lines_left_out_are_whole_speaker_lines_and_never_a_follow_ups_words():
     trim = api.watch_jobs.watch_request_without_context_sent
     long = "Assistant: Here is the first part of a longer answer"
