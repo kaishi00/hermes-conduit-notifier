@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.197.0 (2026-11-25)
+
+### New and improved
+
+- A chat shows the Kanban tasks it handed to the board while they run, on every board, so you can tell they're being worked on.
+
 ## 0.196.6 (2026-11-25)
 
 ### Fixes

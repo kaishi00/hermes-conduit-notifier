@@ -86,6 +86,12 @@ notes:
     basic provider applies before falling back to a per-process key. Conduit then says on its
     sign-in screen why a restart signed the user out (feature map: "Connection failure messages").
     Without the registry the flag is left out.
+  chat kanban tasks: >-
+    dashboard/api/chat_tasks.py lists Hermes' boards (hermes_cli.kanban_db.list_boards, include_archived=False,
+    each board's db_path or kanban_db_path) and reads each board's tasks table read-only for the rows whose
+    session_id (the session kanban_create stamps) is one of a chat's compression chain, for the line above
+    Conduit's composer (hermes-conduit-desktop#553). A board without the session_id column is skipped, and
+    an answer where none has it says supported: false.
   chat usage: >-
     dashboard/api/session_usage.py reads the sessions table's token and cost columns
     (id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
@@ -487,7 +493,7 @@ imports:
   gateway.warning_notifications:
     required: ["warning_notifications_enabled"]
   hermes_cli:
-    optional: ["__version__", "_launchers", "active_sessions", "config", "lifecycle", "providers", "web_server_config"]
+    optional: ["__version__", "_launchers", "active_sessions", "config", "kanban_db", "lifecycle", "providers", "web_server_config"]
   hermes_cli._launchers:
     optional: ["runtime_command"]
   hermes_cli.active_sessions:
@@ -832,6 +838,7 @@ routes:
   - POST /self/update
   - GET /sessions/desktop-views
   - POST /sessions/history-page
+  - GET /sessions/kanban-tasks
   - POST /sessions/takeover
   - GET /sessions/usage
   - POST /side-question
