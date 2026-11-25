@@ -3443,6 +3443,14 @@ Plugins as "Conduit boards", off until you turn it on there.
   Without the half, the board goes in the reply as Markdown, as before.
   `conduit_show` is offered only while a Conduit paired with this host has
   been in touch lately, so boards in Desktop need the Conduit app too.
+- **The line in Conduit (plugin 0.196+).** In a chat in Conduit the board
+  is drawn from the tool call, so it never needed the line. A Conduit that
+  says `placed-boards` in its exchange draws the board where the reply
+  holds the line instead, under the words it goes with, and leaves it out
+  of the call's row: `conduit_show` then keeps the board the same way and
+  answers with `directive` on Conduit turns too, telling Hermes the line is
+  optional there. A reply without the line keeps the board above it, as
+  before, and so does an older Conduit, which hides the line.
 - **Drawing.** The half reads the board with `GET /boards/desktop?id=<id>`
   and draws stats, charts, comparisons, steps, status, tables (sortable),
   timelines, checklists, lists, progress, callouts and diffs (each file
