@@ -69,6 +69,8 @@ OTHER_PROFILES_KEY = "other_profiles:"
 # store like the choice above: store_for orders a device's rows in two
 # profiles by it, so a late retry to the profile it left isn't the newer sync.
 SENT_KEY = "sent:"
+# How far past this host's clock that time is kept (phone_store holds a phone's clock to the same).
+MAX_CLOCK_SKEW_S = 5 * 60
 
 SALT = b"conduit-health-v1"
 INFO_INGEST = b"conduit-health-v1 ingest device-to-host"
@@ -805,7 +807,10 @@ def _synced_devices(path: Path) -> list[tuple[str, float, bool, bool]]:
                 shares = categories is None or bool(json.loads(categories))
             except ValueError:
                 shares = True
-            found.append((device_id, _sent(connection, device_id) or float(last_seen or 0), shares,
+            # Held to when this host last heard from the device: a time kept before 0.195.9
+            # could be as far ahead as the phone's clock ran (issue 1060).
+            seen = float(last_seen or 0)
+            found.append((device_id, min(_sent(connection, device_id), seen + MAX_CLOCK_SKEW_S) or seen, shares,
                           shares_out(connection, device_id)))
         return found
     except sqlite3.DatabaseError:
@@ -1004,8 +1009,11 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
         db.execute("INSERT OR REPLACE INTO meta VALUES(?, '1')", (OTHER_PROFILES_KEY + device_id,))
     elif other_profiles is False:
         db.execute("DELETE FROM meta WHERE key=?", (OTHER_PROFILES_KEY + device_id,))
-    if computed_at > _sent(db, device_id):
-        db.execute("INSERT OR REPLACE INTO meta VALUES(?, ?)", (SENT_KEY + device_id, str(computed_at)))
+    # Held to this host's clock: a phone whose clock ran ahead when it last synced here would
+    # otherwise look newer than the profile it moved to until that one caught up.
+    sent_at = min(computed_at, now + MAX_CLOCK_SKEW_S)
+    if sent_at > _sent(db, device_id):
+        db.execute("INSERT OR REPLACE INTO meta VALUES(?, ?)", (SENT_KEY + device_id, str(sent_at)))
     db.execute("UPDATE devices SET last_seen=?, tz=COALESCE(?, tz), categories=COALESCE(?, categories),"
                " detailed=COALESCE(?, detailed) WHERE id=?",
                (now, tz, None if categories is None else json.dumps(categories),

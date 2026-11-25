@@ -323,6 +323,73 @@ def test_a_hermes_without_the_job_reader_keeps_the_run_chats_push_alone(hermes, 
     assert sent == []  # but the push stands down with the quiet rule's read
 
 
+TASK = f"cron:{JOB['id']}:{JOB['execution_id']}"
+
+
+def _quiet_then_the_job_goes(hermes, monkeypatch, *, failure=False, raises=False):
+    """The run's turn ends while the job can be read (the run chat's push stands down), and the
+    job is deleted, or its store unreadable, before the delivery's push (notifier issue 1059)."""
+    cron_runs = importlib.import_module("conduit_push.cron_runs")
+    monkeypatch.setattr(cron_runs, "get_hermes_home", lambda: hermes.home)
+    monkeypatch.setattr(cron_runs, "_stood_down", {})
+    _job_reader(monkeypatch)
+    assert cron_runs.quiet("run-chat", TASK, "Rain at 9.", delivered=True, failure=failure) is True
+
+    def gone(job_id):
+        if raises:
+            raise OSError("jobs.json is being rewritten")
+        return None
+
+    sys.modules["cron.jobs"].get_job = gone
+    return cron_runs
+
+
+@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("raises", [False, True])
+def test_a_job_deleted_after_its_runs_push_stood_down_still_notifies_once(hermes, monkeypatch, failure, raises):
+    sent = _sent(monkeypatch)
+    _quiet_then_the_job_goes(hermes, monkeypatch, failure=failure, raises=raises)
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB), "Rain at 9.", "", for_failure=failure) is None
+    assert hermes.notes != [] and [event["session_id"] for event in sent] == ["bot-chat-tip"]
+
+
+def test_a_job_deleted_after_its_runs_push_stood_down_notifies_for_a_report_that_didnt_land(hermes, monkeypatch):
+    sent = _sent(monkeypatch)
+    _run_chats(monkeypatch, a1b2c3d4e5f6="local-run-1")
+    _quiet_then_the_job_goes(hermes, monkeypatch)
+    monkeypatch.setattr(cron_bot_chat, "NOTE_WAIT_S", 0.0)
+    hermes.owned, hermes.refusals = False, 99
+    assert cron_bot_chat.install()
+    assert "not written" in hermes.delivery.deliver(dict(JOB), "Rain at 9.", "")
+    assert [event["session_id"] for event in sent] == ["local-run-1"]
+
+
+def test_a_job_deleted_after_its_runs_push_stood_down_notifies_when_hermes_admits_no_turn(hermes, monkeypatch):
+    sent = _sent(monkeypatch)
+    _run_chats(monkeypatch, a1b2c3d4e5f6="local-run-1")
+    CronStore(hermes.home).set_act(JOB["id"], True)
+    _quiet_then_the_job_goes(hermes, monkeypatch)
+    monkeypatch.setattr(hermes.delivery, "_deliver_to_bot_chat",
+                        lambda job, content, profile, *, for_failure=False: "bot-chat: unverified")
+    assert cron_bot_chat.install()
+    assert "unverified" in hermes.delivery.deliver(dict(JOB), "Rain at 9.", "")
+    assert [event["session_id"] for event in sent] == ["local-run-1"]
+
+
+def test_a_run_whose_push_never_stood_down_keeps_it_alone_after_an_earlier_run_that_did(hermes, monkeypatch):
+    # The next run's turn ends with the job unreadable: its own chat's push goes out, so the
+    # delivery's stays down, whatever the run before recorded.
+    sent = _sent(monkeypatch)
+    cron_runs = _quiet_then_the_job_goes(hermes, monkeypatch)
+    later = f"cron:{JOB['id']}:run-8"
+    assert cron_runs.quiet("run-chat-2", later, "Rain at 9.", delivered=True) is False
+    assert not cron_runs.stood_down(JOB["id"], "run-8") and not cron_runs.stood_down(JOB["id"], None)
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver({**JOB, "execution_id": "run-8"}, "Rain at 9.", "") is None
+    assert sent == []
+
+
 def test_a_muted_bot_chat_holds_the_notes_push(hermes, monkeypatch):
     ChatMute = importlib.import_module("conduit_push.chat_mute")
     sent = []

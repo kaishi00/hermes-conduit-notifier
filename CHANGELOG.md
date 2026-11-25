@@ -19,6 +19,21 @@ checks it). The format is fixed, because Conduit reads it:
 
 - A board can sit where the reply puts it: under the paragraph it illustrates rather than always above the reply. The bot gets a line to write where the board goes; a reply without it keeps the board on top, as before. Needs a Conduit that places boards.
 
+## 0.195.10 (2026-11-25)
+
+### Fixes
+
+- Health moved to another profile reads from the new profile right away on a host that synced under an older plugin while the phone's clock ran ahead. 0.195.9 fixed this only for syncs made after the update.
+
+## 0.195.9 (2026-11-25)
+
+### Fixes
+
+- Updating the plugin from Conduit works when the Hermes desktop app runs the gateway. Before, the update shut down the gateway it had just started, said the gateway didn't restart, and left the dashboard on the old plugin.
+- A scheduled job deleted while its run was finishing still sends that run's one notification. Before, the run could finish with no notification at all.
+- Health moved to another profile reads from the new profile right away, also when the phone's clock was running ahead the last time it synced to the old one.
+- A bot's question keeps its "new since the last no" line when the bot rewords it to name a workstream.
+
 ## 0.195.8 (2026-11-24)
 
 ### Fixes

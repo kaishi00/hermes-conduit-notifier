@@ -122,6 +122,27 @@ def _job_deliver(job: str, failure: bool) -> Any:
     return deliver
 
 
+# The runs whose own chat push quiet held back for their Bot Chat delivery, by task id
+# (``cron:<job>:<execution>``) and by job for a delivery that names no execution; newest last.
+_stood_down: dict[str, None] = {}
+_STOOD_DOWN_KEPT = 512
+
+
+def _note_stood_down(job: str, task_id: Any) -> None:
+    for key in (str(task_id), job):
+        _stood_down.pop(key, None)
+        _stood_down[key] = None
+    while len(_stood_down) > _STOOD_DOWN_KEPT:
+        _stood_down.pop(next(iter(_stood_down), None), None)
+
+
+def stood_down(job: str, execution: Any) -> bool:
+    """Whether quiet held this run's chat push back for its Bot Chat delivery, in this
+    process. The delivery's push then goes out even when the job can no longer be read
+    (deleted while the run's note waited, notifier issue 1059): it is the run's only one."""
+    return (f"cron:{job}:{execution}" if execution else job) in _stood_down
+
+
 def quiet(session_id: Any, task_id: Any, response: Any = None, *,
           delivered: bool = False, failure: bool = False) -> bool:
     """Whether this turn is a cron run whose push should not go out.
@@ -153,6 +174,8 @@ def quiet(session_id: Any, task_id: Any, response: Any = None, *,
         return True
     if not delivered or job_id(None, task_id) is None:
         return False
+    for key in (str(task_id), job):  # this leg decides anew
+        _stood_down.pop(key, None)
     targets = _bot_chat_targets(_job_deliver(job, failure))
     if not targets:
         return False
@@ -162,9 +185,13 @@ def quiet(session_id: Any, task_id: Any, response: Any = None, *,
         acting = False
     if acting:
         # The Bot Chat's own turn is the delivery; its reply push opens it.
+        _note_stood_down(job, task_id)
         return True
     # Just show it: the note's push opens the Bot Chat, from the load that
     # holds its pairing — any listed target this home serves.
     from .cron_bot_chat import _own_target
 
-    return any(_own_target(target) for target in targets)
+    if any(_own_target(target) for target in targets):
+        _note_stood_down(job, task_id)
+        return True
+    return False
