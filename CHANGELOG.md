@@ -18,6 +18,7 @@ checks it). The format is fixed, because Conduit reads it:
 ### Fixes
 
 - On an older Hermes, a chat's Kanban line stays hidden instead of the host answering with an error every 15 seconds.
+- A Kanban card that hasn't been given a lane yet shows on its chat's Kanban line instead of being left out.
 
 ## 0.197.0 (2026-11-25)
 
