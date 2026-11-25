@@ -555,6 +555,14 @@ def test_a_time_kept_ahead_before_the_cap_doesnt_keep_the_profile_it_left_lookin
     work = _bound(home / "profiles" / "work", Phone(), NOW + 3600, "batch-0002", other_profiles=True)
     found, owner = health.store_for(home)
     assert owner == "work" and found.path == work.path
+    # notifier#1070: a late retry of an older batch moves last_seen on, so what is kept is first
+    # held to when the host last heard from the device, never read a day ahead again.
+    old.clock = lambda: NOW + 2 * 86400
+    old.ingest(phone.seal(_batch(batch_id="batch-0000", computed_at=_computed(NOW - 60))))
+    with old._read() as db:
+        assert health._sent(db, DEVICE) == NOW + health.MAX_CLOCK_SKEW_S
+    found, owner = health.store_for(home)
+    assert owner == "work" and found.path == work.path
 
 
 def test_a_profile_keeps_its_own_health_beside_another_devices(home):
