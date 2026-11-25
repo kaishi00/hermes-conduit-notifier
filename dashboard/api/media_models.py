@@ -152,7 +152,10 @@ def media_models(kind: str) -> Dict[str, Any]:
 
 def set_media_model(kind: str, body: Any) -> Dict[str, Any]:
     section = _section(kind)
-    model = _text(body.get("model")) if isinstance(body, dict) else None
+    raw = body.get("model") if isinstance(body, dict) else None
+    if raw is not None and not isinstance(raw, str):
+        raise core.TokenError(400, "model must be text")
+    model = _text(raw)
     if not model:
         raise core.TokenError(400, "model is required")
     if len(model) > MEDIA_MODEL_MAX_ID:
@@ -200,7 +203,7 @@ async def get_media_models(kind: str, response: Response, profile: Optional[str]
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
     except Exception as exc:
-        raise core._unexpected("list", exc, feature="Image models")
+        raise core._unexpected("list", exc, feature="Image or video models")
 
 
 @router.put("/media-models/{kind}")
@@ -217,4 +220,4 @@ async def put_media_model(kind: str, request: Request, response: Response,
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
     except Exception as exc:
-        raise core._unexpected("save", exc, feature="Image models")
+        raise core._unexpected("save", exc, feature="Image or video models")
