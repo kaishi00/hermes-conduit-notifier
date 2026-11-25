@@ -261,3 +261,20 @@ def test_a_reply_and_its_call_carry_the_bots_name(sent, monkeypatch, tmp_path):
     assert unnamed["body"] == "Hermes needs your OK."
     assert titles.shown_name("", "research") == "Research"
     assert titles.shown_name("research", "research") == "Research", "a name that is only the id"
+
+
+def test_a_reply_carries_the_profile_whose_home_it_ran_in(sent, monkeypatch, tmp_path):
+    # Build 283: one gateway held Yelan's and Zhongli's loads of the plugin,
+    # and the load-time profile named only the last to load, so Yelan's push
+    # carried Zhongli's profile and Conduit drew Zhongli's picture on it.
+    home = tmp_path / "profiles" / "yelan"
+    home.mkdir(parents=True)
+    (home / "profile.yaml").write_text("display_name: Yelan\n", encoding="utf-8")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: home)
+    monkeypatch.setattr(plugin, "_profile", "zhongli")
+    _reply(session_id="s1", turn_id="t10", assistant_response="Done.")
+    assert sent[0]["profile"] == "yelan"
+    assert sent[0]["profile_name"] == "Yelan"
+    assert titles.current_profile("zhongli") == "yelan"
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    assert titles.current_profile("zhongli") == "default", "the default home is the default profile"

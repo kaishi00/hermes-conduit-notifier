@@ -241,20 +241,20 @@ def _own_target(profile: str) -> bool:
 
 
 def _load_profile() -> str:
-    """This load's profile name as the plugin's entry module holds it (the
-    one a run chat's push and its slot carry), so the note's push and the
-    run chat's spell the job's slot the same way (issue 1052). A copy
-    loaded without the entry module reads it from the home."""
-    try:
-        from . import _profile
-
-        if isinstance(_profile, str) and _profile:
-            return _profile
-    except Exception:  # noqa: BLE001 — loaded without the entry module
-        pass
+    """The profile this delivery runs in, as the plugin's entry module
+    reads it for a run chat's push and its slot (`_current_profile`), so
+    the note's push and the run chat's spell the job's slot the same way
+    (issue 1052) and carry the bot whose name they show. A copy loaded
+    without the entry module reads it from the home."""
     from . import session_titles
 
-    return session_titles._profile_of(session_titles._home()) or "default"
+    try:
+        from . import _current_profile
+
+        return _current_profile() or "default"
+    except Exception:  # noqa: BLE001 — loaded without the entry module
+        pass
+    return session_titles.current_profile()
 
 
 def _run_chat(job: dict) -> Optional[str]:
