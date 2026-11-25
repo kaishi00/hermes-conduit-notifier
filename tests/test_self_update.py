@@ -214,6 +214,106 @@ def test_a_restart_past_the_limit_that_isnt_draining_fails_and_is_reaped(monkeyp
     assert proc.killed and len(proc.waits) == 2
 
 
+def test_a_restart_that_became_the_new_gateway_is_left_running(monkeypatch):
+    # Notifier issue 1062: with no service manager (the Hermes desktop app's gateway), a Hermes
+    # without --detach runs the replacement in the restart command itself, which never exits.
+    proc = _SlowRestart(1)
+    _fake_hermes(monkeypatch, lambda profile=None, *, interrupt=False: (proc, False))
+    monkeypatch.setattr(api.self_update, "_gateway_draining", lambda: False)
+    running = iter([{(100, 1.0)}, {(200, 2.0)}])
+    monkeypatch.setattr(api.self_update, "_gateways_running", lambda: next(running))
+    _, restart_gateway = api.self_update._hermes_update_steps()
+    assert restart_gateway() == 0 and not proc.killed
+
+
+def test_a_restart_past_the_limit_with_the_old_gateway_still_up_fails(monkeypatch):
+    proc = _SlowRestart(1)
+    _fake_hermes(monkeypatch, lambda profile=None, *, interrupt=False: (proc, False))
+    monkeypatch.setattr(api.self_update, "_gateway_draining", lambda: False)
+    monkeypatch.setattr(api.self_update, "_gateways_running", lambda: {(100, 1.0)})
+    _, restart_gateway = api.self_update._hermes_update_steps()
+    with pytest.raises(api.self_update.subprocess.TimeoutExpired):
+        restart_gateway()
+    assert proc.killed
+
+
+def test_the_gateways_running_are_read_from_their_state_files(monkeypatch, tmp_path):
+    status = types.ModuleType("gateway.status")
+    record = {"gateway_state": "running", "pid": 41, "start_time": 7}
+    status.read_runtime_status = lambda path: record if path == tmp_path / "gateway_state.json" else None
+    status.runtime_status_is_stale = lambda record: False
+    monkeypatch.setitem(sys.modules, "gateway", types.ModuleType("gateway"))
+    monkeypatch.setitem(sys.modules, "gateway.status", status)
+    monkeypatch.setattr(api.self_update, "_gateway_homes", lambda: [tmp_path])
+    assert api.self_update._gateways_running() == {(41, 7)}
+    record["gateway_state"] = "draining"
+    assert api.self_update._gateways_running() == set()
+    record["gateway_state"] = "running"
+    status.runtime_status_is_stale = lambda record: True
+    assert api.self_update._gateways_running() == set()
+    monkeypatch.setitem(sys.modules, "gateway.status", None)
+    assert api.self_update._gateways_running() == set()
+
+
+def _fake_detach(monkeypatch, alive=None):
+    """A Hermes whose `gateway restart` takes --detach, and its action spawner."""
+    spawned = []
+    start = types.ModuleType("hermes_cli.gateway_runtime_start")
+    start.start_detached_replacement = lambda home, force=False: 0
+    gateway = types.ModuleType("hermes_cli.web_server_gateway")
+    gateway._ACTION_PROCS = {"gateway-restart": alive} if alive is not None else {}
+    gateway._gateway_subcommand = lambda profile, verb: ["-p", "default", "gateway", verb]
+
+    def spawn_action(subcommand, name):
+        spawned.append((subcommand, name))
+        return types.SimpleNamespace(wait=lambda timeout: 0)
+
+    gateway._spawn_hermes_action = spawn_action
+    monkeypatch.setitem(sys.modules, "hermes_cli.gateway_runtime_start", start)
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_gateway", gateway)
+    return spawned
+
+
+def test_the_gateway_restart_is_detached_on_a_hermes_that_can(monkeypatch):
+    plain = []
+
+    def spawn(profile=None, *, interrupt=False):
+        plain.append((profile, interrupt))
+        return types.SimpleNamespace(wait=lambda timeout: 0), False
+
+    _fake_hermes(monkeypatch, spawn)
+    spawned = _fake_detach(monkeypatch)
+    _, restart_gateway = api.self_update._hermes_update_steps()
+    assert restart_gateway() == 0 and plain == []
+    assert spawned == [(["-p", "default", "gateway", "restart", "--interrupt", "--detach"], "gateway-restart")]
+
+
+def test_a_restart_already_on_its_way_is_hermes_to_reuse(monkeypatch):
+    plain = []
+
+    def spawn(profile=None, *, interrupt=False):
+        plain.append((profile, interrupt))
+        return types.SimpleNamespace(wait=lambda timeout: 0), True
+
+    _fake_hermes(monkeypatch, spawn)
+    spawned = _fake_detach(monkeypatch, alive=types.SimpleNamespace(poll=lambda: None))
+    _, restart_gateway = api.self_update._hermes_update_steps()
+    assert restart_gateway() == 0 and plain == [(None, True)] and spawned == []
+
+
+def test_a_hermes_before_interrupt_restarts_without_detach(monkeypatch):
+    plain = []
+
+    def spawn(profile=None):
+        plain.append(profile)
+        return types.SimpleNamespace(wait=lambda timeout: 0), False
+
+    _fake_hermes(monkeypatch, spawn)
+    spawned = _fake_detach(monkeypatch)
+    _, restart_gateway = api.self_update._hermes_update_steps()
+    assert restart_gateway() == 0 and plain == [None] and spawned == []
+
+
 def test_a_drain_past_its_own_limit_fails(monkeypatch):
     monkeypatch.setattr(api.self_update, "SELF_UPDATE_DRAIN_LIMIT_S", 2 * api.self_update.SELF_UPDATE_GATEWAY_LIMIT_S)
     proc = _SlowRestart(5)

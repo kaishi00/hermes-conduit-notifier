@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.195.9 (2026-11-25)
+
+### Fixes
+
+- Updating the plugin from Conduit works when the Hermes desktop app runs the gateway. Before, the update shut down the gateway it had just started, said the gateway didn't restart, and left the dashboard on the old plugin.
+- A scheduled job deleted while its run was finishing still sends that run's one notification. Before, the run could finish with no notification at all.
+- Health moved to another profile reads from the new profile right away, also when the phone's clock was running ahead the last time it synced to the old one.
+- A bot's question keeps its "new since the last no" line when the bot rewords it to name a workstream.
+
 ## 0.195.8 (2026-11-24)
 
 ### Fixes

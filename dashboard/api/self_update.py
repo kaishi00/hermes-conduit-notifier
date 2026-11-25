@@ -19,7 +19,7 @@ import uuid
 import types
 import contextlib
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from fastapi import HTTPException, Response
 
@@ -720,6 +720,51 @@ def _gateway_draining() -> bool:
     return False
 
 
+def _gateways_running() -> Set[Tuple[int, Any]]:
+    """The gateways up now, each as (pid, start time): what a restart must replace."""
+    try:
+        from gateway.status import read_runtime_status, runtime_status_is_stale
+    except Exception:  # noqa: BLE001 — a Hermes that can't say has none to compare
+        return set()
+    running: Set[Tuple[int, Any]] = set()
+    for home in _gateway_homes():
+        try:
+            record = read_runtime_status(home / "gateway_state.json")
+            if (record and not runtime_status_is_stale(record)
+                    and record.get("gateway_state") in ("running", "degraded")):
+                running.add((int(record["pid"]), record.get("start_time")))
+        except Exception:  # noqa: BLE001 — unreadable reads as not running
+            logger.debug("Conduit plugin: couldn't read the gateway's state", exc_info=True)
+    return running
+
+
+def _detached_restart(spawn_restart: Callable[..., Any], restart_kwargs: Dict[str, Any]) -> Callable[[], Any]:
+    """The restart to spawn: Hermes' own with ``--detach`` where it has the flag. A gateway no
+    service manager runs (the Hermes desktop app's) is restarted by starting its replacement,
+    and without the flag the restart command becomes that gateway and never exits: the wait
+    below timed out and killed it (notifier issue 1062). Under a service the flag changes
+    nothing. A restart already on its way is Hermes' to reuse or refuse, as before."""
+    def plain() -> Any:
+        return spawn_restart(None, **restart_kwargs)[0]
+
+    if not restart_kwargs.get("interrupt"):
+        return plain  # --detach came after --interrupt
+    try:
+        getattr(importlib.import_module("hermes_cli.gateway_runtime_start"), "start_detached_replacement")  # what --detach runs
+        gateway = importlib.import_module("hermes_cli.web_server_gateway")
+        subcommand, spawn_action, procs = gateway._gateway_subcommand, gateway._spawn_hermes_action, gateway._ACTION_PROCS
+    except (ImportError, AttributeError):
+        return plain
+
+    def detached() -> Any:
+        existing = procs.get("gateway-restart")
+        if existing is not None and existing.poll() is None:
+            return plain()
+        return spawn_action([*subcommand(None, "restart"), "--interrupt", "--detach"], "gateway-restart")
+
+    return detached
+
+
 def _hermes_update_steps(force: bool = False) -> Tuple[Callable[[], Dict[str, Any]], Callable[..., int]]:
     """Hermes' own plugin pull and gateway restart, or 501 when this Hermes lacks them.
     force: the user accepted a caution verdict of Hermes' install scan (a dangerous one
@@ -760,8 +805,11 @@ def _hermes_update_steps(force: bool = False) -> Tuple[Callable[[], Dict[str, An
             return {"ok": False, "error": SCAN_FORCE_UNSUPPORTED}
         return dashboard_update_user_plugin(core.PLUGIN_NAME, force=True)
 
+    spawn_restart = _detached_restart(_spawn_gateway_restart, restart_kwargs)
+
     def restart_gateway(draining: Callable[[], None] = lambda: None) -> int:
-        proc, _reused = _spawn_gateway_restart(None, **restart_kwargs)
+        before = _gateways_running()
+        proc = spawn_restart()
         waited = 0.0
         while True:
             try:
@@ -772,6 +820,10 @@ def _hermes_update_steps(force: bool = False) -> Tuple[Callable[[], Dict[str, An
                 if waited < SELF_UPDATE_DRAIN_LIMIT_S and _gateway_draining():
                     draining()
                     continue
+                # On a Hermes without --detach the command itself is the new gateway, still
+                # running: the restart happened, and killing it would take the gateway down.
+                if _gateways_running() - before:
+                    return 0
                 # Failed is failed: a restart finishing later mustn't contradict the job.
                 with contextlib.suppress(OSError):
                     proc.kill()
