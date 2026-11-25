@@ -88,10 +88,10 @@ def _hermes():
         if exc.name not in ("hermes_cli", "hermes_cli.config", "hermes_cli.web_routers",
                             "hermes_cli.web_routers.tools"):
             raise
-        raise core.TokenError(501, "This Hermes can't list its image models; update Hermes")
+        raise core.TokenError(501, "This Hermes can't list its image or video models; update Hermes")
     for name in ("_find_toolset_provider_row", "_resolve_toolset_model_plugin", "_toolset_model_catalog"):
         if not callable(getattr(hermes_tools, name, None)):
-            raise core.TokenError(501, "This Hermes can't list its image models; update Hermes")
+            raise core.TokenError(501, "This Hermes can't list its image or video models; update Hermes")
     return hermes_config, hermes_tools
 
 
@@ -111,7 +111,8 @@ def _text(value: Any) -> Optional[str]:
 
 
 def _saved(section: str, plugin: str, config: Dict[str, Any], catalog: Dict) -> Optional[str]:
-    """The catalog model the backend reads from the config, the way it reads it."""
+    """The catalog model the backend reads from the config, the way it reads it. Catalog-scoped: an id the
+    backend no longer lists is passed over, as the backends pass over one they don't know."""
     block = config.get(section) if isinstance(config.get(section), dict) else {}
     own_block = block.get(plugin) if isinstance(block.get(plugin), dict) else {}
     reads_own, reads_section = _reads(section, plugin)
@@ -152,8 +153,10 @@ def media_models(kind: str) -> Dict[str, Any]:
 def set_media_model(kind: str, body: Any) -> Dict[str, Any]:
     section = _section(kind)
     model = _text(body.get("model")) if isinstance(body, dict) else None
-    if not model or len(model) > MEDIA_MODEL_MAX_ID:
+    if not model:
         raise core.TokenError(400, "model is required")
+    if len(model) > MEDIA_MODEL_MAX_ID:
+        raise core.TokenError(400, f"model is at most {MEDIA_MODEL_MAX_ID} characters")
     hermes_config, _tools = _hermes()
     if getattr(hermes_config, "is_managed", lambda: False)():
         raise core.TokenError(409, "This Hermes is managed, so its settings can't be changed from Conduit")
@@ -161,8 +164,8 @@ def set_media_model(kind: str, body: Any) -> Dict[str, Any]:
     # The dashboard's config lock, so a save here and one of Hermes' own don't interleave.
     with config_unset._dashboard_config_lock():
         _row, plugin, catalog, _default = _backend(section, hermes_config.load_config())
-        if not plugin:
-            raise core.TokenError(409, "No image backend with models is set up for this profile")
+        if not plugin or not catalog:
+            raise core.TokenError(409, f"No {section.replace('_gen', '')} backend with models is set up for this profile")
         if model not in catalog:
             raise core.TokenError(400, f"{plugin} has no model {model!r}")
         config = read()

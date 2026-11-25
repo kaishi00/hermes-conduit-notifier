@@ -2512,7 +2512,10 @@ backends read only theirs, so Hermes' own model pick, which writes
   lists to `<section>.model`, and to `<section>.<backend>.model` when the
   backend reads only that key or one is already there. It answers
   `{ok, kind, model, plugin, override}`. No backend with models answers 409,
-  a model it doesn't list 400, a managed Hermes 409.
+  a model it doesn't list 400, a managed Hermes 409, and a Hermes without the
+  catalog helpers 501 (Conduit then uses Hermes' own routes).
+- `current` is catalog-scoped: an id the backend no longer lists reads as its
+  default, as most backends fall back to it.
 - `GET /capabilities` lists `media-models`. Conduit shows the models on
   Capabilities > Tools > Image Generation (and Video Generation).
 
