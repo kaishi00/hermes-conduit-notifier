@@ -26,6 +26,8 @@ from fastapi import HTTPException, Request, Response
 
 from . import core, session_usage
 
+logger = core.logger
+
 router = core.router
 
 CHAT_TASKS_TIMEOUT_S = 10.0
@@ -66,7 +68,8 @@ def _boards() -> List[Tuple[str, str, Path]]:
             path = meta.get("db_path") or kanban_db.kanban_db_path(board=slug)
             found.append((slug, name, Path(path)))
         return found
-    except (ImportError, AttributeError):  # a Hermes without the board, or without boards
+    except (ImportError, AttributeError) as exc:  # a Hermes without the board, or without boards
+        logger.debug("conduit_push: chat Kanban tasks can't list boards: %s", exc)
         return []
 
 
