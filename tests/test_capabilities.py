@@ -117,6 +117,7 @@ def test_every_capability_names_a_served_route_family():
         "pulse_looks": "/pulse/feed",
         # Walking past: the reply to a location batch, and a setting on the /pulse control route.
         "pulse_spots": "/location/ingest",
+        "pulse_profile_exclusions": "/pulse",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "shortcut-inbox": "/inbox/",
