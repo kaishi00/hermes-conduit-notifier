@@ -57,6 +57,7 @@ MODULES = (
     "helper_models",
     "hermes_update",
     "config_unset",
+    "media_models",
 )
 
 
