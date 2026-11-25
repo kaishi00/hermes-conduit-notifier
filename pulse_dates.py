@@ -202,11 +202,12 @@ def people(home: Path) -> list[Yearly]:
     return out
 
 
-def facts(pulse_store: store.PulseStore, profile: Optional[str] = None) -> list[Yearly]:
+def facts(pulse_store: store.PulseStore, profile: Optional[str] = None, without: Sequence[str] = ()) -> list[Yearly]:
     """The yearly dates memory kept (open facts with ``every_year``), of
-    ``profile`` ("" for this one) or every profile's (None)."""
+    ``profile`` ("" for this one) or every profile's (None) but the ones
+    named in ``without``."""
     out = []
-    for item in pulse_store.yearly_facts(profile=profile):
+    for item in pulse_store.yearly_facts(profile=profile, without=without):
         parsed = parse(item["every_year"])
         if parsed is None:
             continue
@@ -216,13 +217,17 @@ def facts(pulse_store: store.PulseStore, profile: Optional[str] = None) -> list[
     return out
 
 
-def yearly(pulse_store: store.PulseStore, home: Path, profile: Optional[str] = None) -> list[Yearly]:
+def yearly(pulse_store: store.PulseStore, home: Path) -> list[Yearly]:
     """Every yearly date Pulse knows: the picked people's birthdays, then
-    the facts. A birthday fact on the same day as a picked person's birthday
-    is that person's, so it counts once."""
+    the facts from the profiles Pulse reads (`report_profiles`: this one
+    only, or every profile but the ones left out). A birthday fact on the
+    same day as a picked person's birthday is that person's, so it counts
+    once."""
     picked = people(home)
     birthdays = {(person.month, person.day) for person in picked}
-    return picked + [fact for fact in facts(pulse_store, profile)
+    every = pulse_store.get("report_profiles") == "all"
+    kept = facts(pulse_store, None if every else "", pulse_store.excluded_profiles() if every else ())
+    return picked + [fact for fact in kept
                      if not (fact.occasion == BIRTHDAY and (fact.month, fact.day) in birthdays)]
 
 

@@ -85,7 +85,8 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
                             "for report: 'now', 'on', 'off', times like 08:00,13:00, a time zone like Europe/Paris, "
-                            "'all-profiles' or 'this-profile'; "
+                            "'all-profiles', 'this-profile', or 'exclude:<profile>' and 'include:<profile>' to leave "
+                            "one other profile out of what Pulse reads; "
                             "for memory: a kind to list, 'now', 'on', 'off', 'forget' and an item number, "
                             "or 'backfill'; "
                             "for followups: 'on', 'off', 'now' (check everything now, for testing), or nothing to list them; "
@@ -682,9 +683,13 @@ def _pulse(args: argparse.Namespace) -> int:
             print(line)
     print(_night_line(pulse_store, zone, time.time()))
     if pulse_store.get("report_profiles") == "all":
-        others = [name for name, _ in pulse.report.profile_homes(home)]
+        others = [name for name, _ in pulse.report.read_homes(pulse_store, home)]
         if others:
             print("The report and memory also read profiles: " + ", ".join(_printable(name) for name in others))
+        there = {name for name, _ in pulse.report.profile_homes(home)}
+        left_out = [name for name in pulse_store.excluded_profiles() if name in there]  # as Settings > Pulse lists them
+        if left_out:
+            print("Left out of the report and memory: " + ", ".join(_printable(name) for name in left_out))
     kinds = pulse_store.item_counts()
     usage = pulse_store.get("memory_usage")
     usage = usage if isinstance(usage, dict) else {}
@@ -704,6 +709,8 @@ def _pulse(args: argparse.Namespace) -> int:
               "Backfill: cancelled; a new backfill reads the other profiles' older chats too."
               if backfill.get("cancelled") else
               "Backfill: read only this profile's older chats; a new backfill reads the others too."
+              if backfill.get("done") and backfill.get("scope") == "this" else
+              "Backfill: left out a profile memory reads now; a new backfill reads its older chats too."
               if backfill.get("done") and not pulse_memory.covers_scope(pulse_store, backfill) else
               f"Backfill: read back to {back_to}." if backfill.get("done") else
               f"Backfill: reading chats back to {back_to}." if backfill.get("active") else
@@ -1636,6 +1643,38 @@ def _print_room_choices(label: str, choices: Any, indent: str = "") -> None:
         print(f"{indent}  Note: {_printable(choices.note.replace(chr(10), ' / '))}")
 
 
+def _pulse_report_profile(pulse_store: Any, action: str, name: str) -> int:
+    """`pulse report exclude:<profile>` leaves one other profile out of what
+    the report and memory read while they read every profile (issue 3241);
+    `include:<profile>` reads it again."""
+    from hermes_constants import get_hermes_home
+
+    from . import pulse_control, pulse_report
+    left_out = pulse_store.excluded_profiles()
+    others = [found for found, _ in pulse_report.profile_homes(Path(get_hermes_home()))]
+    if action == "include":
+        if name not in left_out:
+            print(f"Profile {_printable(name)} isn't left out.")
+            return 1
+        pulse_store.set("report_excluded", [kept for kept in left_out if kept != name])
+        print(f"The report and memory read profile {_printable(name)} again.")
+        return 0
+    if name not in others:
+        print(f"No other profile with chats is named {_printable(name)}. "
+              + ("The others: " + ", ".join(_printable(found) for found in others) + "." if others
+                 else "This host has no other profile with chats."))
+        return 1
+    if name not in left_out:
+        if len(left_out) >= pulse_control.EXCLUDED_LIMIT:
+            print(f"At most {pulse_control.EXCLUDED_LIMIT} profiles can be left out.")
+            return 1
+        pulse_store.set("report_excluded", left_out + [name])
+    print(f"The report and memory leave out profile {_printable(name)}."
+          + ("" if pulse_store.get("report_profiles") == "all"
+             else " They read only this profile now; `pulse report all-profiles` reads the others."))
+    return 0
+
+
 def _pulse_report(pulse_store: Any, value: str) -> int:
     from . import pulse_report
     if value in ("", "now"):
@@ -1654,6 +1693,8 @@ def _pulse_report(pulse_store: Any, value: str) -> int:
         print("The report and memory read every profile's chats, memories and cron jobs."
               if value == "all-profiles" else "The report and memory read only this profile.")
         return 0
+    if value.startswith(("exclude:", "include:")):
+        return _pulse_report_profile(pulse_store, *value.split(":", 1))
     times = pulse_report.parse_times(value)
     if times:
         pulse_store.set("report_time", times)
@@ -1663,7 +1704,8 @@ def _pulse_report(pulse_store: Any, value: str) -> int:
         pulse_store.set("time_zone", value)
         print(f"Report times are in {value}.")
         return 0
-    print("Usage: hermes conduit-push pulse report [now|on|off|HH:MM[,HH:MM...]|<time zone>|all-profiles|this-profile]")
+    print("Usage: hermes conduit-push pulse report [now|on|off|HH:MM[,HH:MM...]|<time zone>|all-profiles|this-profile|\n"
+          "       exclude:<profile>|include:<profile>]")
     return 2
 
 
@@ -2080,8 +2122,7 @@ def _pulse_dates(pulse_store: Any, home: Any) -> int:
     from . import pulse, pulse_ahead, pulse_dates
     zone = pulse.report_zone(pulse_store, home)
     today = pulse_dates.local_today(zone, time.time())
-    found = pulse_dates.yearly(pulse_store, Path(home),
-                               None if pulse_store.get("report_profiles") == "all" else "")
+    found = pulse_dates.yearly(pulse_store, Path(home))
     if not found:
         print("Pulse knows no dates that come back every year yet: it learns birthdays and anniversaries from "
               "what's said in chats, and the birthdays of the people you pick in Conduit's Settings > Calendar & "

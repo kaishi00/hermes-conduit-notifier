@@ -60,6 +60,9 @@ DEFAULTS: dict[str, Any] = {
     # memories and cron jobs (Bot Mode's bots are profiles); "this": only
     # this profile.
     "report_profiles": "all",
+    # Under "all", the other profiles left out by name (issue 3241): Pulse
+    # reads none of their chats, memories or cron jobs.
+    "report_excluded": [],
     # Memory (pulse_memory): on while Pulse is. It reads chats written after
     # ``memory_since`` (set when it first runs), at most every few minutes.
     "memory": True,
@@ -745,6 +748,12 @@ class PulseStore:
                 (key, json.dumps(value)),
             )
 
+    def excluded_profiles(self) -> list[str]:
+        """The other profiles `report_excluded` leaves out, by name (as
+        pulse_report.profile_homes names them)."""
+        kept = self.get("report_excluded")
+        return [name for name in kept if isinstance(name, str) and name] if isinstance(kept, list) else []
+
     def swap(self, key: str, old: Any, new: Any) -> bool:
         """Sets ``key`` to ``new`` only if it still holds ``old`` (another
         process may have changed it since it was read)."""
@@ -1287,10 +1296,13 @@ class PulseStore:
                 "ORDER BY closed_at DESC, id DESC LIMIT ?",
                 (since, *skip_kinds, skip_closer, skip_closer, len(skip_closer) + 2, f"{skip_closer} (", limit))]
 
-    def yearly_facts(self, *, profile: Optional[str] = None) -> list[dict]:
+    def yearly_facts(self, *, profile: Optional[str] = None, without: Sequence[str] = ()) -> list[dict]:
         """Open facts about a date that comes back every year (pulse_dates),
-        of ``profile``, or every profile's when None; oldest first."""
+        of ``profile``, or every profile's when None, but for the ones named
+        in ``without``; oldest first."""
         where, params = ("AND profile=? ", [profile]) if profile is not None else ("", [])
+        if without:
+            where, params = where + f"AND profile NOT IN ({','.join('?' * len(without))}) ", params + list(without)
         with self._connect() as conn:
             return [dict(row) for row in conn.execute(
                 f"SELECT * FROM items WHERE status='open' AND superseded_at IS NULL AND kind='fact' "
