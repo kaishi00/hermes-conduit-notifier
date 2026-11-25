@@ -807,7 +807,10 @@ def _synced_devices(path: Path) -> list[tuple[str, float, bool, bool]]:
                 shares = categories is None or bool(json.loads(categories))
             except ValueError:
                 shares = True
-            found.append((device_id, _sent(connection, device_id) or float(last_seen or 0), shares,
+            # Held to when this host last heard from the device: a time kept before 0.195.9
+            # could be as far ahead as the phone's clock ran (issue 1060).
+            seen = float(last_seen or 0)
+            found.append((device_id, min(_sent(connection, device_id), seen + MAX_CLOCK_SKEW_S) or seen, shares,
                           shares_out(connection, device_id)))
         return found
     except sqlite3.DatabaseError:
