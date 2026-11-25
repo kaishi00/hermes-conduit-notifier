@@ -987,7 +987,9 @@ class _WatchJobs:
                 while job.status == "starting" and self._chat_waits(chat, job):
                     if self.ended:
                         ended_at = time.monotonic() if ended_at is None else ended_at
-                        if self.call_chat is not chat or time.monotonic() - ended_at > WATCH_JOB_AFTER_END_WAIT_S:
+                        # A chat another request is still making counts as on
+                        # its way: _chat_waits lets go of one that never comes.
+                        if time.monotonic() - ended_at > WATCH_JOB_AFTER_END_WAIT_S:
                             break
                     self.changed.wait(WATCH_JOB_CHAT_WAIT_S)
                 cancelled = job.status == "cancelled"
@@ -1014,7 +1016,8 @@ class _WatchJobs:
                 if job.active:
                     job.status, job.error = "failed", "The call ended before Hermes took it"
                 self.changed.notify_all()
-            # It was the last thing holding the call's chat and transport open.
+            # With nothing else running in the chat, it and the transport close
+            # (their own checks decide).
             with self.lock:
                 idle = not chat.active
             if idle:

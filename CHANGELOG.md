@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.196.4 (2026-11-25)
+
+### Fixes
+
+- In a call on the Apple Watch, a request made while the call's chat was still being created is no longer dropped when you hang up in that moment: it goes to the chat once it's free.
+
 ## 0.196.3 (2026-11-25)
 
 ### Fixes

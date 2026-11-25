@@ -2048,6 +2048,38 @@ def test_a_request_still_waiting_when_the_call_ends_is_sent_once_the_chat_is_fre
     assert server.methods("session.close") == [{"session_id": "rt-1"}]
 
 
+def test_a_request_waiting_for_the_chat_being_made_when_the_call_ends_is_sent_there():
+    grant = make_jobs()
+    server = grant.jobs.server
+    answers = []
+    worker = threading.Thread(target=lambda: answers.append(start_joining(grant, "and book the hotel")))
+
+    def created():
+        if worker.is_alive() or answers:
+            return
+        # The call ends while the first request's chat is made and the
+        # second waits for it.
+        worker.start()
+        wait_for(lambda: "watch-2" in grant.jobs.jobs)
+        time.sleep(0.1)
+        grant.jobs.end()
+
+    server.on_create = created
+    original = api.watch_jobs.WATCH_JOB_START_ANSWER_S
+    api.watch_jobs.WATCH_JOB_START_ANSWER_S = 0.1
+    try:
+        start_joining(grant, "plan the trip")
+        worker.join(2)
+    finally:
+        api.watch_jobs.WATCH_JOB_START_ANSWER_S = original
+    wait_for(lambda: len(server.methods("prompt.submit")) == 1)
+    assert grant.jobs.jobs["watch-2"].status == "starting"
+    server.emit("rt-1", "message.complete", {"text": "Plan", "status": "complete"})
+    wait_for(lambda: len(server.methods("prompt.submit")) == 2)
+    assert [p["session_id"] for p in server.methods("prompt.submit")] == ["rt-1", "rt-1"]
+    assert len(server.methods("session.create")) == 1
+
+
 def test_a_request_waiting_on_a_chat_still_busy_long_after_the_call_ended_is_dropped(monkeypatch):
     monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_AFTER_END_WAIT_S", 0.1)
     monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_CHAT_WAIT_S", 0.05)
