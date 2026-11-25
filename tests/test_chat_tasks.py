@@ -139,6 +139,16 @@ def test_a_hermes_without_boards_says_it_cant_tell(host, monkeypatch):
     assert _get("?session_id=a").json() == {"session_id": "a", "supported": False, "tasks": []}
 
 
+def test_a_hermes_whose_boards_name_no_path_and_no_path_helper_says_it_cant_tell(host, monkeypatch):
+    state, add_board = host
+    _session(state, "a")
+    _task(add_board("default"), "t1", "a")
+    kanban_db = sys.modules["hermes_cli.kanban_db"]
+    monkeypatch.setattr(kanban_db, "list_boards", lambda include_archived=True: [{"slug": "default", "name": "Default"}])
+    monkeypatch.delattr(kanban_db, "kanban_db_path")
+    assert _get("?session_id=a").json() == {"session_id": "a", "supported": False, "tasks": []}
+
+
 def test_an_unknown_chat_or_none_is_refused(host):
     assert _get("?session_id=nope").status_code == 404
     assert _get("").status_code == 400
