@@ -72,8 +72,9 @@ def _backfills(pulse_store: Any) -> tuple[Any, Optional[dict], Optional[dict]]:
 
 def backfill_state(pulse_store: Any) -> dict[str, Any]:
     """{"state": none|reading|paused|done|cancelled, "from", "to", "days",
-    "narrow", "unreadable"}; "narrow" when a finished one read this profile
-    only and memory now reads every profile."""
+    "narrow", "unreadable"}; "narrow" when a finished one didn't read a
+    profile memory reads now: it read this profile only, or left that one
+    out."""
     _, backfill, _ = _backfills(pulse_store)
     if backfill is None:
         return {"state": "none"}
@@ -102,7 +103,8 @@ def backfill_cancel(pulse_store: Any) -> None:
         raise Refused("nothing_to_cancel")
     if not pulse_store.swap("memory_backfill", backfill, {"from": backfill["to"], "to": backfill["to"],
                                                          "active": False, "done": True, "cancelled": True,
-                                                         "scope": pulse_memory.scope(pulse_store, backfill)}):
+                                                         "scope": pulse_memory.scope(pulse_store, backfill),
+                                                         "left_out": pulse_memory.leaves_out(pulse_store, backfill)}):
         raise Refused("changed")
     pulse_store.clear_backfill_marks()
     pulse_store.set("memory_backfill_unreadable", [])
@@ -167,7 +169,9 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
     if not pulse_store.swap("memory_backfill", stored, {"from": window[0], "to": window[1], "days": days,
                                                        "active": True, "done": False, "started_at": now,
                                                        "scope": pulse_memory.scope(pulse_store,
-                                                                                   backfill if resuming else None)}):
+                                                                                   backfill if resuming else None),
+                                                       "left_out": pulse_memory.leaves_out(
+                                                           pulse_store, backfill if resuming else None)}):
         raise Refused("changed")
     if not resuming:  # older windows' marks count as none; drop them
         pulse_store.clear_backfill_marks(keep_window=window[0])
@@ -177,7 +181,12 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
     return {"from": window[0], "to": window[1], "days": days, "resumed": resuming}
 
 
-SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "report_times", "time_zone",
+# The most profiles left out by name, and a name's length (pulse_report.profile_homes clips them to it).
+EXCLUDED_LIMIT = 64
+PROFILE_NAME_LIMIT = 40
+
+SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "excluded_profiles", "report_times",
+            "time_zone",
             "brief_time", "model", "nudge", "memory_daily_tokens", "followup_daily_tokens", "note",
             "quiet_days", "quiet_until", "night", "look_ahead", "inbox_deadlines", "look_first", "where",
             "private_pushes", "spots")
@@ -207,7 +216,10 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
     (Pulse reads where the user is, pulse_places), "private_pushes" (Hide
     private reminders on the Lock Screen, pulse_push) and "spots" (the
     phone watches shops for what waits for one, pulse_spots); "all" or "this"
-    for "report_profiles"; a list of "HH:MM" for "report_times"; an IANA
+    for "report_profiles"; a list of at most EXCLUDED_LIMIT profile names
+    for "excluded_profiles", the other profiles "all" leaves out (the whole
+    list; a name kept for a profile that isn't there now stays, when
+    ``home`` can tell); a list of "HH:MM" for "report_times"; an IANA
     name, or "" for the phone's, for "time_zone"; {"provider", "model"} for
     "model" (the model Pulse's turns run on), or null for the chat's own;
     "gentle", "balanced" or "eager" for "nudge"; a whole number of tokens,
@@ -236,6 +248,18 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
         if body["report_profiles"] not in ("all", "this"):
             raise Refused("invalid", field="report_profiles")
         changes["report_profiles"] = body["report_profiles"]
+    if "excluded_profiles" in body:
+        names = body["excluded_profiles"]
+        if not isinstance(names, list) or len(names) > EXCLUDED_LIMIT or not all(
+                isinstance(name, str) and name and len(name) <= PROFILE_NAME_LIMIT and _encodes(name)
+                for name in names):
+            raise Refused("invalid", field="excluded_profiles")
+        # The app sends the profiles it listed. A name left out earlier whose
+        # profile isn't there now (a folder moved away, a disk not mounted)
+        # stays left out for when it's back.
+        there = {name for name, _ in pulse.report.profile_homes(Path(home))} if home is not None else None
+        gone = [name for name in pulse_store.excluded_profiles() if there is not None and name not in there]
+        changes["report_excluded"] = list(dict.fromkeys(names + gone))[:EXCLUDED_LIMIT]
     if "report_times" in body:
         times = body["report_times"]
         parsed = pulse.report.parse_times(",".join(times)) if isinstance(times, list) and 0 < len(times) <= 12 \
@@ -733,6 +757,8 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
     used, _ = pulse._spent_today(pulse_store, "memory", day)
     follow_used, follow_cap = pulse._spent_today(pulse_store, "followup", day)
     profiles = pulse_store.get("report_profiles")
+    others = [name for name, _ in pulse.report.profile_homes(Path(home))]
+    left_out = set(pulse_store.excluded_profiles())
     follow_usage = pulse_store.get("followup_usage")
     follow_usage = follow_usage if isinstance(follow_usage, dict) else {}
     return {
@@ -760,7 +786,10 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "next_report_at": pulse.report.next_time(now, zone, pulse_store.get("report_time"))
         if pulse_store.get("daily_report") else None,
         "report_profiles": "all" if profiles == "all" else "this",
-        "other_profiles": [name for name, _ in pulse.report.profile_homes(Path(home))] if profiles == "all" else [],
+        # The other profiles it reads, and the ones left out by name that
+        # are there now (issue 3241); a plugin without the second can't leave any out.
+        "other_profiles": [name for name in others if name not in left_out] if profiles == "all" else [],
+        "excluded_profiles": [name for name in others if name in left_out],
         "memory": bool(pulse_store.get("memory")),
         "memory_counts": pulse_store.item_counts(),
         "followups": bool(pulse_store.get("followups")),

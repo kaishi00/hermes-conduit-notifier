@@ -51,7 +51,7 @@ import types
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from hermes_constants import get_hermes_home
 
@@ -1335,15 +1335,14 @@ def _maybe_memory(pulse_store: store.PulseStore, home: Path, now: float) -> None
     _memory_thread.start()
 
 
-def memory_sources(pulse_store: store.PulseStore, home: Path, home_chat_id: str,
-                   profiles: Optional[str] = None) -> list[tuple[str, Path, str]]:
+def memory_sources(pulse_store: store.PulseStore, home: Path, home_chat_id: str, profiles: Optional[str] = None,
+                   left_out: Optional[Sequence[str]] = None) -> list[tuple[str, Path, str]]:
     """What memory reads: (profile, home, home chat to leave out), this
-    profile first, then the others when the report reads every profile
-    (``profiles``, else `report_profiles`, is "all")."""
-    sources = [("", Path(home), home_chat_id)]
-    if (pulse_store.get("report_profiles") if profiles is None else profiles) == "all":
-        sources += [(name, path, report.their_home_chat(path)) for name, path in report.profile_homes(home)]
-    return sources
+    profile first, then the others the report reads (report.read_homes:
+    every profile but the ones left out, or none; ``profiles`` and
+    ``left_out`` stand in for the settings)."""
+    return [("", Path(home), home_chat_id)] + [(name, path, report.their_home_chat(path)) for name, path
+                                               in report.read_homes(pulse_store, home, profiles, left_out)]
 
 
 def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Event) -> None:
@@ -1380,8 +1379,10 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         if used >= cap and not follows and not acts and not holds and not rests and not founds and not looks \
                 and not moments:
             return  # `pulse status` says so
-        profiles = pulse_store.get("report_profiles")
-        sources = memory_sources(pulse_store, home, home_chat_id, profiles)
+        # Read once, with the sources: a backfill this run finishes counts
+        # for the profiles the run read, whatever the setting says by then.
+        profiles, left_out = pulse_store.get("report_profiles"), pulse_store.excluded_profiles()
+        sources = memory_sources(pulse_store, home, home_chat_id, profiles, left_out)
         route = lent_route(home, home_chat_id)
 
         def ask(instructions: str, text: str, purpose: str = "pulse memory",
@@ -1410,7 +1411,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
             try:
                 if used < cap:
                     memory.run(pulse_store, sources, ask, zone=zone, now=now,
-                               reads="all" if profiles == "all" else "this",
+                               reads="all" if profiles == "all" else "this", left_out=left_out,
                                still_leader=lambda: not stopped.is_set() and _leads(pulse_store), budget=cap - used,
                                done=done)
             except Exception:  # noqa: BLE001 — follow-ups on what memory already has still run

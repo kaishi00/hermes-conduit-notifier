@@ -1539,6 +1539,65 @@ def test_the_report_reads_every_profile(live, db, tmp_path, request):
     assert "nahida" not in context
 
 
+def test_a_profile_left_out_by_name_is_not_read(live, db, tmp_path, request, capsys, monkeypatch):
+    # Issue 3241: every profile but the ones left out.
+    now = time.time()
+    db.session()
+    homes = {}
+    for name, said in (("nahida", "Remind me to call the landlord"), ("work", "Ship the quarterly numbers")):
+        homes[name] = tmp_path / "profiles" / name
+        homes[name].mkdir(parents=True)
+        bot = StateDB(homes[name], request.node.callspec.params["db"])
+        bot.session("b1", title="Bot Chat", pinned=0)
+        bot.message("user", said, sid="b1", at=now - 600)
+    assert [name for name, _ in report.read_homes(live.store, tmp_path)] == ["nahida", "work"]
+    control.update(live.store, {"excluded_profiles": ["work"]}, tmp_path)
+    assert live.store.excluded_profiles() == ["work"]
+    assert report.read_homes(live.store, tmp_path) == [("nahida", homes["nahida"])]
+    assert [name for name, _, _ in pulse.memory_sources(live.store, tmp_path, SID)] == ["", "nahida"]
+    # A caller that read the settings already passes them, so a change meanwhile doesn't split a run.
+    assert [name for name, _, _ in pulse.memory_sources(live.store, tmp_path, SID, "all", [])] == ["", "nahida", "work"]
+    context, _ = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
+    assert "call the landlord" in context and "quarterly numbers" not in context and "work" not in context
+    state = control.state(live.store, tmp_path, now=now)
+    assert (state["report_profiles"], state["other_profiles"], state["excluded_profiles"]) == ("all", ["nahida"], ["work"])
+    # A profile that isn't there now stays left out when the app sends the ones it listed.
+    live.store.set("report_excluded", ["work", "gone"])
+    assert control.state(live.store, tmp_path, now=now)["excluded_profiles"] == ["work"]
+    control.update(live.store, {"excluded_profiles": ["nahida", "nahida"]}, tmp_path)
+    assert live.store.excluded_profiles() == ["nahida", "gone"]
+    control.update(live.store, {"excluded_profiles": []}, tmp_path)
+    assert live.store.excluded_profiles() == ["gone"]
+    # Reading only this profile keeps the list for when every profile is read again.
+    control.update(live.store, {"report_profiles": "this", "excluded_profiles": ["work"]}, tmp_path)
+    assert report.read_homes(live.store, tmp_path) == [] and live.store.excluded_profiles() == ["work", "gone"]
+    state = control.state(live.store, tmp_path, now=now)
+    assert (state["other_profiles"], state["excluded_profiles"]) == ([], ["work"])
+    for bad in ("work", [5], [""], ["x" * (control.PROFILE_NAME_LIMIT + 1)], ["p"] * (control.EXCLUDED_LIMIT + 1),
+                ["\ud800"]):
+        with pytest.raises(control.Refused) as refused:
+            control.update(live.store, {"excluded_profiles": bad}, tmp_path)
+        assert (refused.value.code, refused.value.data["field"]) == ("invalid", "excluded_profiles")
+    assert live.store.excluded_profiles() == ["work", "gone"]
+    live.store.set("report_excluded", "work")  # not a list: nothing is left out
+    assert live.store.excluded_profiles() == []
+    # The CLI's two words for it.
+    live.store.set("report_profiles", "all")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    run = lambda value: cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="report",
+                                                           value=value))
+    assert run("exclude:work") == 0 and run("exclude:work") == 0 and live.store.excluded_profiles() == ["work"]
+    assert "leave out profile work." in capsys.readouterr().out
+    assert run("exclude:nobody") == 1 and "The others: nahida, work." in capsys.readouterr().out
+    live.store.set("enabled", True)
+    cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
+    out = capsys.readouterr().out
+    assert "also read profiles: nahida\n" in out and "Left out of the report and memory: work\n" in out
+    assert run("include:nahida") == 1 and run("include:work") == 0 and live.store.excluded_profiles() == []
+    live.store.set("report_profiles", "this")
+    assert run("exclude:work") == 0 and "`pulse report all-profiles` reads the others" in capsys.readouterr().out
+
+
 def test_the_report_lists_active_cron_jobs(tmp_path):
     assert report.cron_jobs(tmp_path) == ""
     (tmp_path / "cron").mkdir()
@@ -3474,6 +3533,15 @@ def test_a_backfill_reads_older_chats_after_new_ones_then_finishes(remembering, 
                       reads="this")["chunks"] == 0
     assert store_.get("memory_backfill")["done"] and store_.get("memory_backfill")["scope"] == "this"
     assert memory.backfill_window(store_, 30, now)[1] == DAY  # the other profiles' older chats are still due
+    # Finished by a run that left a profile out: it doesn't count for that one.
+    store_.set("memory_backfill", {"from": now - 30 * 86400, "to": DAY, "active": True, "done": False, "scope": "all"})
+    assert memory.run(store_, [("", store_.path.parent, SID)], model, zone=UTC, now=now + 900,
+                      left_out=["work"])["chunks"] == 0
+    assert store_.get("memory_backfill")["done"] and store_.get("memory_backfill")["left_out"] == ["work"]
+    assert memory.backfill_window(store_, 30, now)[1] == DAY
+    store_.set("report_excluded", ["work"])
+    assert memory.backfill_window(store_, 30, now) is None
+    store_.set("report_excluded", [])
 
 
 def test_a_backfill_reads_the_chat_going_on_when_it_started(remembering, db):
@@ -3570,6 +3638,20 @@ def test_backfill_command(remembering, db, capsys, monkeypatch):
     assert memory.backfill_window(store_, 7, time.time())[1] == store_.get("memory_since")
     assert "read only this profile's older chats" in status()
     assert memory.scope(store_, store_.get("memory_backfill")) == "this"  # carrying one on stays narrow
+    # One that left a profile out by name doesn't count for it once it's read again (issue 3241).
+    store_.set("memory_backfill", {**finished, "left_out": ["work"]})
+    store_.set("report_excluded", ["work", "side"])
+    assert memory.covers_scope(store_, store_.get("memory_backfill"))
+    assert memory.leaves_out(store_) == ["side", "work"]
+    store_.set("report_excluded", ["side"])
+    assert not memory.covers_scope(store_, store_.get("memory_backfill"))
+    assert control.backfill_state(store_)["narrow"] and "left out a profile memory reads now" in status()
+    assert memory.backfill_window(store_, 7, time.time())[1] == store_.get("memory_since")
+    assert memory.leaves_out(store_, store_.get("memory_backfill")) == ["side", "work"]  # carried on, it still did
+    store_.set("report_profiles", "this")
+    assert memory.covers_scope(store_, store_.get("memory_backfill")) and memory.leaves_out(store_) == []
+    store_.set("report_profiles", "all")
+    store_.set("report_excluded", [])
     store_.set("memory_backfill", finished)
     assert run("30") == 0 and "Reading back 30 days" in capsys.readouterr().out
     store_.advance("", "w9", message_id=1, at=0, marks="backfill_marks", window=-5.0)
