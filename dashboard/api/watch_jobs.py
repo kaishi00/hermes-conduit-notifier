@@ -164,6 +164,9 @@ def watch_request_without_context_sent(instructions: str, sent: Set[str]) -> Tup
 # How often a request waiting for the call's chat checks it again, besides
 # being woken when a job settles.
 WATCH_JOB_CHAT_WAIT_S = 2.0
+# How long a request still waiting when its call ended is kept for a chat
+# that stays busy, as on the phone (hangUpSendLimit).
+WATCH_JOB_AFTER_END_WAIT_S = 600.0
 # How long the call's chat waits for a cancelled request's turn to end
 # before the next request goes in.
 WATCH_JOB_INTERRUPT_END_S = 5.0
@@ -973,13 +976,22 @@ class _WatchJobs:
     def _continue_session(self, job: "_WatchJob", instructions: str, chat: "_WatchJob") -> Dict[str, Any]:
         """Sends the task as the next turn of the call's chat (#1250), once
         nothing else runs there, as the phone sends a call's requests to its
-        chat; the start's answer."""
+        chat; the start's answer. A request still waiting when the call ends
+        is sent once the chat is free, as the phone's is (hermes-conduit
+        issue 3185): only a chat that was never made, or one still busy
+        WATCH_JOB_AFTER_END_WAIT_S later, drops it."""
         with self.changed:
             own = False
+            ended_at: Optional[float] = None
             while True:
-                while not self.ended and job.status == "starting" and self._chat_waits(chat, job):
+                while job.status == "starting" and self._chat_waits(chat, job):
+                    if self.ended:
+                        ended_at = time.monotonic() if ended_at is None else ended_at
+                        if self.call_chat is not chat or time.monotonic() - ended_at > WATCH_JOB_AFTER_END_WAIT_S:
+                            break
                     self.changed.wait(WATCH_JOB_CHAT_WAIT_S)
-                ended, cancelled = self.ended, job.status == "cancelled"
+                cancelled = job.status == "cancelled"
+                ended = self.ended and not cancelled and (self.call_chat is not chat or self._chat_busy(chat, job))
                 if ended or cancelled or self.call_chat is chat:
                     break
                 # The chat waited for never got made: wait for the one made
@@ -1002,7 +1014,11 @@ class _WatchJobs:
                 if job.active:
                     job.status, job.error = "failed", "The call ended before Hermes took it"
                 self.changed.notify_all()
-            # It was the last thing holding the call's transport open.
+            # It was the last thing holding the call's chat and transport open.
+            with self.lock:
+                idle = not chat.active
+            if idle:
+                self._close_session(chat)
             self._close_transport_if_idle()
             return {"ok": True, "status": "not_started", "title": job.title,
                     "message": "The call ended before Hermes could take this request."}
@@ -1503,6 +1519,11 @@ class _WatchJobs:
             # The call's chat closes once the last request in it is done.
             sharing = [other for other in self.jobs.values() if other.session_id == job.session_id]
             if any(other.active or other.cancelling for other in sharing if other is not job):
+                return
+            # A request still waiting its turn there has no session yet.
+            if (self.call_chat is not None and self.call_chat.session_id == job.session_id
+                    and any(other.joins_call and other.status == "starting" and not other.session_id
+                            for other in self.jobs.values() if other is not job)):
                 return
             for other in sharing:
                 other.closed = True

@@ -2016,9 +2016,8 @@ def test_a_request_whose_first_chat_never_got_made_makes_its_own():
     assert grant.jobs.call_chat is grant.jobs.jobs["watch-2"]
 
 
-def test_the_transport_closes_when_the_call_ends_while_a_request_waits():
+def _call_ended_while_a_request_waits():
     grant = make_jobs()
-    server = grant.jobs.server
     start_joining(grant, "plan the trip")
     original = api.watch_jobs.WATCH_JOB_START_ANSWER_S
     api.watch_jobs.WATCH_JOB_START_ANSWER_S = 0.1
@@ -2027,6 +2026,33 @@ def test_the_transport_closes_when_the_call_ends_while_a_request_waits():
     finally:
         api.watch_jobs.WATCH_JOB_START_ANSWER_S = original
     grant.jobs.end()
+    return grant
+
+
+def test_a_request_still_waiting_when_the_call_ends_is_sent_once_the_chat_is_free():
+    """hermes-conduit issue 3185 (Eric, 2026-11-25): the user asked for it,
+    so it goes to the call's chat after the hang-up, as on the phone."""
+    grant = _call_ended_while_a_request_waits()
+    server = grant.jobs.server
+    time.sleep(0.2)
+    assert grant.jobs.jobs["watch-2"].status == "starting", "it waits for the chat, not for the call"
+    assert not grant.jobs.transport._closed
+    server.emit("rt-1", "message.complete", {"text": "Plan", "status": "complete"})
+    wait_for(lambda: grant.jobs.jobs["watch-2"].status == "running")
+    prompts = server.methods("prompt.submit")
+    assert [p["session_id"] for p in prompts] == ["rt-1", "rt-1"]
+    assert prompts[1]["text"].endswith("\n\nand book the hotel")
+    assert server.methods("session.close") == [], "the chat stays open for the request that waited"
+    server.emit("rt-1", "message.complete", {"text": "Booked", "status": "complete"})
+    wait_for(lambda: grant.jobs.transport._closed)
+    assert server.methods("session.close") == [{"session_id": "rt-1"}]
+
+
+def test_a_request_waiting_on_a_chat_still_busy_long_after_the_call_ended_is_dropped(monkeypatch):
+    monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_AFTER_END_WAIT_S", 0.1)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_CHAT_WAIT_S", 0.05)
+    grant = _call_ended_while_a_request_waits()
+    server = grant.jobs.server
     wait_for(lambda: grant.jobs.jobs["watch-2"].status == "failed")
     server.emit("rt-1", "message.complete", {"text": "Plan", "status": "complete"})
     wait_for(lambda: grant.jobs.transport._closed)
