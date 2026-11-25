@@ -13,11 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.195.10 (2026-11-25)
+## 0.195.11 (2026-11-25)
 
 ### New and improved
 
 - Pulse can leave single profiles out of what it reads. While it reads every profile, pick the ones to leave out in Settings > Pulse, under Profiles: Pulse then reads none of their chats, memories or scheduled jobs. What it already remembers from one stays until you remove it. Needs a Conduit that offers it; `hermes conduit-push pulse report exclude:<profile>` does the same.
+
+## 0.195.10 (2026-11-25)
+
+### Fixes
+
+- Health moved to another profile reads from the new profile right away on a host that synced under an older plugin while the phone's clock ran ahead. 0.195.9 fixed this only for syncs made after the update.
 
 ## 0.195.9 (2026-11-25)
 
