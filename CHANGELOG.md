@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.195.10 (2026-11-25)
+
+### Fixes
+
+- Health moved to another profile reads from the new profile right away on a host that synced under an older plugin while the phone's clock ran ahead. 0.195.9 fixed this only for syncs made after the update.
+
 ## 0.195.9 (2026-11-25)
 
 ### Fixes
