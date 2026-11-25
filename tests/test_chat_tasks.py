@@ -142,3 +142,24 @@ def test_a_hermes_without_boards_says_it_cant_tell(host, monkeypatch):
 def test_an_unknown_chat_or_none_is_refused(host):
     assert _get("?session_id=nope").status_code == 404
     assert _get("").status_code == 400
+
+
+def test_a_hermes_whose_sessions_predate_the_chain_columns_says_it_cant_tell(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path, raising=False)
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_dashboard", None)
+    conn = sqlite3.connect(tmp_path / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT)")
+    conn.execute("INSERT INTO sessions VALUES ('a', 'conduit')")
+    conn.commit()
+    conn.close()
+    assert _get("?session_id=a").json() == {"session_id": "a", "supported": False, "tasks": []}
+
+
+def test_a_card_with_no_lane_yet_still_shows(host):
+    state, add_board = host
+    _session(state, "a")
+    board = add_board("default")
+    board.execute("INSERT INTO tasks (id, title, status, session_id) VALUES ('t1', 't1', NULL, 'a')")
+    board.commit()
+    assert [t["id"] for t in _get("?session_id=a").json()["tasks"]] == ["t1"]

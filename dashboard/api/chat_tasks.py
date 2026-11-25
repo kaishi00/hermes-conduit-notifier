@@ -57,18 +57,17 @@ def _boards() -> List[Tuple[str, str, Path]]:
     try:
         from hermes_cli import kanban_db
 
-        listed = kanban_db.list_boards(include_archived=False)
+        found = []
+        for meta in kanban_db.list_boards(include_archived=False):
+            slug = meta.get("slug") if isinstance(meta, dict) else None
+            if not isinstance(slug, str) or not slug:
+                continue
+            name = meta.get("name") if isinstance(meta.get("name"), str) and meta.get("name") else slug
+            path = meta.get("db_path") or kanban_db.kanban_db_path(board=slug)
+            found.append((slug, name, Path(path)))
+        return found
     except (ImportError, AttributeError):  # a Hermes without the board, or without boards
         return []
-    found = []
-    for meta in listed:
-        slug = meta.get("slug") if isinstance(meta, dict) else None
-        if not isinstance(slug, str) or not slug:
-            continue
-        name = meta.get("name") if isinstance(meta.get("name"), str) and meta.get("name") else slug
-        path = meta.get("db_path") or kanban_db.kanban_db_path(board=slug)
-        found.append((slug, name, Path(path)))
-    return found
 
 
 def _board_tasks(path: Path, ids: List[str]) -> Optional[List[Dict[str, Any]]]:
@@ -88,7 +87,7 @@ def _board_tasks(path: Path, ids: List[str]) -> Optional[List[Dict[str, Any]]]:
         wanted = [name for name in _COLUMNS if name in columns]
         marks = ", ".join("?" for _ in ids)
         rows = conn.execute(
-            f"SELECT {', '.join(wanted)} FROM tasks WHERE session_id IN ({marks}) AND status != 'archived' "
+            f"SELECT {', '.join(wanted)} FROM tasks WHERE session_id IN ({marks}) AND status IS NOT 'archived' "
             f"ORDER BY created_at DESC LIMIT {CHAT_TASKS_LIMIT}", tuple(ids)).fetchall()
         return [dict(row) for row in rows]
     except sqlite3.Error:
@@ -116,7 +115,14 @@ def _task(row: Dict[str, Any], slug: str, name: str) -> Dict[str, Any]:
 
 
 def chat_tasks(state_path: Path, session_id: str) -> Dict[str, Any]:
-    ids = _chain_ids(state_path, session_id)
+    try:
+        ids = _chain_ids(state_path, session_id)
+    except sqlite3.OperationalError as exc:
+        # A Hermes whose sessions table predates the columns the chain reads
+        # predates the stamp too: it can't tell.
+        if "no such column" in str(exc):
+            return {"session_id": session_id, "supported": False, "tasks": []}
+        raise
     if ids is None:
         raise HTTPException(status_code=404, detail="Session not found")
     supported = False
