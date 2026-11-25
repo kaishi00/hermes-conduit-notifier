@@ -3281,7 +3281,8 @@ the schema's `board` section.
   turn from a Conduit that draws boards, Hermes gets a short rule on when to
   draw one: only when the user asks to see something or the answer would be
   hard to read without it, never for an explanation, advice or a short
-  answer, at most one a reply, the user's own wishes about cards first, and
+  answer, a second one in a reply only when it shows something the first
+  doesn't, the user's own wishes about cards first, and
   never data as an HTML `::preview` page.
 - **Older Conduits.** A Conduit says `board-cards` in its exchange when it
   draws boards. Until every Conduit that draws cards does, the tool leaves

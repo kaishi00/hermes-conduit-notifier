@@ -214,8 +214,8 @@ BOARD_RULE = ("[Conduit draws boards, but most answers read best as plain text: 
               "something or the answer would be hard to read without it (the weather or a forecast, places on a map, a plan by "
               "day, numbers to compare across options or over time, a list to tick off, changes to code or a "
               "config as a diff): show it with conduit_show as cards (through tool_search and tool_call when it's "
-              "deferred), with next for the obvious follow-ups, and keep your reply to the gist. At most one "
-              "board a reply. When the user has said how they want cards used, do as they say. Never draw data "
+              "deferred), with next for the obvious follow-ups, and keep your reply to the gist. Draw a second "
+              "board in a reply only when it shows something the first doesn't. When the user has said how they want cards used, do as they say. Never draw data "
               "as an HTML ::preview page.]")
 TEMPLATES_RULE = "[Your saved card templates (conduit_show type template): {names}.]"
 

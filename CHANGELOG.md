@@ -18,6 +18,7 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 
 - A board can sit where the reply puts it: under the paragraph it illustrates rather than always above the reply. The bot gets a line to write where the board goes; a reply without it keeps the board on top, as before. Needs a Conduit that places boards.
+- A reply can draw more than one board when each shows something the others don't. The bot was told to stop at one.
 
 ## 0.195.11 (2026-11-25)
 
