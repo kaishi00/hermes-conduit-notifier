@@ -227,6 +227,10 @@ ROUTE_CAPABILITIES = (
     # GET/PUT /notifications/muted-chats: a chat muted for a while or until
     # unmuted sends no reply or failure push (chat_mute.py).
     "chat-mute",
+    # GET /notifications/quiet-turns: whether a chat's last reply was one the
+    # plugin sent no push for, so Conduit for desktop stays quiet too
+    # (quiet_turns.py).
+    "quiet-turns",
     # POST /predict, GET /predict: Conduit's Predictive features, answered
     # by a no-tools fork of the chat for the asking device only.
     "predict",

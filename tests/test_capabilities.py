@@ -149,6 +149,7 @@ def test_every_capability_names_a_served_route_family():
         "reply-sources": "/notifications/reply-sources",
         "chat-on-screen": "/notifications/on-screen",
         "chat-mute": "/notifications/muted-chats",
+        "quiet-turns": "/notifications/quiet-turns",
         "predict": "/predict",
         "predict-custom-instructions": "/predict",
         "side-question": "/side-question",

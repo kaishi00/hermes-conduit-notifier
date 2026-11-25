@@ -750,6 +750,7 @@ routes:
   - GET /notifications/muted-chats
   - PUT /notifications/muted-chats
   - PUT /notifications/on-screen
+  - GET /notifications/quiet-turns
   - GET /notifications/reply-sources
   - PUT /notifications/reply-sources
   - POST /pair

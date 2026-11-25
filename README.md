@@ -2322,6 +2322,25 @@ own switch (Cron runs, above).
   write). A file that can't be read mutes nothing, so a fault only lets a
   push through. Capability `chat-mute`.
 
+## Replies kept quiet, for Conduit for desktop (plugin 0.197.4+)
+
+Conduit for desktop shows your computer's own notification when a chat's
+turn ends, and it stays quiet for every reply the plugin sends your phone no
+push for: a reply that is only `[SILENT]`, a bot workstream's turn, a Bot
+Chat's answer to an update that only says a workstream is waiting on you, a
+room lead's routing pick, a script's or Kanban worker's turn, a quiet cron
+run or Pulse probe.
+
+- `GET /api/plugins/conduit_push/notifications/quiet-turns?session_id=…&profile=…`
+  (up to 16 `session_id`s, a chat's own ids) answers `{"turn": {"session_id",
+  "quiet", "age_s"}}`: the newest reply decision among the chat's sessions,
+  compressed ones included, or `{"turn": null}` when none is kept.
+- The plugin writes each reply's decision as the turn ends, before any
+  client hears of it, to `<hermes home>/conduit-quiet-turns.json` (private to
+  the user, the newest 200 chats, none older than 10 minutes). A file that
+  can't be read answers nothing, so a fault only lets a notification
+  through. Capability `quiet-turns`.
+
 ## Reply notifications by source (plugin 0.35+)
 
 If you also talk to Hermes in Desktop, a messaging app or the terminal, you

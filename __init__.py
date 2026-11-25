@@ -18,7 +18,7 @@ from hermes_constants import get_hermes_home
 from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_done_tool, chat_mute, chat_on_screen, clarify_loop, client, compaction_skip, conduit_first, cron_bot_chat, cron_runs,
                desktop_selected, forks, health_tool, inbox_tool, leaked_calls, link_ask_tool, link_asks, live_activity,
                location_tool, maps_tool, memory_scan, notify_tool, phone_tool, present_tool, profile_copies, pulse,
-               reply_sources, review_notices,
+               quiet_turns, reply_sources, review_notices,
                room_asks, room_chats, room_cleanup, room_cutoff, room_free_busy, room_identity, room_invites,
                room_memory, room_planner, room_posts, room_rules, room_tool,
                room_wakeups, screen_lock, session_titles, settings_tool, show_tool, turn_surface, voice_archive, work_tool)
@@ -692,6 +692,10 @@ def _post_llm_call(**kwargs: Any) -> None:
              or _member_room_turn(session_id) or _lead_routing(kwargs.get("turn_id"))
              or _waits_only_turn(kwargs.get("turn_id"))
              or (automation and not headline))
+    # Conduit for desktop notifies from the gateway's own events: it reads
+    # this decision, so a reply the phone hears nothing about stays quiet
+    # there too (quiet_turns.py).
+    _note_quiet_turn(session_id, quiet)
     # A turn in a room this Hermes hosts opens the room, under its name.
     room = None if quiet or pulse_turn else _home_room(session_id)
     chat_title = "" if quiet or pulse_turn else (room and room[1]) or _session_title(session_id)
@@ -991,6 +995,18 @@ def _conduit_watched(session_id: str, started: float | None) -> bool:
     except Exception:  # noqa: BLE001 — can't tell, so the push goes out
         logger.debug("conduit_push: Conduit's on-screen chats unreadable", exc_info=True)
         return False
+
+
+def _note_quiet_turn(session_id: str, quiet: bool) -> None:
+    """Keeps this reply's push decision for Conduit for desktop
+    (quiet_turns.py); a store that can't be written lets its notification
+    through."""
+    if not session_id:
+        return
+    try:
+        quiet_turns.QuietTurnStore(get_hermes_home()).note(session_id, quiet)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: couldn't keep the reply's push decision", exc_info=True)
 
 
 def _chat_muted(session_id: str) -> bool:

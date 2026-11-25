@@ -1,5 +1,5 @@
-"""Cron and reply notifications, the chat Conduit has on screen, and confirm
-prompts.
+"""Cron and reply notifications, the chat Conduit has on screen, muted chats,
+the replies the plugin kept quiet, and confirm prompts.
 """
 
 from __future__ import annotations
@@ -7,9 +7,9 @@ from __future__ import annotations
 import importlib.util
 import os
 import threading
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from fastapi import HTTPException, Request, Response
+from fastapi import HTTPException, Query, Request, Response
 
 from . import core, session_usage
 
@@ -345,6 +345,56 @@ async def put_muted_chat(request: Request, response: Response, profile: Optional
     body = await core._read_json_body(request, CHAT_MUTE_MAX_BODY_BYTES)
     return await _cron_route(profile, response, lambda: update_muted_chat(body), "settings", feature="Muted chats",
                              limiter=_chat_mute_limiter)
+
+
+# --- Replies the plugin kept quiet (quiet_turns.py) ---------------------------
+#
+# Conduit for desktop notifies from the gateway's message.complete. The
+# plugin's turn-end hook keeps whether each chat's last reply sent a push in
+# the profile's conduit-quiet-turns.json (agent process), and the desktop asks
+# here before it notifies, so a reply the phone hears nothing about ([SILENT],
+# a Bot Chat's answer to an update of only waits, a workstream's turn...)
+# stays quiet on the computer too.
+
+QUIET_TURNS_LIMIT = 240
+_quiet_turns_limiter = core._MintLimiter(QUIET_TURNS_LIMIT, CRON_WINDOW_S,
+                                         message="Too many quiet reply checks; try again shortly")
+_quiet_turns_module: Any = None
+_quiet_turns_lock = threading.Lock()
+
+
+def _quiet_turns() -> Any:
+    """quiet_turns.py in the plugin's folder, loaded once."""
+    global _quiet_turns_module
+    with _quiet_turns_lock:
+        if _quiet_turns_module is None:
+            path = os.path.join(core._plugin_root(), "quiet_turns.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_quiet_turns", path)
+            if spec is None or spec.loader is None or not os.path.isfile(path):
+                raise core.TokenError(501, "This plugin install is missing quiet_turns.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _quiet_turns_module = module
+        return _quiet_turns_module
+
+
+def quiet_turn(session_ids: list) -> Dict[str, Any]:
+    """The newest reply decision for the chat ``session_ids`` names, through
+    the sessions a compaction carried it through: ``{"turn": {"session_id",
+    "quiet", "age_s"}}``, or ``{"turn": None}`` when none was kept."""
+    module = _quiet_turns()
+    try:
+        ids = module.parse_ids(session_ids)
+    except ValueError as exc:
+        raise core.TokenError(400, str(exc))
+    return {"turn": module.QuietTurnStore(_cron_home()).newest(_same_chats([ids])[0])}
+
+
+@router.get("/notifications/quiet-turns")
+async def get_quiet_turn(response: Response, profile: Optional[str] = None,
+                         session_id: List[str] = Query(default=[])) -> Dict[str, Any]:
+    return await _cron_route(profile, response, lambda: quiet_turn(session_id), "quiet-turns",
+                             feature="Reply notifications", limiter=_quiet_turns_limiter)
 
 
 # --- Confirm prompts Hermes shows on the phone ---------------------------------

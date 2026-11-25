@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.197.4 (2026-11-25)
+
+### Fixes
+
+- Conduit for desktop showed notifications for replies the phone gets none for, such as a Bot Chat's silent turns while it coordinates its work.
+
 ## 0.197.3 (2026-11-25)
 
 ### Fixes
