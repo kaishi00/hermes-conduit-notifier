@@ -3,6 +3,7 @@ with any of the chat's sessions, on every board, for the line above the
 composer."""
 
 import importlib.util
+import logging
 import os
 import pathlib
 import sqlite3
@@ -139,14 +140,24 @@ def test_a_hermes_without_boards_says_it_cant_tell(host, monkeypatch):
     assert _get("?session_id=a").json() == {"session_id": "a", "supported": False, "tasks": []}
 
 
-def test_a_hermes_whose_boards_name_no_path_and_no_path_helper_says_it_cant_tell(host, monkeypatch):
+def test_a_board_whose_file_cant_be_named_is_skipped(host, monkeypatch, caplog, tmp_path):
     state, add_board = host
     _session(state, "a")
     _task(add_board("default"), "t1", "a")
     kanban_db = sys.modules["hermes_cli.kanban_db"]
     monkeypatch.setattr(kanban_db, "list_boards", lambda include_archived=True: [{"slug": "default", "name": "Default"}])
     monkeypatch.delattr(kanban_db, "kanban_db_path")
-    assert _get("?session_id=a").json() == {"session_id": "a", "supported": False, "tasks": []}
+    with caplog.at_level(logging.DEBUG):
+        assert _get("?session_id=a").json() == {"session_id": "a", "supported": False, "tasks": []}
+    assert "can't name board default's file" in caplog.text
+    # A board that names its own file still answers beside it.
+    research = add_board("research")
+    _task(research, "t2", "a")
+    path = str(tmp_path / "research.db")
+    monkeypatch.setattr(kanban_db, "list_boards", lambda include_archived=True: [
+        {"slug": "default", "name": "Default"}, {"slug": "research", "name": "Research", "db_path": path}])
+    body = _get("?session_id=a").json()
+    assert body["supported"] is True and [t["id"] for t in body["tasks"]] == ["t2"]
 
 
 def test_an_unknown_chat_or_none_is_refused(host):
