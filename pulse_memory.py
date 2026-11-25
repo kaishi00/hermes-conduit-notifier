@@ -756,14 +756,16 @@ def forget_subagent_items(pulse_store: store.PulseStore, sources: Sequence[tuple
 
 def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]], llm: Llm, *, zone: tzinfo,
         now: float, still_leader: Callable[[], bool] = lambda: True, budget: float = float("inf"),
-        reads: str = "all", done: Optional[dict[str, int]] = None) -> dict[str, int]:
+        reads: str = "all", left_out: Sequence[str] = (),
+        done: Optional[dict[str, int]] = None) -> dict[str, int]:
     """Reads up to ``MAX_CHUNKS`` chunks of quiet chats, or until ``budget``
     tokens are used, and keeps their items. A chunk's items and the chat's
     new watermark are written together; a failed chunk is tried again after
     ``RETRY_S``, and skipped after ``MAX_FAILURES`` tries. Once those are
     read, a backfill (``memory_backfill``) reads older history the same way,
     and is marked done when nothing in its window is left: for every
-    profile only if ``sources`` were every profile's (``reads`` "all").
+    profile only if ``sources`` were every profile's (``reads`` "all"), and
+    never for the profiles ``left_out`` of them.
     Each profile's first run also closes the open items an older build
     kept from a subagent's run (``forget_subagent_items``). Counts go into ``done`` as they happen, so a caller's dict keeps them
     when the run stops on an unreadable state.db."""
@@ -866,7 +868,8 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             for mark in pulse_store.watermarks("backfill_marks", backfill["from"])) \
             and pulse_store.swap("memory_backfill", backfill, {
                 **backfill, "active": False, "done": True,
-                "scope": "this" if reads != "all" else scope(pulse_store, backfill)}):
+                "scope": "this" if reads != "all" else scope(pulse_store, backfill),
+                "left_out": sorted({*skipped(backfill), *(left_out if reads == "all" else ())})}):
         logger.info("conduit_push: Pulse memory finished reading chats back to %s", backfill["from"])
     return done
 
@@ -1248,8 +1251,12 @@ def active_backfill(pulse_store: store.PulseStore) -> Optional[dict]:
 def covers_scope(pulse_store: store.PulseStore, backfill: dict) -> bool:
     """Whether a finished backfill read every profile memory reads now: one
     read under `pulse report this-profile` doesn't count for the others once
-    the report reads every profile, so their older chats are still to read."""
-    return backfill.get("scope") != "this" or pulse_store.get("report_profiles") != "all"
+    the report reads every profile, nor for a profile it left out
+    (`report_excluded`) that is read now, so their older chats are still to
+    read."""
+    if pulse_store.get("report_profiles") != "all":
+        return True
+    return backfill.get("scope") != "this" and set(skipped(backfill)) <= set(pulse_store.excluded_profiles())
 
 
 def scope(pulse_store: store.PulseStore, backfill: Any = None) -> str:
@@ -1257,6 +1264,19 @@ def scope(pulse_store: store.PulseStore, backfill: Any = None) -> str:
     if it, or memory now, reads only this profile."""
     narrow = isinstance(backfill, dict) and backfill.get("scope") == "this"
     return "this" if narrow or pulse_store.get("report_profiles") != "all" else "all"
+
+
+def skipped(backfill: Any) -> list[str]:
+    """The profiles a backfill left out by name (its "left_out")."""
+    kept = backfill.get("left_out") if isinstance(backfill, dict) else None
+    return [name for name in kept if isinstance(name, str)] if isinstance(kept, list) else []
+
+
+def leaves_out(pulse_store: store.PulseStore, backfill: Any = None) -> list[str]:
+    """The profiles a backfill starting (or carrying on, then its own too)
+    now leaves out by name, when it reads every other profile."""
+    now = pulse_store.excluded_profiles() if pulse_store.get("report_profiles") == "all" else []
+    return sorted({*skipped(backfill), *now})
 
 
 def has_window(backfill: Any) -> bool:

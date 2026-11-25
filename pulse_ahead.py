@@ -556,7 +556,7 @@ def run(pulse_store: store.PulseStore, home: Path, llm: candidates.Llm, *, zone:
     if not pulse_store.swap(DAY_KEY, taken, day):
         return  # another run just took it
     coming = pulse_dates.coming(
-        pulse_dates.yearly(pulse_store, Path(home), None if pulse_store.get("report_profiles") == "all" else ""),
+        pulse_dates.yearly(pulse_store, Path(home)),
         today) + pulse_dates.coming(pulse_dates.deadlines(pulse_store), today)
     staged = [entry for entry in coming if entry.stage]
     decided = pulse_store.journaled_refs([entry.ref for entry in staged])

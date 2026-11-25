@@ -216,6 +216,19 @@ def profile_homes(home: Path) -> list[tuple[str, Path]]:
     return found
 
 
+def read_homes(pulse_store: store.PulseStore, home: Path, profiles: Optional[str] = None,
+               left_out: Optional[Sequence[str]] = None) -> list[tuple[str, Path]]:
+    """The other profiles Pulse reads, as (name, home): none when it reads
+    only its own (`report_profiles` "this"), else every one `profile_homes`
+    finds but those left out by name (`report_excluded`, issue 3241).
+    ``profiles`` and ``left_out`` stand in for the two settings, for a
+    caller that read them already."""
+    if (pulse_store.get("report_profiles") if profiles is None else profiles) != "all":
+        return []
+    without = set(pulse_store.excluded_profiles() if left_out is None else left_out)
+    return [(name, path) for name, path in profile_homes(home) if name not in without]
+
+
 def their_home_chat(home: Path) -> str:
     """Another profile's own Pulse home chat, so its reports aren't read
     as chats: the one its store names, else the one titled like Pulse's.
@@ -864,7 +877,10 @@ def later_lines(home: Path, items: Sequence[dict], *, home_chat_id: str, zone: t
     """For each promise, commitment, watch or intention in ``items``, the
     closest later row on the same subject in another chat or cron run of its
     profile, so the report can tell one done or moved past from one still
-    open; "" when none has one."""
+    open; "" when none has one. An item kept from a profile that is left out
+    now is still followed there (`profile_homes`, not `read_homes`), as the
+    follow-up checks follow it: leaving a profile out stops Pulse reading new
+    things from it, and what it already holds stays (issue 3241)."""
     followed = [item for item in items if item["kind"] in LATER_KINDS]
     if not followed:
         return ""
@@ -980,7 +996,7 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
     phone, zone_name = phone_context(home, now, reminders=reminders, events=events, upcoming=upcoming)
     zone_name = pulse_store.get("time_zone") or zone_name
     zone = zone_for(zone_name)
-    others = profile_homes(home) if pulse_store.get("report_profiles") == "all" else []
+    others = read_homes(pulse_store, home)
     header = f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')} ({zone_name or 'host time'})"
     start = _local(since, zone)
     memory_on = bool(pulse_store.get("memory"))
