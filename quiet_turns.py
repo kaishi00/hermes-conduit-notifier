@@ -97,10 +97,16 @@ class QuietTurnStore:
             return None
         return {"session_id": found["id"], "quiet": found["quiet"], "age_s": round(max(0.0, now - found["at"]), 3)}
 
-    def _load(self) -> dict[str, Any]:
+    def _load(self, *, for_write: bool = False) -> dict[str, Any]:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, RecursionError):
+        except (FileNotFoundError, ValueError, RecursionError):
+            raw = None
+        except OSError:
+            # Unreadable for now (not missing, not corrupt): a write would
+            # replace every other chat's decision, so it fails instead.
+            if for_write:
+                raise
             raw = None
         return _normalized(raw)
 
@@ -110,7 +116,7 @@ class QuietTurnStore:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         lock_path = self.path.with_name(f".{self.path.name}.lock")
         with _thread_lock, open(lock_path, "a+b") as handle, _exclusive(handle):
-            state = self._load()
+            state = self._load(for_write=True)
             yield state
             self._save(json.dumps(state, separators=(",", ":")) + "\n")
 

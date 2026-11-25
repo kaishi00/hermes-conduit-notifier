@@ -74,6 +74,22 @@ def test_a_file_that_cant_be_read_answers_nothing(tmp_path, content):
     assert quiet_turns.QuietTurnStore(tmp_path, Clock()).newest(["a"]) is None
 
 
+def test_an_unreadable_file_is_not_overwritten(tmp_path, monkeypatch):
+    store = quiet_turns.QuietTurnStore(tmp_path, Clock())
+    store.note("a", True)
+    saved = store.path.read_text(encoding="utf-8")
+
+    def unreadable(self, *args, **kwargs):
+        raise PermissionError("busy")
+
+    monkeypatch.setattr(type(store.path), "read_text", unreadable)
+    with pytest.raises(OSError):
+        store.note("b", False)
+    assert store.newest(["a"]) is None, "a read that fails answers nothing"
+    monkeypatch.undo()
+    assert store.path.read_text(encoding="utf-8") == saved
+
+
 def test_a_silent_reply_and_a_waits_only_answer_are_kept_quiet_and_a_reply_is_not(pushed, tmp_path, monkeypatch):  # noqa: F811
     store = quiet_turns.QuietTurnStore(tmp_path)
     plugin._post_llm_call(session_id="bc", turn_id="t1", assistant_response="[SILENT]")

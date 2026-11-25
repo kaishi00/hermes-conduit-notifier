@@ -2325,11 +2325,13 @@ own switch (Cron runs, above).
 ## Replies kept quiet, for Conduit for desktop (plugin 0.197.4+)
 
 Conduit for desktop shows your computer's own notification when a chat's
-turn ends, and it stays quiet for every reply the plugin sends your phone no
-push for: a reply that is only `[SILENT]`, a bot workstream's turn, a Bot
+turn ends, and it stays quiet for the replies the plugin keeps quiet by its
+own rules: a reply that is only `[SILENT]`, a bot workstream's turn, a Bot
 Chat's answer to an update that only says a workstream is waiting on you, a
 room lead's routing pick, a script's or Kanban worker's turn, a quiet cron
-run or Pulse probe.
+run or Pulse probe. A muted chat stays quiet there through Muted chats
+(above), which the desktop reads too; what only holds a phone's push (a chat
+on screen on another device, a source you turned off) doesn't apply.
 
 - `GET /api/plugins/conduit_push/notifications/quiet-turns?session_id=…&profile=…`
   (up to 16 `session_id`s, a chat's own ids) answers `{"turn": {"session_id",
