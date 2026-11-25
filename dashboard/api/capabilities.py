@@ -381,6 +381,10 @@ ROUTE_CAPABILITIES = (
     # POST /config/unset: keys under stt and tts taken out of a profile's
     # config.yaml, which Hermes' own save can't do (hermes-conduit#3155).
     "config-unset",
+    # GET/PUT /media-models/{image_gen,video_gen}: the active image or video
+    # backend's models, and a pick saved where that backend reads it, with
+    # the env var overriding it named (Image and video generation models).
+    "media-models",
 )
 
 
