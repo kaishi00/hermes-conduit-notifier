@@ -156,6 +156,20 @@ def _yaml_load(text: str) -> Any:
     return yaml.safe_load(text)
 
 
+def current_profile(fallback: str = "default") -> str:
+    """The profile whose home this runs in, as the bot's name is read
+    (`bot_name`). One process can carry several profiles' loads of this one
+    module (the gateway's cron ticker delivering a job to another profile's
+    Bot Chat), and a load-time profile names only the last one to load:
+    a push sealed for one bot then carried another's profile, so Conduit
+    showed that bot's picture (build 283, Eric 2026-11-25). `fallback`
+    when no home can be read."""
+    home = _home()
+    if home is None:
+        return fallback or "default"
+    return _profile_of(home)
+
+
 def _profile_of(home: Any) -> str:
     """The profile a Hermes home belongs to: profiles/<name>, else the default."""
     try:

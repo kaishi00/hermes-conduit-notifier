@@ -21,7 +21,7 @@ from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_done_tool, c
                reply_sources, review_notices,
                room_asks, room_chats, room_cleanup, room_cutoff, room_free_busy, room_identity, room_invites,
                room_memory, room_planner, room_posts, room_rules, room_tool,
-               room_wakeups, screen_lock, settings_tool, show_tool, turn_surface, voice_archive, work_tool)
+               room_wakeups, screen_lock, session_titles, settings_tool, show_tool, turn_surface, voice_archive, work_tool)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
 from .present_store import PresentStore
@@ -79,6 +79,15 @@ def _register_predict_task(ctx: Any) -> None:
                                     description=PREDICT_TASK_DESCRIPTION)
     except Exception:  # noqa: BLE001 — no helper slot; config still works
         logger.debug("conduit_push: no auxiliary task for predictions", exc_info=True)
+
+
+def _current_profile() -> str:
+    """The profile this turn runs in (session_titles.current_profile), else
+    the one this load registered for."""
+    try:
+        return session_titles.current_profile(_profile)
+    except Exception:  # noqa: BLE001 — a push must never break the turn
+        return _profile
 
 
 def register(ctx: Any) -> None:
@@ -164,7 +173,7 @@ def register(ctx: Any) -> None:
     settings_tool.register(ctx, is_child=_is_child)
     # Hermes asks the user to OK an action on their phone (tap, or voice in
     # a call) before it does it.
-    present_tool.register(ctx, is_child=_is_child, profile=lambda: _profile)
+    present_tool.register(ctx, is_child=_is_child, profile=_current_profile)
     # Hermes puts a table, steps or links on the screen of the user's voice
     # call instead of reading them out.
     show_tool.register(ctx, is_child=_is_child, is_room=_is_room_turn, room_board=_save_room_board,
@@ -184,23 +193,23 @@ def register(ctx: Any) -> None:
     # or their own instructions ask (hermes-conduit: Done chats).
     chat_done_tool.register(ctx, is_child=_is_child)
     # Where the user is, as Conduit shares it, with place rules and its skill.
-    location_tool.register(ctx, is_child=_is_child, profile=lambda: _profile,
+    location_tool.register(ctx, is_child=_is_child, profile=_current_profile,
                            skill_path=Path(__file__).resolve().parent / "skills" / location_tool.SKILL_NAME / "SKILL.md")
     # Apple Maps lookups the user's iPhone answers (search, directions,
     # travel times), on top of location sharing.
-    maps_tool.register(ctx, is_child=_is_child, profile=lambda: _profile)
+    maps_tool.register(ctx, is_child=_is_child, profile=_current_profile)
     # Calendar, Reminders, Focus and phone status Conduit shares, with
     # changes the phone applies (the user approves them there), and the skill.
-    phone_tool.register(ctx, is_child=_is_child, profile=lambda: _profile,
+    phone_tool.register(ctx, is_child=_is_child, profile=_current_profile,
                         skill_path=Path(__file__).resolve().parent / "skills" / phone_tool.SKILL_NAME / "SKILL.md")
     # The user's rooms with other people (Linked Rooms), read for them in
     # their private chats; never in a room turn.
     room_tool.register(ctx, is_child=_is_child)
     # Ask me first: in a room with other people's agents, the agent asks its
     # owner's phone before it shares something personal; only room turns.
-    room_asks.register(ctx, is_child=_is_child, profile=lambda: _profile)
+    room_asks.register(ctx, is_child=_is_child, profile=_current_profile)
     room_free_busy.register(ctx, is_child=_is_child)
-    link_ask_tool.register(ctx, is_child=_is_child, profile=lambda: _profile)
+    link_ask_tool.register(ctx, is_child=_is_child, profile=_current_profile)
     # Bot workstreams (designs/bot-mode-coordinator): a bot's Bot Chat
     # coordinates work sessions of its own; on for every bot unless turned off.
     work_tool.register(ctx, is_child=_is_child)
@@ -339,7 +348,7 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
         "input.needed",
         identifier=event_id("input", kwargs.get("turn_id"), kwargs.get("tool_call_id")),
         session_id=_text(kwargs.get("session_id")),
-        profile=_profile,
+        profile=_current_profile(),
         profile_name=_bot_name(),
         title=f"Input needed · {wait}" if wait else _titled("Input needed", kwargs.get("session_id")),
         title_label="input.needed",
@@ -702,7 +711,7 @@ def _post_llm_call(**kwargs: Any) -> None:
         "response.ready",
         identifier=event_id("response", kwargs.get("turn_id"), session_id),
         session_id=session_id,
-        profile=_profile,
+        profile=_current_profile(),
         profile_name=_bot_name(),
         title=copy["title"],
         title_label=copy["title_label"],
@@ -771,7 +780,7 @@ def _slot(session_id: str, task_id: Any = None, key: str = "", *, turn_id: Any =
     with the job, whose mute the task follows. ``keep`` leaves a slot the
     turn already took (its reply's) in place."""
     job = cron_runs.job_id(None, task_id)
-    seed = f"key:{_profile}:{key}" if key else f"cron:{_profile}:{job}" if job else ""
+    seed = f"key:{_current_profile()}:{key}" if key else f"cron:{_current_profile()}:{job}" if job else ""
     if (seed or job) and isinstance(turn_id, str) and turn_id:
         with _turn_slots_lock:
             if keep and (session_id, turn_id) in _turn_slots:
@@ -903,7 +912,7 @@ def _settle_ready(session_id: str, turn_id: Any, outcome: str) -> bool:
 def _finish_ready(session_id: str, ready: dict[str, Any] | None, send: bool) -> None:
     # A job the user asked to be called about (#449) ends here: the call
     # request takes the place of the ready notification.
-    if calls.turn_ended(session_id, "done", profile=_profile, fallback=ready):
+    if calls.turn_ended(session_id, "done", profile=_current_profile(), fallback=ready):
         return
     if ready is not None and send:
         enqueue(ready)
@@ -1144,7 +1153,7 @@ def _on_session_end(**kwargs: Any) -> None:
         # are taken here for a background task it started.
         _slot(session_id, kwargs.get("task_id"), written_key, turn_id=kwargs.get("turn_id"), keep=True)
         if not _settle_ready(session_id, kwargs.get("turn_id"), "done"):
-            calls.turn_ended(session_id, "done", profile=_profile, fallback=None)
+            calls.turn_ended(session_id, "done", profile=_current_profile(), fallback=None)
         # A voice job's chat leaves Desktop's list once Hermes has answered
         # what voice asked there (hermes-conduit#1124).
         try:
@@ -1157,7 +1166,7 @@ def _on_session_end(**kwargs: Any) -> None:
     # its job's mute and slot, even when the turn itself sends nothing.
     slot = _slot(session_id, kwargs.get("task_id"), written_key, turn_id=kwargs.get("turn_id"))
     if kwargs.get("interrupted"):
-        calls.turn_ended(session_id, "stopped", profile=_profile, fallback=None)
+        calls.turn_ended(session_id, "stopped", profile=_current_profile(), fallback=None)
         return
     if pulse_turn:
         # Pulse records its own failures (``pulse status``).
@@ -1165,7 +1174,7 @@ def _on_session_end(**kwargs: Any) -> None:
     if workstream:
         # The Bot Chat's reply to the work update is the one push, and a
         # call the user asked for on it still rings.
-        calls.turn_ended(session_id, "failed", profile=_profile, fallback=None)
+        calls.turn_ended(session_id, "failed", profile=_current_profile(), fallback=None)
         return
     if (cron_runs.quiet(session_id, kwargs.get("task_id"), delivered=True, failure=True)
             or _member_room_turn(session_id) or routing or automation or _chat_muted(session_id)):
@@ -1176,7 +1185,7 @@ def _on_session_end(**kwargs: Any) -> None:
         # failure notice went there, with its push): no push and no
         # automatic alert call. A call the user asked for on this job (a
         # watch) still rings.
-        calls.turn_ended(session_id, "failed", profile=_profile, fallback=None)
+        calls.turn_ended(session_id, "failed", profile=_current_profile(), fallback=None)
         return
     # A failure in a room this Hermes hosts opens the room, as its reply does.
     room = _home_room(session_id)
@@ -1185,7 +1194,7 @@ def _on_session_end(**kwargs: Any) -> None:
         "turn.failed",
         identifier=event_id("failure", kwargs.get("turn_id"), session_id),
         session_id=session_id,
-        profile=_profile,
+        profile=_current_profile(),
         profile_name=_bot_name(),
         title=f"Turn failed · {room_title}" if room_title else _titled("Turn failed", session_id),
         title_label="turn.failed",
@@ -1193,10 +1202,10 @@ def _on_session_end(**kwargs: Any) -> None:
         room={"id": room[0]} if room else None,
         slot=slot,
     )
-    if calls.turn_ended(session_id, "failed", profile=_profile, fallback=failed):
+    if calls.turn_ended(session_id, "failed", profile=_current_profile(), fallback=failed):
         return
     # With alert calls on, a failed turn calls instead.
-    if calls.failed_turn(session_id, profile=_profile, fallback=failed, turn_id=kwargs.get("turn_id")):
+    if calls.failed_turn(session_id, profile=_current_profile(), fallback=failed, turn_id=kwargs.get("turn_id")):
         return
     enqueue(failed)
 
@@ -1265,7 +1274,7 @@ def _pre_approval_request(**kwargs: Any) -> None:
         "approval.needed",
         identifier=event_id("approval", session_id, turn_id, kwargs.get("pattern_key"), kwargs.get("command")),
         session_id=session_id,
-        profile=_profile,
+        profile=_current_profile(),
         profile_name=_bot_name(),
         title=f"Approval needed · {named}" if named else _titled("Approval needed", session_id),
         title_label="approval.needed",
@@ -1291,7 +1300,7 @@ def _pre_approval_request(**kwargs: Any) -> None:
         _quietly(work_tool.wait_pushed, wait_session)
     # With alert calls on, an approval left unanswered for a minute calls the
     # user too (#449), beside the answerable notification.
-    calls.alert(session_id, "approval", description, profile=_profile,
+    calls.alert(session_id, "approval", description, profile=_current_profile(),
                 turn_session_id=_text(kwargs.get("session_id")))
     # The command and description, for Conduit's "Needs you" list, and for a
     # call answered with no chat open (the Watch) to read out; its spoken
@@ -1431,7 +1440,7 @@ def _subagent_stop(**kwargs: Any) -> None:
         "background_task.finished",
         identifier=event_id("subagent", kwargs.get("parent_turn_id"), child, status),
         session_id=parent,
-        profile=_profile,
+        profile=_current_profile(),
         profile_name=_bot_name(),
         title=f"Task finished · {room_title}" if room_title else _titled("Task finished", parent),
         title_label="background_task.finished" if finished else "",
@@ -1637,7 +1646,7 @@ def _link_answers_note(session_id: str) -> str | None:
         home = get_hermes_home()
         if not (room_identity.root_home(home) / room_identity.DIRECTORY / link_asks.FILE_NAME).exists():
             return None
-        lines = link_ask_tool.frame(link_asks.Asks(room_identity.root_home(home)), _profile, session_id)
+        lines = link_ask_tool.frame(link_asks.Asks(room_identity.root_home(home)), _current_profile(), session_id)
     except Exception:  # noqa: BLE001 — a hook must never break the turn; the answers wait for the next one
         logger.debug("conduit_push: couldn't read the answers to this chat's asks", exc_info=True)
         return None

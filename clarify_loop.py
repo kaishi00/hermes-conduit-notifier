@@ -84,6 +84,17 @@ def set_profile(value: str) -> None:
     profile = value or "default"
 
 
+def _shown_profile() -> str:
+    """The profile this question's turn runs in, as its push names the bot
+    (session_titles.current_profile); `profile` when no home can be read."""
+    try:
+        from . import session_titles
+
+        return session_titles.current_profile(profile)
+    except Exception:  # noqa: BLE001 — a push must never break the question
+        return profile
+
+
 def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: Any) -> Any:
     """``tool_execution`` middleware entry point.
 
@@ -143,7 +154,7 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
         "input.needed",
         identifier=event_id("input", kwargs.get("turn_id"), kwargs.get("tool_call_id"), request_id),
         session_id=session_id,
-        profile=profile,
+        profile=_shown_profile(),
         profile_name=bot_name(),
         title=f"Input needed · {wait}" if wait else titled("Input needed", session_id),
         title_label="input.needed",
@@ -191,7 +202,7 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
     # tap, so it draws the card from the list (hermes-conduit#2556).
     calls.note_waiting(session_id, "question", request_id=request_id, questions=batch,
                        title=chat_title(session_id))
-    calls.alert(session_id, "question", reason, profile=profile)
+    calls.alert(session_id, "question", reason, profile=_shown_profile())
     try:
         result = _first_answer_wins(
             request_id=request_id,

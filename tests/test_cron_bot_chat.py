@@ -287,8 +287,11 @@ def test_a_turn_hermes_didnt_admit_for_a_job_the_bot_acts_on_pushes_for_the_run(
 
 
 def test_the_notes_slot_is_spelled_as_the_run_chats(hermes, monkeypatch):
-    # Issue 1052: one spelling of the load's profile for the job's slot, the
-    # entry module's, so the note's push and a run chat's replace each other.
+    # Issue 1052: one spelling of the profile for the job's slot, the entry
+    # module's, so the note's push and a run chat's replace each other. And
+    # it's the profile whose home the turn runs in, not the last load's: a
+    # gateway holding Yelan's and Zhongli's loads sealed Yelan's note with
+    # Zhongli's profile, and Conduit drew Zhongli's picture (build 283).
     sent = _sent(monkeypatch)
     _job_reader(monkeypatch)
     monkeypatch.setattr(sys.modules["conduit_push"], "_profile", "Atlas", raising=False)
@@ -296,7 +299,7 @@ def test_the_notes_slot_is_spelled_as_the_run_chats(hermes, monkeypatch):
     assert cron_bot_chat.install()
     assert hermes.delivery.deliver(dict(JOB), "Rain at 9.", "") is None
     (event,) = sent
-    assert event["slot"] == events.slot_token(f"cron:Atlas:{JOB['id']}") and event["profile"] == "Atlas"
+    assert event["slot"] == events.slot_token(f"cron:default:{JOB['id']}") and event["profile"] == "default"
 
 
 def test_another_profiles_bot_chat_keeps_the_run_chats_push_instead(hermes, monkeypatch):
