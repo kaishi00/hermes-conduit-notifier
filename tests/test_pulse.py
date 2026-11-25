@@ -1598,7 +1598,7 @@ def test_a_profile_left_out_by_name_is_not_read(live, db, tmp_path, request, cap
     control.update(live.store, {"include_profile": "nobody"}, tmp_path)
     assert live.store.excluded_profiles() == ["gone", "nahida"]
     for bad in ({"exclude_profile": ""}, {"include_profile": ["work"]}, {"exclude_profile": "x" * (control.PROFILE_NAME_LIMIT + 1)},
-                {"exclude_profile": "work", "excluded_profiles": []}):
+                {"exclude_profile": "work", "excluded_profiles": []}, {"exclude_profile": "work", "include_profile": "gone"}):
         with pytest.raises(control.Refused) as refused:
             control.update(live.store, bad, tmp_path)
         assert refused.value.data["field"] in ("exclude_profile", "include_profile")

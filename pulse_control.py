@@ -199,6 +199,12 @@ MAX_DAILY_TOKENS = 5_000_000
 NOTE_LIMIT = 1_500
 
 
+def _toggled(excluded: list[str], field: str, name: str) -> list[str]:
+    """``excluded`` with ``name`` left out ("exclude_profile") or read again."""
+    kept = [each for each in excluded if each != name]
+    return kept + [name] if field == "exclude_profile" else kept
+
+
 def _encodes(text: str) -> bool:
     try:
         text.encode("utf-8")
@@ -268,20 +274,19 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
         if len(kept) > EXCLUDED_LIMIT:  # never a kept name dropped quietly
             raise Refused("invalid", field="excluded_profiles")
         changes["report_excluded"] = kept
+    toggle: tuple[str, str] | None = None  # (field, name): one name in or out
     for field in ("exclude_profile", "include_profile"):
         if field not in body:
             continue
         name = body[field]
-        if "excluded_profiles" in body or not (isinstance(name, str) and name and len(name) <= PROFILE_NAME_LIMIT
-                                                and _encodes(name)):
+        if "excluded_profiles" in body or toggle is not None or not (
+                isinstance(name, str) and name and len(name) <= PROFILE_NAME_LIMIT and _encodes(name)):
             raise Refused("invalid", field=field)
-        stored = changes.get("report_excluded", pulse_store.excluded_profiles())
-        stored = [kept for kept in stored if kept != name]
-        if field == "exclude_profile":
-            stored.append(name)
-        if len(stored) > EXCLUDED_LIMIT:
+        toggle = (field, name)
+        toggled = _toggled(pulse_store.excluded_profiles(), field, name)
+        if len(toggled) > EXCLUDED_LIMIT:
             raise Refused("invalid", field=field)
-        changes["report_excluded"] = stored
+        changes["report_excluded"] = toggled
     if "report_times" in body:
         times = body["report_times"]
         parsed = pulse.report.parse_times(",".join(times)) if isinstance(times, list) and 0 < len(times) <= 12 \
@@ -339,6 +344,17 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
             raise Refused("invalid", field="night")
         changes[pulse_hours.SETTING] = night
     for key, value in changes.items():
+        if key == "report_excluded" and toggle is not None:
+            # Changed against the list as it is when written, so two devices
+            # picking at once both keep their pick.
+            for _ in range(8):
+                raw = pulse_store.get("report_excluded")
+                value = _toggled(pulse_store.excluded_profiles(), *toggle)
+                if len(value) > EXCLUDED_LIMIT:
+                    raise Refused("invalid", field=toggle[0])
+                if pulse_store.swap("report_excluded", raw, value):
+                    break
+            continue
         pulse_store.set(key, value)
     if changes.get("inbox_deadlines") is False:
         pulse_memory.stop_inbox(pulse_store)  # off forgets what it kept from the inbox
