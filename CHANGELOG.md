@@ -19,6 +19,12 @@ checks it). The format is fixed, because Conduit reads it:
 
 - A board can sit where the reply puts it: under the paragraph it illustrates rather than always above the reply. The bot gets a line to write where the board goes; a reply without it keeps the board on top, as before. Needs a Conduit that places boards.
 
+## 0.195.11 (2026-11-25)
+
+### New and improved
+
+- Pulse can leave single profiles out of what it reads. While it reads every profile, pick the ones to leave out in Settings > Pulse, under Profiles: Pulse then reads none of their chats, memories or scheduled jobs. What it already remembers from one stays until you remove it. Needs a Conduit that offers it; `hermes conduit-push pulse report exclude:<profile>` does the same.
+
 ## 0.195.10 (2026-11-25)
 
 ### Fixes

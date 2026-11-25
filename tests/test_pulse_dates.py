@@ -2,6 +2,7 @@
 (pulse_ahead): designs/pulse-dates.md."""
 
 import re
+import sqlite3
 import sys
 import threading
 import time
@@ -141,6 +142,16 @@ def test_a_birthday_said_in_a_chat_and_a_picked_persons_count_once(live):
     assert found[0].what == "Sam's birthday" and found[0].relation == "wife"
     assert f"fact:{birthday}" not in [entry.key for entry in found]
     assert dates.people(live.home / "nothing") == []  # no phone synced
+    # A date kept from a profile Pulse doesn't read is left out (issue 3241).
+    with sqlite3.connect(live.store.path) as conn:
+        conn.execute("UPDATE items SET profile='work' WHERE id=?", (wedding,))
+    assert len(dates.yearly(live.store, live.home)) == 2
+    live.store.set("report_excluded", ["work"])
+    assert [entry.key for entry in dates.yearly(live.store, live.home)] == ["person:p_sam"]
+    live.store.set("report_excluded", ["side"])
+    assert len(dates.yearly(live.store, live.home)) == 2
+    live.store.set("report_profiles", "this")
+    assert [entry.key for entry in dates.yearly(live.store, live.home)] == ["person:p_sam"]
 
 
 # Memory ------------------------------------------------------------------------
