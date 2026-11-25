@@ -42,6 +42,7 @@ def test_the_newest_decision_of_a_chat_answers(tmp_path):
     store.note("a", False)
     assert store.newest(["a"]) == {"session_id": "a", "quiet": False, "age_s": 0.0}
     assert len(store._load()["turns"]) == 1, "one entry per chat"
+    assert store.path.stat().st_mode & 0o777 == 0o600
 
 
 def test_a_chat_is_found_under_any_of_its_sessions_newest_first(tmp_path):
@@ -132,3 +133,12 @@ def test_the_route_refuses_a_request_without_ids(client):
     assert client.get(f"{BASE}/notifications/quiet-turns").status_code == 400
     many = [("session_id", f"s{n}") for n in range(quiet_turns.MAX_IDS + 1)]
     assert client.get(f"{BASE}/notifications/quiet-turns", params=many).status_code == 400
+
+
+def test_the_route_finds_a_compacted_chats_decision_under_its_older_id(client, tmp_path):
+    from test_chat_mute import _sessions
+
+    _sessions(tmp_path, [("root", None, "compression", {}, 1, 10), ("tip", "root", None, {}, 10, None)])
+    api.notifications._quiet_turns().QuietTurnStore(tmp_path).note("tip", True)
+    turn = client.get(f"{BASE}/notifications/quiet-turns", params={"session_id": "root"}).json()["turn"]
+    assert turn["session_id"] == "tip" and turn["quiet"] is True

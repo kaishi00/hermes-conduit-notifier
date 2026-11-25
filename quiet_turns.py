@@ -60,8 +60,9 @@ _thread_lock = threading.Lock()
 
 def parse_ids(values: Iterable[Any]) -> list[str]:
     """The chat ids a request asks about; ValueError for none or too many."""
+    values = list(values)[: MAX_IDS + 1]
     ids = _ids(values, limit=None)
-    if not ids or len(ids) > MAX_IDS:
+    if not ids or len(values) > MAX_IDS:
         raise ValueError(f"session_id must name 1 to {MAX_IDS} chat ids")
     return ids
 
