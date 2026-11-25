@@ -18,6 +18,7 @@ checks it). The format is fixed, because Conduit reads it:
 ### Fixes
 
 - In a GPT-Live call on the Apple Watch, a later request sent to the call's chat no longer repeats the transcript lines that chat already got with an earlier request.
+
 ## 0.195.11 (2026-11-25)
 
 ### New and improved
