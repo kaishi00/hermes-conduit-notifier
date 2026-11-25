@@ -163,6 +163,10 @@ ROUTE_CAPABILITIES = (
     # to watch now. GET /pulse says
     # "spots" and PUT /pulse takes it.
     "pulse_spots",
+    # Single profiles left out of what Pulse reads (hermes-conduit issue
+    # 3241): GET /pulse lists "excluded_profiles" beside "other_profiles",
+    # and PUT /pulse takes "excluded_profiles", the whole list.
+    "pulse_profile_exclusions",
     "present-v1",
     "health-sync",
     "voice-tools",

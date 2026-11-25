@@ -686,7 +686,8 @@ def _pulse(args: argparse.Namespace) -> int:
         others = [name for name, _ in pulse.report.read_homes(pulse_store, home)]
         if others:
             print("The report and memory also read profiles: " + ", ".join(_printable(name) for name in others))
-        left_out = pulse_store.excluded_profiles()
+        there = {name for name, _ in pulse.report.profile_homes(home)}
+        left_out = [name for name in pulse_store.excluded_profiles() if name in there]  # as Settings > Pulse lists them
         if left_out:
             print("Left out of the report and memory: " + ", ".join(_printable(name) for name in left_out))
     kinds = pulse_store.item_counts()

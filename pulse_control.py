@@ -259,7 +259,10 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
         # stays left out for when it's back.
         there = {name for name, _ in pulse.report.profile_homes(Path(home))} if home is not None else None
         gone = [name for name in pulse_store.excluded_profiles() if there is not None and name not in there]
-        changes["report_excluded"] = list(dict.fromkeys(names + gone))[:EXCLUDED_LIMIT]
+        kept = list(dict.fromkeys(names + gone))
+        if len(kept) > EXCLUDED_LIMIT:  # never a kept name dropped quietly
+            raise Refused("invalid", field="excluded_profiles")
+        changes["report_excluded"] = kept
     if "report_times" in body:
         times = body["report_times"]
         parsed = pulse.report.parse_times(",".join(times)) if isinstance(times, list) and 0 < len(times) <= 12 \

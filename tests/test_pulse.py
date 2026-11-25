@@ -1579,6 +1579,11 @@ def test_a_profile_left_out_by_name_is_not_read(live, db, tmp_path, request, cap
             control.update(live.store, {"excluded_profiles": bad}, tmp_path)
         assert (refused.value.code, refused.value.data["field"]) == ("invalid", "excluded_profiles")
     assert live.store.excluded_profiles() == ["work", "gone"]
+    # A list that would push a kept name past the limit is refused, never cut.
+    live.store.set("report_excluded", ["gone"] + [f"p{n}" for n in range(control.EXCLUDED_LIMIT - 1)])
+    with pytest.raises(control.Refused):
+        control.update(live.store, {"excluded_profiles": [f"q{n}" for n in range(control.EXCLUDED_LIMIT)]}, tmp_path)
+    assert live.store.excluded_profiles()[0] == "gone"
     live.store.set("report_excluded", "work")  # not a list: nothing is left out
     assert live.store.excluded_profiles() == []
     # The CLI's two words for it.
@@ -3880,6 +3885,9 @@ def test_pulse_routes(remembering, db, monkeypatch):
     # A report item Pulse found on its own takes Do it and Done too.
     assert "pulse_found_actions" in api.capabilities.ROUTE_CAPABILITIES
     assert "pulse_note" in api.capabilities.ROUTE_CAPABILITIES  # Settings > Pulse shows the note to Pulse
+    # Single profiles left out of what Pulse reads (issue 3241).
+    assert "pulse_profile_exclusions" in api.capabilities.ROUTE_CAPABILITIES
+    assert http.put(base, json={"excluded_profiles": []}).json()["excluded_profiles"] == []
     # Quiet times: weekdays, and a spell until the end of today or a day.
     assert "pulse_quiet" in api.capabilities.ROUTE_CAPABILITIES
     hushed = http.put(base, json={"quiet_days": [6, 5], "quiet_until": "today"}).json()

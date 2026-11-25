@@ -877,7 +877,10 @@ def later_lines(home: Path, items: Sequence[dict], *, home_chat_id: str, zone: t
     """For each promise, commitment, watch or intention in ``items``, the
     closest later row on the same subject in another chat or cron run of its
     profile, so the report can tell one done or moved past from one still
-    open; "" when none has one."""
+    open; "" when none has one. An item kept from a profile that is left out
+    now is still followed there (`profile_homes`, not `read_homes`), as the
+    follow-up checks follow it: leaving a profile out stops Pulse reading new
+    things from it, and what it already holds stays (issue 3241)."""
     followed = [item for item in items if item["kind"] in LATER_KINDS]
     if not followed:
         return ""
