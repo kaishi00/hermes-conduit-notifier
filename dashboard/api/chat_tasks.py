@@ -55,22 +55,28 @@ def _chain_ids(state_path: Path, session_id: str) -> Optional[List[str]]:
 
 
 def _boards() -> List[Tuple[str, str, Path]]:
-    """(slug, name, db path) for each board Hermes lists, archived ones left out."""
+    """(slug, name, db path) for each board Hermes lists, archived ones left out.
+    A board whose file can't be named is skipped; the others still answer."""
     try:
         from hermes_cli import kanban_db
 
-        found = []
-        for meta in kanban_db.list_boards(include_archived=False):
-            slug = meta.get("slug") if isinstance(meta, dict) else None
-            if not isinstance(slug, str) or not slug:
-                continue
-            name = meta.get("name") if isinstance(meta.get("name"), str) and meta.get("name") else slug
-            path = meta.get("db_path") or kanban_db.kanban_db_path(board=slug)
-            found.append((slug, name, Path(path)))
-        return found
+        listed = kanban_db.list_boards(include_archived=False)
     except (ImportError, AttributeError) as exc:  # a Hermes without the board, or without boards
         logger.debug("conduit_push: chat Kanban tasks can't list boards: %s", exc)
         return []
+    found = []
+    for meta in listed:
+        slug = meta.get("slug") if isinstance(meta, dict) else None
+        if not isinstance(slug, str) or not slug:
+            continue
+        name = meta.get("name") if isinstance(meta.get("name"), str) and meta.get("name") else slug
+        try:
+            path = meta.get("db_path") or kanban_db.kanban_db_path(board=slug)
+        except AttributeError as exc:  # a Hermes that lists boards but can't name their files
+            logger.debug("conduit_push: chat Kanban tasks can't name board %s's file: %s", slug, exc)
+            continue
+        found.append((slug, name, Path(path)))
+    return found
 
 
 def _board_tasks(path: Path, ids: List[str]) -> Optional[List[Dict[str, Any]]]:
