@@ -215,3 +215,27 @@ def test_it_runs_in_the_profile_named(hermes, client, monkeypatch):
     assert client.put(f"{BASE}/media-models/image_gen?profile=second",
                       json={"model": "gpt-image-2-high"}).status_code == 200
     assert scoped == ["second"]
+
+
+def test_xais_video_backend_reads_only_the_sections_key(hermes, client):
+    CATALOGS["xai-video"] = ({"grok-imagine-video": {}, "grok-imagine-video-1.5": {}}, "grok-imagine-video")
+    hermes.tools._toolset_model_catalog = lambda section, plugin, cfg: copy.deepcopy(
+        CATALOGS["xai-video" if section == "video_gen" and plugin == "xai" else plugin])
+    hermes.file["video_gen"] = {"provider": "xai", "model": "grok-imagine-video",
+                                "xai": {"model": "an-old-pick"}}
+    assert client.get(f"{BASE}/media-models/video_gen").json()["current"] == "grok-imagine-video"
+    answer = client.put(f"{BASE}/media-models/video_gen", json={"model": "grok-imagine-video-1.5"})
+    assert answer.status_code == 200, answer.text
+    assert hermes.file["video_gen"]["model"] == "grok-imagine-video-1.5"
+    assert hermes.file["video_gen"]["xai"] == {"model": "an-old-pick"}, "A key it never reads is left as it was"
+
+
+def test_an_over_long_model_says_so(hermes, client):
+    answer = client.put(f"{BASE}/media-models/image_gen", json={"model": "x" * 201})
+    assert answer.status_code == 400 and "at most 200" in answer.json()["detail"]
+
+
+def test_a_backend_with_an_empty_catalog_refuses_a_pick_as_no_backend(hermes, client):
+    hermes.file["image_gen"] = {"provider": "krea"}
+    answer = client.put(f"{BASE}/media-models/image_gen", json={"model": "anything"})
+    assert answer.status_code == 409 and "image backend" in answer.json()["detail"]
