@@ -2890,7 +2890,15 @@ and the dashboard routes under one file lock, so they survive restarts:
   from `/calls/waiting` and sends the user's spoken answer to
   `/calls/waiting/answer` (or `answer_call` on its Watch grant, which
   approves or denies only with `answer_approvals: true`; on Local Live the
-  host takes the user's words itself, a plain yes or no for an approval). A question
+  host takes the user's words itself, a plain yes or no for an approval). A
+  live call the alert model takes in the chat has no way to submit an answer
+  as the call goes on, so its words only arrive once Conduit has saved it —
+  and they go in then too (0.198.3): the question the call read aloud takes
+  the user's first answer after the model asked it, words that only greet or
+  ask stay out, several questions read in one turn can't be told apart and
+  leave the rest to their cards, and a question the call never asked keeps
+  its card. The card that answered first still wins, and a wait gone by the
+  time the call ends changes nothing. A question
   takes `answer`, a choice's number or label, "the recommended one", or the
   user's own words, for `question` (its number in the batch; the first
   unanswered by default), and answers the next one with `next`. Every

@@ -11,13 +11,14 @@ import queue
 import re
 import sqlite3
 import threading
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
 from fastapi import HTTPException, Request, Response
 
-from . import chats, core, gemini_qwen_live, memory
+from . import chats, core, gemini_qwen_live, hermes_calls, memory
 
 logger = core.logger
 router = core.router
@@ -1026,6 +1027,138 @@ async def post_voice_summary(request: Request, response: Response, profile: Opti
     return {"ok": True, **(await _run_voice(profile, lambda: set_voice_summary(body), "summary"))}
 
 
+# --- Spoken answers from a saved call -----------------------------------------
+#
+# An alert call about a question (#449) briefs the live model with what
+# /calls/waiting reads, so the model asks the question aloud — but on the
+# iPhone the spoken answer never reaches Hermes while the call goes on: the
+# model has no way to submit it, and the words arrive here only once the call
+# has ended (the Watch answers live instead, through answer_call_waiting).
+# When those turns still find the question waiting, the spoken answers go in
+# as the Watch's would (CallStore.answer_waiting): the clarify loop is
+# already polling for them (clarify_loop._sleep_until_call_answers), so Hermes
+# unblocks with the user's own words instead of staying parked on the card
+# until they answer it again after hanging up.
+#
+# Only words that answer. A question pairs with the model turn that read it
+# aloud — naming one of its choices as written, or half of its lead words —
+# and takes the first run of user turns after that turn: a greeting before
+# the ask, words that ask, and whatever came later stay out. Questions read
+# in one turn can't be told apart after the fact, so only the first of them
+# takes the run; the rest, and any question the call never asked, keep their
+# card.
+VOICE_ANSWER_ASK_WORDS = frozenset({
+    "what", "why", "how", "which", "who", "when", "where", "is", "are", "does", "do", "can",
+    "could", "will", "would", "should", "explain", "tell",
+    "quoi", "comment", "pourquoi", "quand", "quel", "quelle", "quels", "quelles", "combien",
+})
+VOICE_ANSWER_GREETERS = frozenset({"allo", "salut", "bonjour", "coucou", "hello", "hey", "hi", "yo"})
+
+
+def _voice_fold(text: Any) -> str:
+    """``text`` as words compare: accents folded away, case too."""
+    if not isinstance(text, str):
+        return ""
+    folded = unicodedata.normalize("NFKD", text)
+    return "".join(char for char in folded if not unicodedata.combining(char)).casefold()
+
+
+def _voice_answer_words(text: Any) -> list:
+    return re.findall(r"[^\W_]+", _voice_fold(text))
+
+
+def _voice_answer_asks(text: str) -> bool:
+    """Words that ask for more before they answer: the Watch's asks
+    (watch_local_live._LOCAL_LIVE_ASKS, with French beside them), plus the
+    mark that ends a spoken question in any language."""
+    stripped = text.strip()
+    words = stripped.casefold().split()
+    first = words[0].strip(",.!?;:«»'\"()").split("'")[0] if words else ""
+    return stripped.endswith(("?", "？")) or first in VOICE_ANSWER_ASK_WORDS
+
+
+def _voice_answer_greets(text: str) -> bool:
+    """A whole turn that's only a greeting answers nothing."""
+    return " ".join(_voice_answer_words(text)) in VOICE_ANSWER_GREETERS
+
+
+def _voice_reads_question(model_text: str, question: Dict[str, Any]) -> bool:
+    """Whether a model turn read the waiting question aloud: it names one of
+    the question's choices as written, or half of its lead words (three
+    letters or more). A paraphrase that does neither didn't ask it."""
+    said = set(_voice_answer_words(model_text))
+    if not said:
+        return False
+    for choice in question.get("choices") or []:
+        wanted = _voice_answer_words(choice)[:8]
+        if wanted and all(word in said for word in wanted):
+            return True
+    lead = [word for word in _voice_answer_words(question.get("question")) if len(word) >= 3][:6]
+    return bool(lead) and sum(word in said for word in lead) >= max(1, (len(lead) + 1) // 2)
+
+
+def _voice_answer_run(messages: list, ask_at: int, stop_at: int) -> list:
+    """The answer words of the first run of user turns after the model asked
+    (``ask_at``, exclusive, up to ``stop_at``): a model turn after the words
+    began ends the run, and turns that only ask or greet stay out."""
+    words: list = []
+    for message in messages[ask_at + 1:stop_at]:
+        if message.get("role") != "user":
+            if words:
+                break
+            continue
+        text = " ".join(str(message.get("content") or "").split())
+        if text and not _voice_answer_asks(text) and not _voice_answer_greets(text):
+            words.append(text)
+    return words
+
+
+def _voice_spoken_answers(session_id: str, messages: list) -> int:
+    """A saved chat call's spoken answers, submitted to the question still
+    waiting in its chat: how many questions they answered. The turns are
+    already stored, so nothing here raises past its step guard; an answer
+    that raced the card finds the wait gone and changes nothing."""
+    try:
+        store = hermes_calls._calls_store().CallStore(core._calls_home())
+        waiting = store.waiting_for(session_id)
+    except Exception:  # noqa: BLE001 — the call's other end steps go on
+        logger.warning("Conduit voice: a call's spoken answers couldn't read what Hermes waits on", exc_info=True)
+        return 0
+    if not waiting or waiting.get("kind") != "question":
+        return 0
+    questions = waiting.get("questions") or []
+    open_numbers = [index for index, entry in enumerate(questions) if not entry.get("answered")]
+    if not open_numbers:
+        return 0
+    # Each open question's ask turn, in the batch's order: a question reads as
+    # asked by the first model turn past the last ask found, so several read
+    # in one turn leave the rest to their cards.
+    asks: Dict[int, int] = {}
+    previous = -1
+    for number in open_numbers:
+        found = next((at for at, message in enumerate(messages)
+                      if at > previous and message.get("role") == "assistant"
+                      and _voice_reads_question(str(message.get("content") or ""), questions[number])), None)
+        if found is None:
+            break  # the call never asked the rest; their cards stay
+        asks[number] = found
+        previous = found
+    answered = 0
+    for number, ask_at in asks.items():
+        stop_at = min((at for at in asks.values() if at > ask_at), default=len(messages))
+        words = _voice_answer_run(messages, ask_at, stop_at)
+        if not words:
+            continue
+        try:
+            result = store.answer_waiting(session_id, answer=" ".join(words), question=number + 1)
+        except Exception:  # noqa: BLE001 — later questions still get their words
+            logger.warning("Conduit voice: a call's spoken answer couldn't be submitted", exc_info=True)
+            continue
+        if result.get("status") == "answered":
+            answered += 1
+    return answered
+
+
 # --- Call end ------------------------------------------------------------------
 #
 # A live call never runs a Hermes turn, so Hermes never learns it is over: no
@@ -1169,12 +1302,19 @@ def _end_voice_call(session_id: str, engine: str, messages: list, chat_call: boo
     neither its session nor its memory session is ended."""
     hook = {"session_id": session_id, "platform": VOICE_END_PLATFORM, "reason": VOICE_END_HOOK_REASON}
     memory = ("memory write", lambda: _commit_voice_call_memory(session_id, messages, end_session=not chat_call))
-    steps = (memory,) if chat_call else (
-        ("on_session_end hook", lambda: _fire_voice_hook(
-            "on_session_end", completed=True, interrupted=False, model=engine, **hook)),
-        memory,
-        ("on_session_finalize hook", lambda: _fire_voice_hook("on_session_finalize", **hook)),
-    )
+    if chat_call:
+        # A call Hermes placed about this chat's question carries its spoken
+        # answers: they go in before the memory sync, so Hermes unblocks at
+        # once. A call that wasn't about a question finds nothing waiting and
+        # the step is a read.
+        steps = (("spoken answers", lambda: _voice_spoken_answers(session_id, messages)), memory)
+    else:
+        steps = (
+            ("on_session_end hook", lambda: _fire_voice_hook(
+                "on_session_end", completed=True, interrupted=False, model=engine, **hook)),
+            memory,
+            ("on_session_finalize hook", lambda: _fire_voice_hook("on_session_finalize", **hook)),
+        )
     for what, step in steps:
         try:
             step()

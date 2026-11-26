@@ -13,6 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.198.3 (2026-11-26)
+
+### Fixes
+
+- A live call about a question took the user's answer and lost it: the call
+  couldn't submit an answer the way the Apple Watch does, so the words only
+  reached Hermes as text on the card after hanging up — and Hermes stayed
+  parked until they were answered there again. The words the call heard now
+  go in once it ends: the question the call read aloud takes the user's
+  answer after the model asked it, a question the call never asked keeps its
+  card, and the card that answered first still wins.
+
 ## 0.198.2 (2026-11-26)
 
 ### Fixes
