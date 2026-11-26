@@ -130,6 +130,25 @@ def test_the_hooks_note_each_step(monkeypatch, tmp_path):
     assert steps.read(tmp_path) == {}
 
 
+@pytest.mark.parametrize("approval_session_id", ["s-1", None])
+def test_an_approval_waits_then_thinks_again(monkeypatch, tmp_path, approval_session_id):
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(plugin, "enqueue", lambda event: True)
+    monkeypatch.setattr(plugin.calls, "outcome_note", lambda session_id: None)
+    monkeypatch.setattr(plugin.calls, "alert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(plugin.calls, "cancel_alerts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(plugin, "_titled", lambda prefix, session_id: prefix)
+    plugin._pre_llm_call(session_id="s-1", turn_id="t-1", conversation_history=[])
+    # Hermes names the chat by its session key when it gives no session id.
+    payload = {"session_key": "s-1", "description": "Run command?"}
+    if approval_session_id is not None:
+        payload["session_id"] = approval_session_id
+    plugin._pre_approval_request(**payload)
+    assert steps.read(tmp_path)["s-1"]["phase"] == "approval"
+    plugin._post_approval_response(**payload)
+    assert steps.read(tmp_path)["s-1"]["phase"] == "thinking"
+
+
 def test_a_broken_store_never_breaks_a_hook(monkeypatch, tmp_path):
     monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path / "missing")
     monkeypatch.setattr(plugin, "enqueue", lambda event: True)

@@ -60,8 +60,9 @@ def started(home: Any, session_id: str, *, now: float | None = None) -> None:
         steps.pop(session_id, None)
         steps[session_id] = {"phase": "thinking", "tool": None, "since": time.time() if now is None else now}
         while len(steps) > MAX_SESSIONS:
-            _home_of.pop(next(iter(steps)), None)
-            steps.pop(next(iter(steps)))
+            oldest = next(iter(steps))
+            steps.pop(oldest)
+            _home_of.pop(oldest, None)
         homes = {key} | ({old} if old is not None and old != key else set())
     for name in homes:
         _publish(name)
