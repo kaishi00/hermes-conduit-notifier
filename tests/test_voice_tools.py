@@ -182,7 +182,6 @@ def test_a_new_key_for_the_same_device_id_reads_none_of_the_old_data(client):
     _share(client, intruder)
     assert _call(client, intruder, {"action": "daily", "metrics": ["steps"]})["error"] == "nothing_shared"
     status = client.get(f"{BASE}/health/status", params={"device_id": DEVICE}).json()["device"]
-    assert status["rows"] == {}
     assert not status.get("categories"), "what the old key said it shared goes with its data"
     # The real phone gets 409 on its next sync, sets up a key and sends it all again.
     assert client.post(f"{BASE}/health/ingest", json=owner.seal(_batch("batch-0002"))).status_code == 409

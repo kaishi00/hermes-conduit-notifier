@@ -1604,8 +1604,18 @@ def test_a_profile_left_out_by_name_is_not_read(live, db, tmp_path, request, cap
         assert refused.value.data["field"] in ("exclude_profile", "include_profile")
     live.store.set("report_excluded", [f"p{n}" for n in range(control.EXCLUDED_LIMIT)])
     with pytest.raises(control.Refused):
-        control.update(live.store, {"exclude_profile": "one-more"}, tmp_path)
+        control.update(live.store, {"exclude_profile": "one-more", "nudge": "eager"}, tmp_path)
+    assert live.store.get("nudge") != "eager", "a refused pick leaves the rest of the request unwritten"
     live.store.set("report_excluded", [])
+    # A pick that loses to other writers every time is refused, never dropped
+    # without a word, and nothing else in the request is written (issue 1082).
+    real_swap = live.store.swap
+    monkeypatch.setattr(live.store, "swap", lambda key, old, new: False)
+    with pytest.raises(control.Refused) as refused:
+        control.update(live.store, {"exclude_profile": "nahida", "nudge": "eager"}, tmp_path)
+    assert refused.value.code == "changed" and live.store.get("nudge") != "eager"
+    monkeypatch.setattr(live.store, "swap", real_swap)
+    assert live.store.excluded_profiles() == []
     # The CLI's two words for it.
     live.store.set("report_profiles", "all")
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)

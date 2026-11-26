@@ -32,7 +32,8 @@ class Refused(Exception):
     - ``no_home_chat``: Pulse has no home chat (``problem``).
     - ``unreadable``: Hermes's chats couldn't be read (``error``).
     - ``not_running`` / ``nothing_to_cancel``: no backfill to stop or cancel.
-    - ``changed``: the backfill changed meanwhile; try again.
+    - ``changed``: the backfill, or the list of profiles a setting picks
+      one from, changed meanwhile; try again.
     - ``invalid``: a setting's value isn't one Pulse takes (``field``).
     - A suggestion's (pulse_proposals.ProposalError): ``already_added``,
       ``dismissed``, ``expired``, ``not_found``, ``not_added``,
@@ -283,10 +284,6 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
                 isinstance(name, str) and name and len(name) <= PROFILE_NAME_LIMIT and _encodes(name)):
             raise Refused("invalid", field=field)
         toggle = (field, name)
-        toggled = _toggled(pulse_store.excluded_profiles(), field, name)
-        if len(toggled) > EXCLUDED_LIMIT:
-            raise Refused("invalid", field=field)
-        changes["report_excluded"] = toggled
     if "report_times" in body:
         times = body["report_times"]
         parsed = pulse.report.parse_times(",".join(times)) if isinstance(times, list) and 0 < len(times) <= 12 \
@@ -343,18 +340,21 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
         if night is None:
             raise Refused("invalid", field="night")
         changes[pulse_hours.SETTING] = night
+    if toggle is not None:
+        # Changed against the list as it is when written, so two devices
+        # picking at once both keep their pick. First, so a refusal here
+        # leaves the request's other settings unwritten too.
+        for _ in range(8):
+            raw = pulse_store.get("report_excluded")
+            value = _toggled(pulse_store.excluded_profiles(), *toggle)
+            if len(value) > EXCLUDED_LIMIT:
+                raise Refused("invalid", field=toggle[0])
+            if pulse_store.swap("report_excluded", raw, value):
+                break
+        else:
+            # Lost to other writers every time: the pick is never dropped without a word.
+            raise Refused("changed")
     for key, value in changes.items():
-        if key == "report_excluded" and toggle is not None:
-            # Changed against the list as it is when written, so two devices
-            # picking at once both keep their pick.
-            for _ in range(8):
-                raw = pulse_store.get("report_excluded")
-                value = _toggled(pulse_store.excluded_profiles(), *toggle)
-                if len(value) > EXCLUDED_LIMIT:
-                    raise Refused("invalid", field=toggle[0])
-                if pulse_store.swap("report_excluded", raw, value):
-                    break
-            continue
         pulse_store.set(key, value)
     if changes.get("inbox_deadlines") is False:
         pulse_memory.stop_inbox(pulse_store)  # off forgets what it kept from the inbox

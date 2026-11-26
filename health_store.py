@@ -13,7 +13,9 @@ What arrives:
   each metric's window whole, so a window replaces what was stored for it.
 * events: things with their own HealthKit id: workouts, sleep stage
   segments, and raw readings when the user turns on detailed readings.
-  Deleted ids become tombstones, so a late re-send can't bring them back.
+  Deleted ids become tombstones, so a late re-send can't bring them back;
+  a tombstone goes after TOMBSTONE_KEPT_S, long past any batch still on its
+  way (a new key starts the device over, tombstones with it).
 
 Every ingest body is sealed end to end, on top of whatever TLS the dashboard
 has, so a host reached over plain http on a LAN still never carries health
@@ -72,6 +74,10 @@ SENT_KEY = "sent:"
 # How far past this host's clock that time is kept (phone_store holds a phone's clock to the same).
 # Read only through _sent and _synced_devices, which hold an older row to last_seen as well.
 MAX_CLOCK_SKEW_S = 5 * 60
+# How long a deleted event's id is kept to turn away a late re-send of it
+# (notifier issue 1077). The phone sends only what HealthKit still has, so
+# only a batch made before the deletion could carry it again.
+TOMBSTONE_KEPT_S = 30 * 86400
 
 SALT = b"conduit-health-v1"
 INFO_INGEST = b"conduit-health-v1 ingest device-to-host"
@@ -542,13 +548,10 @@ class HealthStore:
             if isinstance(device_id, str) and _DEVICE_ID.match(device_id):
                 row = db.execute("SELECT kid, last_seen, categories FROM devices WHERE id=?", (device_id,)).fetchone()
                 if row is not None:
-                    counts = {metric: count for metric, count in db.execute(
-                        "SELECT metric, COUNT(*) FROM buckets WHERE device=? GROUP BY metric", (device_id,))}
-                    for metric, count in db.execute(
-                            "SELECT metric, COUNT(*) FROM events WHERE device=? GROUP BY metric", (device_id,)):
-                        counts[metric] = counts.get(metric, 0) + count
+                    # No row counts: the phone asks on every pass, and counting the device's whole
+                    # history there grew with every day it kept (notifier issue 1077).
                     answer["device"] = {"kid": row[0], "last_sync": _iso_utc(row[1]) if row[1] else None,
-                                        "categories": json.loads(row[2] or "[]"), "rows": counts}
+                                        "categories": json.loads(row[2] or "[]")}
             return answer
 
     def wipe(self, device_id: Any = None) -> dict[str, Any]:
@@ -1005,6 +1008,7 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     for event_id in deleted:
         removed += db.execute("DELETE FROM events WHERE device=? AND id=?", (device_id, event_id)).rowcount
         db.execute("INSERT OR IGNORE INTO tombstones VALUES(?,?,?)", (device_id, event_id, now))
+    db.execute("DELETE FROM tombstones WHERE device=? AND deleted_at<?", (device_id, now - TOMBSTONE_KEPT_S))
 
     if other_profiles is True:
         db.execute("INSERT OR REPLACE INTO meta VALUES(?, '1')", (OTHER_PROFILES_KEY + device_id,))

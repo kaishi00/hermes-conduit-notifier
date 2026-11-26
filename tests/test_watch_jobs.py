@@ -1832,6 +1832,40 @@ def test_a_request_hermes_did_not_take_leaves_its_lines_unsent():
     assert server.methods("prompt.submit")[-1]["text"].endswith("\n\n" + second), "its lines go whole on the retry"
 
 
+@pytest.mark.parametrize("heard", [True, False])
+def test_a_request_whose_answer_was_lost_counts_its_lines_sent_once_its_turn_moved(heard):
+    """Issue 1079: a submit whose answer never came may still have gone in.
+    A frame of its turn says Hermes took it, its context lines with it, so
+    later requests leave them out, as the phone's do; with no sign of it,
+    they stay unsent."""
+    grant = make_jobs()
+    server = grant.jobs.server
+    first = "check why the deploy failed last night" + WATCH_CONTEXT + "User: hey there, are you with me now"
+    assert start_joining(grant, first)["status"] == "started"
+    server.emit("rt-1", "message.complete", {"text": "It ran out of disk.", "status": "complete"})
+    kept = set(grant.jobs.call_chat_context)
+
+    news = "Assistant: Hermes says it ran out of disk."
+    second = "then clear the old builds" + WATCH_CONTEXT + news
+    original = server.dispatch
+
+    def lost(req, transport=None):
+        if req["method"] != "prompt.submit":
+            return original(req, transport)
+        original(req, transport)  # Hermes takes it...
+        if heard:
+            server.emit(req["params"]["session_id"], "message.start", {})
+        raise api.watch_jobs.WatchJobError("prompt.submit timed out")  # ...but its answer is lost
+
+    server.dispatch = lost
+    start_joining(grant, second)
+    server.dispatch = original
+    if heard:
+        assert news in grant.jobs.call_chat_context and kept < grant.jobs.call_chat_context
+    else:
+        assert grant.jobs.call_chat_context == kept
+
+
 def test_context_lines_left_out_are_whole_speaker_lines_and_never_a_follow_ups_words():
     trim = api.watch_jobs.watch_request_without_context_sent
     long = "Assistant: Here is the first part of a longer answer"
