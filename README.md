@@ -185,7 +185,7 @@ The plugin currently emits notifications for:
 
 A turn in a session Hermes doesn't list as a conversation sends no reply, failure or background-task notification and shows no Lock Screen progress (plugin 0.153.7+): a script's `hermes chat --source tool`, a one-shot `hermes chat -q` or `-z`, and a Kanban worker. Their answers go to whoever ran them, and Conduit's chat lists hide those sessions. An approval or question from one still notifies, and so do a call you asked for and a notification the run wrote with `conduit_notify`.
 
-A fork of a chat never notifies as the chat (plugin 0.119.1+): Conduit's predictions (`/predict`), a step summary's `/btw` and the self-improvement review each answer from a fork that runs under the chat's session id, and on a Hermes that runs plugin hooks for forks (0.21 among them) the plugin keeps the fork's answer from going out as a reply and off the chat's Live Activity. An exact `[Silent]` assistant response does not emit a completion notification. Reply and task bodies are sent as plain text: Markdown fences, emphasis, headings, link targets and table rules are dropped (plugin 0.35+). No notification shows a file's path on the host (plugin 0.71.2+): a `MEDIA:` tag in a reply, a question, an approval, a call or a phone change, and in the answer card or call screen that comes with it, reads as 📎 and the file's name, or its type (`📎 PPTX`) when the name is only a hash, and `[[audio_as_voice]]` and `[[as_document]]` are dropped. A Hermes Desktop directive reads the same way (plugin 0.120.4+): a page shown with `::preview{file="…"}` as its file, and a Desktop plugin's card, such as hermes-rich-ui's `::richui{id="…"}`, as `🗂 hermes-rich-ui card`. Code in a reply's fenced block stays as written.
+A fork of a chat never notifies as the chat (plugin 0.119.1+): Conduit's predictions (`/predict`), a step summary's `/btw` and the self-improvement review each answer from a fork that runs under the chat's session id, and on a Hermes that runs plugin hooks for forks (0.21 among them) the plugin keeps the fork's answer from going out as a reply and off the chat's Live Activity. An exact `[Silent]` assistant response does not emit a completion notification. Reply and task bodies are sent as plain text: Markdown fences, emphasis, headings, link targets and table rules are dropped (plugin 0.35+). No notification shows a file's path on the host (plugin 0.71.2+): a `MEDIA:` tag in a reply, a question, an approval, a call or a phone change, and in the answer card or call screen that comes with it, reads as 📎 and the file's name, or its type (`📎 PPTX`) when the name is only a hash, and `[[audio_as_voice]]` and `[[as_document]]` are dropped. A page the reply writes in HTML (a line starting with `<div>`, `<table>`, `<svg>` and the like, which Conduit draws in a page card) reads as `🗂 Page`, and the reply's other tags are dropped. A Hermes Desktop directive reads the same way (plugin 0.120.4+): a page shown with `::preview{file="…"}` as its file, and a Desktop plugin's card, such as hermes-rich-ui's `::richui{id="…"}`, as `🗂 hermes-rich-ui card`. Code in a reply's fenced block stays as written.
 
 ### Cron runs (plugin 0.33+)
 
@@ -3351,7 +3351,10 @@ the schema's `board` section.
   hard to read without it, never for an explanation, advice or a short
   answer, a second one in a reply only when it shows something the first
   doesn't, the user's own wishes about cards first, and
-  never data as an HTML `::preview` page.
+  never data as an HTML `::preview` page. A Conduit that draws the HTML a
+  reply writes (`reply-html` in its exchange: a page in a card, and
+  `<details>`, `<mark>`, `<kbd>` and colored text) hears it may write HTML,
+  but only for a visual no card covers, never for data a card can show.
 - **Older Conduits.** A Conduit says `board-cards` in its exchange when it
   draws boards. Until every Conduit that draws cards does, the tool leaves
   the new kinds out, keeps the first four cards, drops `layout` and `next`,

@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.199.0 (2026-11-26)
+
+### New and improved
+
+- Hermes can write HTML in a reply for a visual no card covers, and Conduit draws it: a page in a card, and folded details, highlights, keys and colored words in the text. A notification says there's a page rather than showing its code.
+
 ## 0.198.2 (2026-11-26)
 
 ### Fixes

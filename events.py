@@ -10,7 +10,6 @@ import uuid
 from typing import Any
 
 
-
 def _manifest_version() -> str:
     """The version in plugin.yaml beside this file, the one place a bump
     edits (with dashboard/manifest.json and CHANGELOG.md). Read the way the
@@ -858,6 +857,135 @@ def media_free(value: str) -> str:
     return _MEDIA_TAG.sub(_attachment, _MEDIA_DIRECTIVE.sub("", _desktop_free(value)))
 
 
+# HTML a reply writes, as Conduit reads it (the app's ReplyHTML, the desktop's
+# htmlInReplies): a line that starts with a page's tag (<div, <table, <svg,
+# <style, <!doctype html…) outside a code fence starts a page, which runs to
+# where its elements close and takes in the page tags after it; Conduit draws
+# it in a sandboxed page card. A few tags draw as text (<b>, <mark>, <kbd>,
+# <details>…). A notification says a page is there and shows the words
+# without tags (Eric, 2026-11-26).
+_PAGE_TAGS = frozenset((
+    "html head body style script div table svg canvas section article figure header footer main nav aside form "
+    "img picture video audio iframe center h1 h2 h3 h4 h5 h6 p ul ol dl blockquote pre button input select textarea "
+    "link meta template").split())
+_VOID = frozenset("area base br col embed hr img input link meta source track wbr".split())
+_RAW_TEXT = frozenset(("script", "style", "textarea", "title"))
+
+_PAGE_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+_PAGE_START = re.compile(r"^ {0,3}(?:<!doctype\s+html\b|<([a-zA-Z][a-zA-Z0-9]*)(?=[\s/>]|$))", re.IGNORECASE)
+_TOKEN = re.compile(
+    r"<!--[\s\S]*?(?:-->|$)|<![^>]*>?|</([a-zA-Z][a-zA-Z0-9-]*)\s*>"
+    r"|<([a-zA-Z][a-zA-Z0-9-]*)((?:\s+[^\s\"'>/=]+(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))?)*)\s*(/?)>")
+_PARTIAL_TAG = re.compile(r"^ {0,3}<[!a-zA-Z]*$")
+# The tags Conduit draws; any other stays text there, so it stays in a push too.
+_HTML_TAG = re.compile(r"""</?(?:b|strong|i|em|u|ins|s|del|strike|mark|kbd|sub|sup|span|font|details|summary)"""
+                       r"""(?:\s(?:[^<>"']|"[^"]*"|'[^']*')*)?/?>""", re.IGNORECASE)
+_BREAK = re.compile(r"<br\s*/?>", re.IGNORECASE)
+
+_PAGE_SAID = "🗂 Page"
+
+
+def starts_page(line: str) -> bool:
+    """Whether ``line`` starts a page."""
+    match = _PAGE_START.match(line)
+    return bool(match) and (match.group(1) is None or match.group(1).lower() in _PAGE_TAGS)
+
+
+def _closes_at(text: str) -> int:
+    """The index just past the tag that leaves no element open, or -1 while
+    one is still open. A closing tag closes its element and any left open
+    inside it, as a browser does."""
+    opened: list[str] = []
+    lower = text.lower()
+    at = 0
+    while True:
+        match = _TOKEN.search(text, at)
+        if not match:
+            return -1
+        token = match.group(0)
+        at = match.end()
+        if token.startswith("<!--"):
+            if not token.endswith("-->"):
+                return -1
+        elif match.group(1):
+            name = match.group(1).lower()
+            if name in opened:
+                del opened[len(opened) - 1 - opened[::-1].index(name):]
+        elif match.group(2):
+            name = match.group(2).lower()
+            if name not in _VOID and not match.group(4):
+                if name in _RAW_TEXT:
+                    end = lower.find(f"</{name}", at)
+                    close = -1 if end < 0 else text.find(">", end)
+                    if close < 0:
+                        return -1
+                    at = close + 1
+                else:
+                    opened.append(name)
+        if not opened and not token.startswith("<!"):
+            return at
+
+
+def page_end(lines: list[str], start: int) -> tuple[int, bool]:
+    """The line after the page starting at ``start``, and whether it is
+    complete (closed, with something other than a page after it)."""
+    line = start
+    while True:
+        text = "\n".join(lines[line:])
+        at = _closes_at(text)
+        if at < 0:
+            return len(lines), False
+        end = line + text[:at].count("\n") + 1
+        following = end
+        while following < len(lines) and not lines[following].strip():
+            following += 1
+        if following < len(lines) and starts_page(lines[following]):
+            line = following
+            continue
+        if following >= len(lines):
+            return end, False
+        if following == len(lines) - 1 and _PARTIAL_TAG.match(lines[following]):
+            return end, False
+        return end, True
+
+
+def pages_said(text: str, said: str = _PAGE_SAID) -> str:
+    """``text`` with each page outside a code fence as ``said``."""
+    if "<" not in text:
+        return text
+    lines = text.split("\n")
+    out: list[str] = []
+    fence: str | None = None
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        found = _PAGE_FENCE.match(line)
+        if fence:
+            if found and found.group(1)[0] == fence[0] and len(found.group(1)) >= len(fence):
+                fence = None
+        elif found:
+            fence = found.group(1)
+        elif starts_page(line):
+            index, _ = page_end(lines, index)
+            out.append(said)
+            continue
+        out.append(line)
+        index += 1
+    return "\n".join(out)
+
+
+_TAG_CODE_SPAN = re.compile(r"(`[^`\n]*`)")
+
+
+def without_tags(line: str) -> str:
+    """A line's words without the tags Conduit draws, ``<br>`` a space; a
+    code span keeps its tags, they are what it shows."""
+    if "<" not in line:
+        return line
+    parts = _TAG_CODE_SPAN.split(line)
+    return "".join(part if index % 2 else _HTML_TAG.sub("", _BREAK.sub(" ", part)) for index, part in enumerate(parts))
+
+
 class _Plain(str):
     """Text plain_text made: its MEDIA tags are read, fenced code kept."""
 
@@ -877,13 +1005,15 @@ def _shown(value: Any) -> Any:
 def plain_text(value: Any) -> str:
     """A Markdown reply as a notification shows it: the words without the
     markup (fences, emphasis, headings, link targets, table rules), and a
-    file Hermes attached as its name, not its path. Code inside a fence
+    file Hermes attached as its name, not its path, and a page the reply
+    wrote in HTML as "🗂 Page", its other tags gone. Code inside a fence
     stays, it is the content."""
     if not isinstance(value, str):
         return ""
     lines: list[str] = []
     fenced = False
-    for line in value.splitlines():
+    # A page the reply wrote is said to be one, and its tags go (pages_said).
+    for line in pages_said(value).splitlines():
         if _FENCE.match(line):
             fenced = not fenced
             continue
@@ -900,7 +1030,7 @@ def plain_text(value: Any) -> str:
         line = _LINK.sub(r"\1", _IMAGE.sub(r"\1", _WORK_LINK_DESKTOP_REF.sub(r"\1", line)))
         line = _STRONG.sub(r"\2", line)
         line = _STRIKE.sub(r"\1", _UNDERSCORE_EMPHASIS.sub(r"\1", _EMPHASIS.sub(r"\1", line)))
-        lines.append(line.replace("`", ""))
+        lines.append(without_tags(line).replace("`", ""))
     return _Plain("\n".join(lines).strip())
 
 
