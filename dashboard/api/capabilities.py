@@ -277,6 +277,9 @@ ROUTE_CAPABILITIES = (
     # /terminals and its socket: shells on the host in a Folder root, kept
     # running while nothing shows them, for the desktop's terminal drawer.
     "terminals",
+    # /workspace/preview/{port}/...: a page a dev server on this host serves,
+    # wrapped, for the desktop's Browser tabs; follows the terminals switch.
+    "workspace-preview",
     "local-live",
     # GET/PUT /rooms/choices and /rooms/defaults: an agent's choices in rooms
     # with other people's agents, enforced on this host (Linked Rooms).

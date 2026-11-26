@@ -244,7 +244,7 @@ def test_every_route_is_on_cores_router_behind_its_dependency():
     for name in MODULES:
         source = _source(name)
         assert name == "core" or "APIRouter(" not in source, f"{name}.py makes a router of its own"
-        decorators += len(re.findall(r"^@router\.(?:get|post|put|patch|delete|websocket)\(", source, re.M))
+        decorators += len(re.findall(r"^@router\.(?:get|post|put|patch|delete|websocket|api_route)\(", source, re.M))
     assert len(api.router.routes) == decorators
     for route in api.router.routes:
         assert api.core._note_conduit_request in [d.dependency for d in route.dependencies], route.path
@@ -255,12 +255,19 @@ def _segment_pattern(segment):
                    else re.escape(part) for part in re.split(r"(\{[^}]+\})", segment))
 
 
-def _paths_overlap(first, second):
-    a, b = first.strip("/").split("/"), second.strip("/").split("/")
-    if ":path}" in first + second:
+def _segments_overlap(a, b):
+    # A {name:path} segment takes the rest of the path, however many segments that is.
+    if (a and ":path}" in a[0]) or (b and ":path}" in b[0]):
         return True
-    return len(a) == len(b) and all(
-        x == y or re.fullmatch(_segment_pattern(x), y) or re.fullmatch(_segment_pattern(y), x) for x, y in zip(a, b))
+    if not a or not b:
+        return not a and not b
+    x, y = a[0], b[0]
+    same = x == y or re.fullmatch(_segment_pattern(x), y) or re.fullmatch(_segment_pattern(y), x)
+    return bool(same) and _segments_overlap(a[1:], b[1:])
+
+
+def _paths_overlap(first, second):
+    return _segments_overlap(first.strip("/").split("/"), second.strip("/").split("/"))
 
 
 def test_no_two_routes_answer_the_same_request():

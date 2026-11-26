@@ -901,6 +901,7 @@ routes:
   - GET /workspace/git/status
   - POST /workspace/git/{action}
   - GET /workspace/list
+  - ANY /workspace/preview/{port}/{path:path}
   - GET /workspace/recent
   - GET /workspace/resolve
   - GET /workspace/search
