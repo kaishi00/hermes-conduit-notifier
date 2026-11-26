@@ -104,6 +104,8 @@ def register(ctx: Any) -> None:
     client.start()
     calls.start()
     live_activity.reporter.start()
+    # A chat's step follows its turn through a mid-turn compaction.
+    live_steps.lineage = live_activity.compacted_from
     # Pulse (designs/proactivity.md): off unless turned on, and then only
     # the gateway process sends anything.
     pulse.register(ctx)

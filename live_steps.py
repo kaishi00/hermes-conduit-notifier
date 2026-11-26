@@ -29,7 +29,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 FILE_NAME = "conduit-live-steps.json"
 # A file this old is from a gateway that stopped: nothing in it is running.
@@ -44,6 +44,61 @@ _steps: dict[str, dict[str, dict[str, Any]]] = {}
 _home_of: dict[str, str] = {}
 # What each home's file says now, so an unchanged step writes nothing.
 _written: dict[str, str] = {}
+
+# Which noted turn a session id continues through compactions: the noted id,
+# False when none, None when it can't tell yet (live_activity.compacted_from,
+# set by the plugin). A compaction mid-turn gives the turn a new session id,
+# and its step moves to that id, the one the live registry then lists.
+lineage: Callable[[str, set[str]], str | bool | None] | None = None
+# Ids that continue no noted turn (a session's lineage never changes), and
+# ids the store couldn't place yet -> when to look again.
+MAX_LINEAGE_IDS = 1024
+UNSETTLED_RETRY_S = 30.0
+_not_moved: set[str] = set()
+_unsettled: dict[str, float] = {}
+
+
+def _moved(session_id: str, recheck: bool = False) -> str | None:
+    """The home of the noted turn ``session_id`` continues through a compaction,
+    with the turn's step moved to ``session_id``; None when it continues none.
+    ``recheck`` asks the store even inside the retry wait: a turn's end has no
+    later hook to put it right."""
+    with _lock:
+        if session_id in _home_of or session_id in _not_moved or not _home_of:
+            return None
+        if not recheck and time.monotonic() < _unsettled.get(session_id, 0.0):
+            return None
+        running = set(_home_of)
+        find = lineage
+    if find is None:
+        return None
+    try:
+        found = find(session_id, running)
+    except Exception:  # noqa: BLE001 — never into the turn
+        found = None  # a locked or broken store: asked again later, not on every hook
+    with _lock:
+        if found is False:
+            _unsettled.pop(session_id, None)
+            if len(_not_moved) >= MAX_LINEAGE_IDS:
+                _not_moved.clear()
+            _not_moved.add(session_id)
+            return None
+        if not isinstance(found, str) or not found:
+            if len(_unsettled) >= MAX_LINEAGE_IDS:
+                _unsettled.pop(next(iter(_unsettled)))
+            _unsettled[session_id] = time.monotonic() + UNSETTLED_RETRY_S
+            return None
+        key = _home_of.get(found)
+        if key is None or session_id in _home_of:
+            return None
+        steps = _steps.get(key, {})
+        entry = steps.pop(found, None)
+        _home_of.pop(found, None)
+        if entry is None:
+            return None
+        steps[session_id] = entry
+        _home_of[session_id] = key
+        return key
 
 
 def started(home: Any, session_id: str, *, now: float | None = None) -> None:
@@ -73,6 +128,7 @@ def step(session_id: str, phase: str, tool: str | None = None, *, now: float | N
     A session with no turn noted here (a fork, a delegated child) is left out."""
     if not session_id or phase not in PHASES:
         return
+    moved = _moved(session_id)
     with _lock:
         key = _home_of.get(session_id)
         entry = _steps.get(key or "", {}).get(session_id)
@@ -80,8 +136,11 @@ def step(session_id: str, phase: str, tool: str | None = None, *, now: float | N
             return
         tool = tool if phase == "tool" else None
         if entry["phase"] == phase and entry["tool"] == tool:
-            return
-        entry.update(phase=phase, tool=tool, since=time.time() if now is None else now)
+            if moved is None:
+                return
+        else:
+            entry.update(phase=phase, tool=tool, since=time.time() if now is None else now)
+    # Outside the lock: _publish takes it. A step moved to its compacted id is published even when unchanged.
     _publish(key)
 
 
@@ -89,6 +148,7 @@ def ended(session_id: str) -> None:
     """The turn of ``session_id`` is over, however it ended."""
     if not session_id:
         return
+    _moved(session_id, recheck=True)
     with _lock:
         key = _home_of.pop(session_id, None)
         if key is None or _steps.get(key, {}).pop(session_id, None) is None:
@@ -102,6 +162,8 @@ def forget() -> None:
         _steps.clear()
         _home_of.clear()
         _written.clear()
+        _not_moved.clear()
+        _unsettled.clear()
 
 
 def _publish(key: str | None) -> None:
