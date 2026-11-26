@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.202.0 (2026-11-26)
+
+### New and improved
+
+- Conduit for desktop can show a page a dev server on your Hermes host serves, such as localhost:5173, in the workbench's Browser tabs. It follows the same switch as terminals.
+
 ## 0.201.0 (2026-11-26)
 
 ### New and improved

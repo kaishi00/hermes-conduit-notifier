@@ -50,6 +50,7 @@ MODULES = (
     "workspace",
     "source_control",
     "terminals",
+    "workspace_preview",
     "workstreams",
     "waiting",
     "live_steps",

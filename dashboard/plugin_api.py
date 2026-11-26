@@ -65,6 +65,8 @@ they run:
                           coding workspace's Changes view
     terminals             Terminals: shells on the Hermes host in a chat's
                           folder, for the coding workspace
+    workspace_preview     Pages from the host: a dev server on the Hermes
+                          host, for the coding workspace's Browser tabs
     workstreams           Bot workstreams: the Work panel, and Reply, Stop,
                           Continue and Check first on a workstream, and
                           the bot's work settings (Edit Bot > Work)

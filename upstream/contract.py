@@ -35,7 +35,7 @@ HERMES_TOP = frozenset({
 # Not plugin code: tests, dev probes and scripts, and the relay and mailbox (Node).
 SKIP_DIRS = frozenset({".git", "tests", "probes", "scripts", "upstream", "relay", "mailbox", "node_modules",
                        "__pycache__"})
-ROUTE = re.compile(r"""^\s*@router\.(get|post|put|patch|delete|websocket)\(\s*["']([^"']+)["']""", re.M)
+ROUTE = re.compile(r"""^\s*@router\.(get|post|put|patch|delete|websocket|api_route)\(\s*["']([^"']+)["']""", re.M)
 
 
 def plugin_sources() -> List[Path]:
@@ -84,7 +84,9 @@ def hermes_imports() -> Dict[str, Dict[str, Set[str]]]:
 def plugin_routes() -> List[str]:
     # plugin_api.py loads them from dashboard/api/, one module per feature.
     text = "".join(p.read_text() for p in sorted((ROOT / "dashboard").rglob("*.py")))
-    return sorted({f"{'WS' if m.group(1) == 'websocket' else m.group(1).upper()} {m.group(2)}"
+    # An api_route answers every method it lists: ANY.
+    verb = {"websocket": "WS", "api_route": "ANY"}
+    return sorted({f"{verb.get(m.group(1), m.group(1).upper())} {m.group(2)}"
                    for m in ROUTE.finditer(text)}, key=lambda r: (r.split(" ", 1)[1], r))
 
 
