@@ -4,6 +4,7 @@ import base64
 import importlib.util
 import json
 import os
+import re
 import pathlib
 import sys
 import time
@@ -87,7 +88,8 @@ def test_ctrl_c_stops_the_running_command_not_the_shell(host, tmp_path):
         return "back-5" in output(terminal)
 
     until(interrupted)
-    assert "slept" not in output(terminal)
+    # The typed line echoes "echo slept"; only a line of its own would mean sleep finished.
+    assert not re.search(r"(^|\n)slept\r?\n", output(terminal))
     assert terminal.exit_code is None
 
 
