@@ -145,6 +145,10 @@ WATCH_AUDIO_MAX_QUEUED_EVENT_BYTES = 1024 * 1024
 # Audio a GPT-Live helper sends before "started" is out, held until it is.
 WATCH_AUDIO_MAX_HELD = 200
 WATCH_AUDIO_AIORTC = "aiortc==1.15.0"
+# aiortc and every package it needs, pinned with hashes for every platform:
+# prepare installs from it with --require-hashes, so nothing it pulls can
+# change under the pin (notifier issue 156). Regenerate it with the pin.
+WATCH_AUDIO_LOCK = os.path.join(core._dashboard_dir(), "watch_audio_requirements.txt")
 WATCH_AUDIO_ENV_VAR = "CONDUIT_WATCH_AUDIO_ENV"
 # Set to "off" on a host whose admin manages packages: prepare never runs pip
 # or uv, and only a Python that already has aiortc and av is used (notifier
@@ -473,6 +477,9 @@ class _WatchAudioRuntime:
         return str(done.stdout or "")
 
     def build(self) -> None:
+        lock = WATCH_AUDIO_LOCK
+        if not os.path.isfile(lock):
+            raise _RuntimeBuildFailed("This plugin install is missing watch_audio_requirements.txt; update the plugin")
         env_dir = self._env_dir()
         python = _env_python(env_dir)
         if os.path.isdir(env_dir):
@@ -485,7 +492,8 @@ class _WatchAudioRuntime:
         try:
             self._step([self._base_python, "-m", "venv", env_dir], WATCH_AUDIO_VENV_TIMEOUT_S, "Making the environment")
             self._step([python, "-I", "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
-                        "--no-warn-script-location", WATCH_AUDIO_AIORTC], WATCH_AUDIO_PIP_TIMEOUT_S, "Installing aiortc")
+                        "--no-warn-script-location", "--require-hashes", "-r", lock], WATCH_AUDIO_PIP_TIMEOUT_S,
+                       "Installing aiortc")
         except _RuntimeBuildFailed as first:
             # A Python without venv or pip (a distribution's own, say): uv
             # brings both, when the host has it.
@@ -494,8 +502,8 @@ class _WatchAudioRuntime:
             shutil.rmtree(env_dir, ignore_errors=True)
             self._step([uv, "venv", "--python", self._base_python, env_dir], WATCH_AUDIO_VENV_TIMEOUT_S,
                        "Making the environment with uv")
-            self._step([uv, "pip", "install", "--python", python, WATCH_AUDIO_AIORTC], WATCH_AUDIO_PIP_TIMEOUT_S,
-                       "Installing aiortc with uv")
+            self._step([uv, "pip", "install", "--python", python, "--require-hashes", "-r", lock],
+                       WATCH_AUDIO_PIP_TIMEOUT_S, "Installing aiortc with uv")
         version = self._step([python, "-I", "-c", "import aiortc, av; print(aiortc.__version__)"], 60.0,
                              "Checking aiortc").strip()
         with open(os.path.join(env_dir, _WATCH_AUDIO_MARKER), "w", encoding="utf-8") as handle:

@@ -634,3 +634,14 @@ def test_markers_directives_and_quote_marks_keep_the_reference_whole():
         "@image:`/tmp/Bob's photo.png`",
         "@image:`/tmp/old<1>.png`",
     ]
+
+
+def test_a_delivery_names_the_profile_the_entry_module_reads(monkeypatch):
+    # The primary branch of _load_profile (issue 1088): the plugin's entry module's _current_profile,
+    # the home the delivery runs in, never this copy's own guess.
+    package = sys.modules["conduit_push"]
+    monkeypatch.setattr(package, "_current_profile", lambda: "yelan", raising=False)
+    assert cron_bot_chat._load_profile() == "yelan"
+    # A copy loaded without the entry module reads it from the home.
+    monkeypatch.delattr(package, "_current_profile")
+    assert cron_bot_chat._load_profile() == importlib.import_module("conduit_push.session_titles").current_profile()

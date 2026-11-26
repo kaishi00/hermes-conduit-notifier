@@ -1116,3 +1116,66 @@ def test_a_muted_chats_background_task_stays_quiet(pushed, tmp_path):
     store.set_mute(["old"], 0)
     _subagent(child="c2")
     assert _types(pushed) == ["background_task.finished"]
+
+
+# --- Off-turn pushes take the chat's home (notifier issue 1088) -------------------
+
+
+@pytest.fixture
+def homes(pushed, monkeypatch, tmp_path):
+    """A gateway holding two profiles' loads: Hermes names a turn's home through an override
+    that only that turn's context carries; anywhere else the home is the launch profile's."""
+    import contextvars
+    constants = sys.modules["hermes_constants"]
+    yelan = tmp_path / "profiles" / "yelan"
+    yelan.mkdir(parents=True)
+    (yelan / "profile.yaml").write_text("display_name: Yelan\n", encoding="utf-8")
+    override = contextvars.ContextVar("conduit_test_home", default=None)
+    ambient = {"home": tmp_path}
+
+    def home():
+        return override.get() or ambient["home"]
+
+    monkeypatch.setattr(constants, "get_hermes_home", home)
+    monkeypatch.setattr(constants, "set_hermes_home_override", override.set, raising=False)
+    monkeypatch.setattr(constants, "reset_hermes_home_override", override.reset, raising=False)
+    monkeypatch.setattr(plugin, "get_hermes_home", home)
+    monkeypatch.setattr(plugin, "_session_homes", {})
+    sys.modules["conduit_push.session_titles"]._names.clear()
+    seen = []
+    monkeypatch.setattr(plugin, "enqueue", lambda event: (pushed.append(event), seen.append(home())))
+    return ambient, yelan, tmp_path, seen
+
+
+def test_a_background_task_finishing_off_its_turns_context_names_the_chats_profile(homes, pushed):
+    ambient, yelan, launch, seen = homes
+    ambient["home"] = yelan  # the turn runs in Yelan's home
+    plugin._pre_llm_call(session_id="p", turn_id="t")
+    plugin._on_session_end(session_id="p", turn_id="t", completed=True, failed=False, interrupted=False)
+    pushed.clear(), seen.clear()
+    ambient["home"] = launch  # the task reports outside it
+    _subagent()
+    [event] = pushed
+    assert event["type"] == "background_task.finished"
+    assert (event["profile"], event["profile_name"]) == ("yelan", "Yelan")
+    assert seen == [yelan], "queued, and so sealed, under Yelan's home"
+
+
+def test_a_chats_close_on_hermes_thread_stops_its_turn_in_the_chats_profile(homes, monkeypatch):
+    ambient, yelan, launch, _ = homes
+    monkeypatch.setattr(sys.modules["conduit_push.pulse"], "turns_marked", True)
+    ended = []
+    monkeypatch.setattr(plugin.calls, "turn_ended",
+                        lambda session_id, kind, profile=None, fallback=None: ended.append((kind, profile)) or False)
+    ambient["home"] = yelan
+    plugin._pre_llm_call(session_id="p2", turn_id="t")
+    ambient["home"] = launch
+    plugin._on_session_finalize(session_id="p2")
+    assert ended == [("stopped", "yelan")]
+
+
+def test_a_chat_with_no_turn_seen_keeps_the_ambient_home(homes, pushed):
+    ambient, yelan, launch, seen = homes
+    _subagent(parent="never-seen", parent_turn="t9")
+    [event] = pushed
+    assert event["profile"] == "default" and seen == [launch]

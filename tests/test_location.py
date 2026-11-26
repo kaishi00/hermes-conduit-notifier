@@ -926,6 +926,52 @@ def test_another_profile_never_reads_a_device_that_doesnt_share_out(home):
         "its own profile still reads the iPad's newer fix"
 
 
+SOHO = {"name": "Soho", "locality": "London", "country": "United Kingdom", "country_code": "GB"}
+
+
+def _moved_to_work(home, work_shares_out=True):
+    """Location shared from the default profile, then moved to `work`: the
+    phone sends work its batches and never sends the default profile an
+    off batch, so its row there stays as it was, sharing on (issue 1078)."""
+    _paired(home)
+    _paired(home / "profiles" / "c")
+    _shared(home, sharing=sharing(other_profiles=True), fix=fix(), sent_at="2026-10-13T06:30:00+01:00")
+    _paired(home / "profiles" / "work")
+    _shared(home / "profiles" / "work", sharing=sharing(other_profiles=work_shares_out),
+            fix=fix(id="f_work", at="2026-10-13T06:59:00+01:00", area=SOHO), sent_at="2026-10-13T06:50:00+01:00")
+
+
+def _reads(profile_home):
+    store, owner = profiles.store_for(profile_home, lambda path: location.LocationStore(path, clock=lambda: NOW))
+    view = store.snapshot()
+    return owner, view["fix"]["area"]["name"] if view and view["fix"] else None
+
+
+def test_a_moved_location_reads_the_new_profiles_store_not_the_frozen_one(home):
+    _moved_to_work(home)
+    assert _reads(home) == ("work", "Soho"), "the old profile reads where the phone syncs now"
+    assert _reads(home / "profiles" / "c") == ("work", "Soho"), "and so does every other profile"
+    assert _call({"action": "now"}, session_id="s1", profile="default")["area"].startswith("Soho")
+
+
+def test_a_moved_location_that_keeps_to_its_new_profile_reaches_no_other(home):
+    _moved_to_work(home, work_shares_out=False)
+    # The old row's "share with the other profiles" is the phone's word from before the move.
+    assert _reads(home / "profiles" / "c") == (None, None)
+    assert _reads(home / "profiles" / "work") == (None, "Soho")
+
+
+def test_a_late_retry_to_the_old_profile_doesnt_win_it_back(home):
+    _moved_to_work(home)
+    old = location.LocationStore(home, clock=lambda: NOW + 600)
+    phone = Phone()
+    phone.accept(old.register_key(phone.key_request()))
+    # An older batch arriving late: stale, so it changes nothing there and isn't the newer sync.
+    old.ingest(phone.seal(phone.batch(sharing=sharing(other_profiles=True), fix=fix(),
+                                      sent_at="2026-10-13T06:40:00+01:00")))
+    assert _reads(home / "profiles" / "c") == ("work", "Soho")
+
+
 def test_place_rules_stay_with_the_sharing_profile(home):
     _work_shares(home)
     for action in ("rules", "set_rule", "remove_rule"):

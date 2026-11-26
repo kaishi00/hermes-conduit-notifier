@@ -114,6 +114,12 @@ notes:
     feeds the session titles that tell a Bot Chat (its step budget, board and coordination), cron
     reports shown in a Bot Chat, voice calls' rows and tags, room chat cleanup, workstream
     transcripts and the stored source that keeps a woken Kanban worker's turns quiet (automation turns). A missing repository verb turns its feature off or fails its route.
+  off-turn push home: >-
+    __init__.py's _in_session_home runs a background task's finish push (subagent_stop) and a chat's
+    close (on_session_finalize, on Hermes' own thread) under hermes_constants.set_hermes_home_override
+    with the home the chat's last turn started in, so in a gateway holding several profiles' loads the
+    push names that profile and is sealed with its pairing, not the launch profile's (issue 1088).
+    Without the override the ambient home is used, as before.
   chat close hooks: >-
     tui_gateway's _finalize_session says a chat closed with on_session_end (no turn_id) and then
     on_session_finalize. The plugin's _on_session_finalize ends a turn still running there as
@@ -563,7 +569,7 @@ imports:
     optional: ["_config_profile_scope"]
   hermes_constants:
     required: ["*", "get_hermes_home"]
-    optional: ["get_default_hermes_root"]
+    optional: ["get_default_hermes_root", "reset_hermes_home_override", "set_hermes_home_override"]
   hermes_time:
     optional: ["now"]
   hermes_yaml:

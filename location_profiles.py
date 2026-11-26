@@ -10,9 +10,12 @@ locate goes through the asking profile's own pairing, naming the sharing
 profile, so the phone answers it like one of that profile's. Place rules
 stay with the sharing profile.
 
-A profile that shares location itself (talking or background on) always
-reads its own store. If several profiles share with the others, the first
-one wins: the default profile, then named ones alphabetically.
+A profile reads its own store while a device shares location into it
+(talking or background on) and hasn't since moved on to another paired
+profile's store, as the calendar and health do (profile_sharing.
+reading_profile, notifier issue 1078). If several profiles share with the
+others, the first one wins: the default profile, then named ones
+alphabetically.
 """
 
 from __future__ import annotations
@@ -20,40 +23,29 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from .location_store import LocationStore
+from . import profile_sharing
+from .location_store import FILE_NAME, LocationStore, _synced_devices
 # The profile lookup is shared with the calendar and health (profile_sharing).
 from .profile_sharing import _UNUSABLE_NAME, PAIRING_FILE, _installation, label, profile_homes  # noqa: F401
 
 
 def store_for(home: str | Path, make: Callable[[Any], LocationStore] = LocationStore) -> tuple[LocationStore, str | None]:
     """The store this profile reads, and the name of the profile it belongs
-    to when that's another one (None for its own). ``make`` opens a store."""
+    to when that's another one (None for its own). ``make`` opens a store.
+
+    A device's row counts only where the device still syncs: when the user
+    moves location sharing to another profile, the old profile keeps the
+    device's row as it was, sharing on, and read as live it served the
+    frozen fix there and to every other profile, past the new profile's
+    own choice about sharing with the others (notifier issue 1078)."""
     own = make(home)
-    if _sharing_on(own):
+    own.upgrade()  # a store an older plugin wrote is read as it will be
+    found = profile_sharing.reading_profile(home, lambda path: _synced_devices(Path(path) / FILE_NAME))
+    if found is None:
         return own, None
-    installation = _installation(Path(home))
-    if installation:
-        for name, path in profile_homes(Path(home)):
-            if len(name) > 64 or _UNUSABLE_NAME.search(name) or _installation(path) != installation:
-                continue
-            store = make(path)
-            if not store.exists():
-                continue
-            # Only its devices that share with this host's other profiles
-            # answer here, each by its own word, as phone and health do.
-            store.shared_only = True
-            view = store.snapshot(upgrade=False)  # never another profile's write lock
-            if view is not None and _on(view["sharing"]):
-                return store, name
-    return own, None
-
-
-def _sharing_on(store: LocationStore) -> bool:
-    if not store.exists():
-        return False
-    view = store.snapshot()
-    return view is not None and _on(view["sharing"])
-
-
-def _on(sharing: dict[str, Any]) -> bool:
-    return bool(sharing.get("talking") or sharing.get("background"))
+    name, path = found
+    store = make(path)
+    # Only its devices that share with this host's other profiles answer
+    # here, each by its own word, as phone and health do.
+    store.shared_only = True
+    return store, name

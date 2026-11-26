@@ -408,6 +408,9 @@ class _WatchJob:
         # cancel, the call's chat waits for that end until quiet_by (#1250).
         self.turn_open = False
         self.quiet_by = 0.0
+        # A frame of its turn came while its prompt was on its way: Hermes
+        # took the prompt, whatever its answer to the submit (issue 1079).
+        self.turn_heard = False
         # A follow-up going into the running turn (interrupt_job): None,
         # "sending", "accepted" (Hermes took it into the turn) or "queued"
         # (Hermes runs it as the next turn). Until the turn carries on, an
@@ -636,6 +639,8 @@ class _WatchJobs:
                     job = superseded
                 else:
                     superseded.turn_open = False
+            if job.status == "starting" and (kind in WATCH_TURN_PROGRESS or kind in ("message.complete", "error")):
+                job.turn_heard = True
             if kind in ("message.complete", "error") and job.turn_open:
                 # Its turn is over: the call's chat can take the next one.
                 job.turn_open = False
@@ -1036,6 +1041,7 @@ class _WatchJobs:
             self._close_transport_if_idle()
             return {"ok": True, "status": "not_started", "title": job.title,
                     "message": "The call ended before Hermes could take this request."}
+        lines: Set[str] = set()
         try:
             with self.lock:
                 cancelled = job.status == "cancelled"
@@ -1058,6 +1064,11 @@ class _WatchJobs:
                         logger.info("Cancelling a starting Watch job failed: %s", exc)
         except Exception as exc:  # noqa: BLE001 — the request didn't go; the model is told
             with self.changed:
+                if lines and (job.turn_heard or job.status not in ("starting", "cancelled")):
+                    # Its answer was lost, but Hermes took it (its turn moved, or ended): its
+                    # context lines went with it, so later requests leave them out, as the
+                    # phone's do (issue 1079).
+                    self.call_chat_context |= lines
                 if job.active:
                     job.status = "failed"
                     job.error = str(exc)[:300] if isinstance(exc, WatchJobError) else type(exc).__name__
