@@ -721,6 +721,8 @@ def test_a_push_says_a_page_the_reply_wrote_and_drops_its_tags():
     # A second element opened on the closing line keeps the page going; a table row is the table's.
     from events import pages_said
     assert pages_said("<div>A</div><div>\nB\n</div>\nAfter") == "🗂 Page\nAfter"
+    # Prose between them ends it: `Use <div> to wrap.` is prose, the next line too.
+    assert pages_said("<div>x</div> Use <div> to wrap.\nMore prose") == "🗂 Page\nMore prose"
     table = "Tag | Meaning\n--- | ---\n<div> | container\n\nNext steps"
     assert pages_said(table) == table
     header = "Results:\n<div> | A\n--- | ---\n1 | 2"
