@@ -3827,7 +3827,7 @@ marked private is reported only as "at a private place".
   or background on) always reads its own, and if several profiles share
   with the others the first wins (default, then named ones alphabetically).
   When you move location sharing to another profile, the old one stops
-  counting (plugin 0.199.3+), as for health: a device that has since synced
+  counting (plugin 0.200.1+), as for health: a device that has since synced
   into another paired profile's store is no longer that profile's own, so
   it and the other profiles read the new store, and only if that one
   shares with the others.
