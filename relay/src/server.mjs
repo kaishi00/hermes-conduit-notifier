@@ -543,9 +543,11 @@ async function route(request, response) {
     const report = validateReport(await readJson(request, 4_096));
     if (!report) return sendJson(response, 400, { error: 'invalid_live_activity_report' });
     if (!store.activeInstallation(gateway.installationId)) return sendJson(response, 200, { tracked: false });
-    const watched = liveActivities.find(gateway.installationId, report.sessionId);
+    // Only the gateway that owns the chat's activity reaches it (notifier issue 156).
+    const watched = liveActivities.find(gateway.installationId, report.sessionId, gateway.gatewayId);
     if (watched) enforceRateLimit('live-activity-update-global', config.budgets.liveActivityUpdatesPerMinute, 60_000);
-    const tracked = liveActivities.report(gateway.installationId, report.sessionId, report.state, report.end, { endedAgoS: report.endedAgoS });
+    const tracked = liveActivities.report(gateway.installationId, report.sessionId, report.state, report.end,
+      { endedAgoS: report.endedAgoS, gatewayId: gateway.gatewayId });
     return sendJson(response, 200, { tracked });
   }
 

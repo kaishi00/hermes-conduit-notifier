@@ -118,6 +118,19 @@ is ignored with a warning in the log, and
 or why it was ignored. WSS through the proxy needs websockets 15 or newer
 in Hermes' environment. Proposed by aminrpg (#746).
 
+### Pinning the relays a host uses (plugin 0.198.3+)
+
+A host whose egress allows only known relays can say so with
+`CONDUIT_RELAY_ALLOWLIST` in the gateway's and the dashboard's environment:
+relay origins separated by commas or spaces, such as
+`CONDUIT_RELAY_ALLOWLIST=https://push.milim.dev`. Pairing from Conduit,
+`hermes conduit-push pair` and every request that carries the relay
+credential then go only to those origins (scheme, host and port), and a
+relay the claim answers with that isn't on the list isn't saved. A
+self-hosted relay paired over the LAN needs both its LAN address and its
+HTTPS `PUBLIC_URL` on the list. A value with no valid origin allows none.
+Unset, any relay works as before. Suggested by malaiwah (#156).
+
 Pairing codes expire after ten minutes and can only be claimed once.
 
 With plugin 0.24+ Conduit pairs the active dashboard's profile by itself: it
@@ -624,6 +637,10 @@ relay (relay 0.15+), and the end of the turn ends it.
   arguments or output), a tool count and a context percentage. The chat's
   title stays on the phone. With `redact on` the tool category is left out
   too.
+- One phone can pair with several hosts. The first host to report on an
+  activity owns it (relay 0.28.1+); another host paired with the same phone
+  is answered as if nobody watched and never reaches that card, even if it
+  names the same session id (#156).
 - The relay keeps registrations in memory only (at most 8 hours, the longest
   iOS runs an activity). A relay restart stops updates; the activity then
   shows as out of date on the phone and Conduit ends it when you open it.
@@ -4617,7 +4634,12 @@ relay key. The host still opens no inbound route.
   counting on packages Hermes already has. It goes in
   `~/.hermes/conduit_push/watch-audio-env` (under `HERMES_HOME` when that's
   set, or `CONDUIT_WATCH_AUDIO_ENV`). Nothing is installed into Hermes' own
-  Python; if that Python already has `aiortc`, it's used as it is.
+  Python; if that Python already has `aiortc`, it's used as it is. A host
+  whose admin manages packages (no package index, an image built ahead)
+  sets `CONDUIT_WATCH_AUDIO_PREPARE=off` (plugin 0.198.3+): `prepare` then
+  runs neither pip nor uv and answers `failed` saying so, and GPT-Live on
+  the Watch works only where Hermes' Python (or an environment made before)
+  already has `aiortc` and `av`.
   `runtime` reads `ready`, `preparing`, `failed` (with the reason) or
   `missing`, and `engines` in a grant lists `gpt_live` only once it's
   ready. The helper writes to the plugin from its own thread, so a slow
