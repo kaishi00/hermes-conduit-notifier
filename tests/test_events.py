@@ -714,6 +714,7 @@ def test_a_push_says_a_page_the_reply_wrote_and_drops_its_tags():
     assert plain_text("Use `<br>` for a break, or <br>this.") == "Use <br> for a break, or  this."
     assert plain_text("Mail <me@example.com> or see <https://example.com>.") == "Mail <me@example.com> or see <https://example.com>."
     assert plain_text("A <video> tag and Vec<String>") == "A <video> tag and Vec<String>"
+    assert plain_text("if a <b and y > z") == "if a <b and y > z"
     assert starts_page("<table>") and starts_page("<!DOCTYPE html>") and not starts_page("<details>")
     assert not starts_page("<Conversation>") and not starts_page("say <div> here")
 

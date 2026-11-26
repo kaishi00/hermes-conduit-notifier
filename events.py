@@ -879,7 +879,7 @@ _TOKEN = re.compile(
 _PARTIAL_TAG = re.compile(r"^ {0,3}<[!a-zA-Z]*$")
 # The tags Conduit draws; any other stays text there, so it stays in a push too.
 _HTML_TAG = re.compile(r"""</?(?:b|strong|i|em|u|ins|s|del|strike|mark|kbd|sub|sup|span|font|details|summary)"""
-                       r"""(?:\s(?:[^<>"']|"[^"]*"|'[^']*')*)?/?>""", re.IGNORECASE)
+                       r"""(?:\s+[\w-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>]+)|\s+open)*\s*/?>""", re.IGNORECASE)
 _BREAK = re.compile(r"<br\s*/?>", re.IGNORECASE)
 
 _PAGE_SAID = "🗂 Page"
