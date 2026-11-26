@@ -3567,8 +3567,10 @@ workouts, body, vitals, fitness), with how far back to start.
   only for categories where the user turns on detailed readings.
 - **Stored here only.** The profile's `conduit-health.sqlite3`, mode `0600`.
   A newer computation of a window replaces the older one; a deleted workout
-  or reading stays deleted. `GET /health/status` reports counts and dates,
-  never values; `POST /health/wipe` deletes one device's data and key (or
+  or reading stays deleted (its id is kept for 30 days to turn away a late
+  re-send). History is kept as long as the phone shares it. `GET
+  /health/status` reports the device's key, categories and last sync, never
+  values; `POST /health/wipe` deletes one device's data and key (or
   everything with `{"all": true}`), and Conduit's "Delete health data on
   this host" calls it. Only the voice read below returns health data.
 - **Read-only tool.** `conduit_health` (actions `overview`, `daily`,
@@ -3804,6 +3806,11 @@ marked private is reported only as "at a private place".
   with the sharing profile. A profile that shares location itself (talking
   or background on) always reads its own, and if several profiles share
   with the others the first wins (default, then named ones alphabetically).
+  When you move location sharing to another profile, the old one stops
+  counting (plugin 0.198.3+), as for health: a device that has since synced
+  into another paired profile's store is no longer that profile's own, so
+  it and the other profiles read the new store, and only if that one
+  shares with the others.
   The fresh-position and maps budgets belong to the sharing profile's
   store, so every profile reading it spends the same ones. Calls placed
   from a reading profile are held back by the shared position, but the

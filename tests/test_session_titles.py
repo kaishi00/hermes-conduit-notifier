@@ -278,3 +278,21 @@ def test_a_reply_carries_the_profile_whose_home_it_ran_in(sent, monkeypatch, tmp
     assert titles.current_profile("zhongli") == "yelan"
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
     assert titles.current_profile("zhongli") == "default", "the default home is the default profile"
+
+
+def test_an_approval_and_a_failure_carry_the_profile_whose_home_they_ran_in(sent, monkeypatch, tmp_path):
+    # Issue 1088: the pushes that aren't a reply name the turn's profile too.
+    home = tmp_path / "profiles" / "yelan"
+    home.mkdir(parents=True)
+    (home / "profile.yaml").write_text("display_name: Yelan\n", encoding="utf-8")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: home)
+    monkeypatch.setattr(plugin, "_profile", "zhongli")
+    monkeypatch.setattr(plugin.calls, "turn_ended", lambda *args, **kwargs: False)
+    monkeypatch.setattr(plugin.calls, "failed_turn", lambda *args, **kwargs: False)
+    plugin._pre_approval_request(session_key="s1", session_id="s1", description="Delete the build folder",
+                                 turn_id="t11", pattern_key="rm", command="rm -rf build")
+    plugin._post_llm_call(session_id="s1", turn_id="t12", assistant_response="The provider returned an error.")
+    plugin._on_session_end(session_id="s1", turn_id="t12", completed=False, failed=True, interrupted=False)
+    pushes = {event["type"]: event for event in sent}
+    for kind in ("approval.needed", "turn.failed"):
+        assert (pushes[kind]["profile"], pushes[kind]["profile_name"]) == ("yelan", "Yelan"), kind

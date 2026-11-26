@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import functools
 import json
@@ -11,7 +12,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from hermes_constants import get_hermes_home
 
@@ -58,6 +59,8 @@ _unnamed_ends: dict[str, tuple[object, Any]] = {}
 # time.monotonic()): a subagent that finishes inside it is part of its reply.
 _parent_turns: dict[str, tuple[str, float]] = {}
 _parent_turns_lock = threading.Lock()
+# Session id -> the Hermes home its last turn started in (_in_session_home).
+_session_homes: dict[str, Any] = {}
 # Sessions whose last turn's end was handled, until their next turn starts:
 # a chat's close after that end is no stopped turn of its own (issue 820).
 _ended_turns: dict[str, None] = {}
@@ -87,7 +90,7 @@ def _current_profile() -> str:
     try:
         return session_titles.current_profile(_profile)
     except Exception:  # noqa: BLE001 — a push must never break the turn
-        return _profile
+        return _profile or "default"
 
 
 def register(ctx: Any) -> None:
@@ -1255,7 +1258,8 @@ def _on_session_finalize(**kwargs: Any) -> None:
     if (not session_id or not pulse.turns_marked or _is_child(session_id)
             or _turn_end_handled(session_id)):
         return None
-    _on_session_end(session_id=session_id, completed=False, interrupted=True, platform=kwargs.get("platform"))
+    with _in_session_home(session_id):
+        _on_session_end(session_id=session_id, completed=False, interrupted=True, platform=kwargs.get("platform"))
     return None
 
 
@@ -1452,19 +1456,21 @@ def _subagent_stop(**kwargs: Any) -> None:
     # One a turn in a room this Hermes hosts started opens the room.
     room = _home_room(parent)
     room_title = room[1] if room else ""
-    enqueue(push_event(
-        "background_task.finished",
-        identifier=event_id("subagent", kwargs.get("parent_turn_id"), child, status),
-        session_id=parent,
-        profile=_current_profile(),
-        profile_name=_bot_name(),
-        title=f"Task finished · {room_title}" if room_title else _titled("Task finished", parent),
-        title_label="background_task.finished" if finished else "",
-        session_title=room_title or _session_title(parent),
-        body=summary or ("" if finished else f"A delegated task {status}."),
-        room={"id": room[0]} if room else None,
-        slot=slot,
-    ))
+    # Its parent's home, not the launch profile's: this hook can run outside the turn's context.
+    with _in_session_home(parent):
+        enqueue(push_event(
+            "background_task.finished",
+            identifier=event_id("subagent", kwargs.get("parent_turn_id"), child, status),
+            session_id=parent,
+            profile=_current_profile(),
+            profile_name=_bot_name(),
+            title=f"Task finished · {room_title}" if room_title else _titled("Task finished", parent),
+            title_label="background_task.finished" if finished else "",
+            session_title=room_title or _session_title(parent),
+            body=summary or ("" if finished else f"A delegated task {status}."),
+            room={"id": room[0]} if room else None,
+            slot=slot,
+        ))
 
 
 # Hermes' voice-live delegation note starts with this; used when the running
@@ -2058,11 +2064,47 @@ def _note_turn_start(turn_id: Any) -> None:
 def _start_parent_turn(session_id: str, turn_id: Any) -> None:
     if not session_id:
         return
+    try:
+        home = get_hermes_home()
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        home = None
     with _parent_turns_lock:
         _parent_turns.pop(session_id, None)
         _parent_turns[session_id] = (turn_id if isinstance(turn_id, str) else "", time.monotonic())
         while len(_parent_turns) > MAX_TURN_STARTS:
             _parent_turns.pop(next(iter(_parent_turns)))
+        if home is not None:
+            _session_homes.pop(session_id, None)
+            _session_homes[session_id] = home
+            while len(_session_homes) > MAX_TURN_STARTS:
+                _session_homes.pop(next(iter(_session_homes)))
+
+
+@contextlib.contextmanager
+def _in_session_home(session_id: str) -> Iterator[None]:
+    """Runs what a chat sends outside its turn (a background task's finish,
+    Hermes' close of the chat on its own thread) in the Hermes home its
+    last turn ran in: there the ambient home is the launch profile's, so a
+    gateway holding several profiles' loads named that profile and sealed
+    the push with its pairing (notifier issue 1088). A Hermes that can't
+    set the home, or a chat with no turn seen since this load started,
+    keeps the ambient home, as before."""
+    with _parent_turns_lock:
+        home = _session_homes.get(session_id) if session_id else None
+    reset, token = None, None
+    if home is not None:
+        try:
+            from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+            token = set_hermes_home_override(home)
+            reset = reset_hermes_home_override
+        except Exception:  # noqa: BLE001 — an older Hermes: the ambient home, as before
+            logger.debug("conduit_push: couldn't run in the chat's home", exc_info=True)
+    try:
+        yield
+    finally:
+        if reset is not None:
+            reset(token)
 
 
 def _note_turn_starting(session_id: str) -> None:

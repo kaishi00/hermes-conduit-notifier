@@ -1573,6 +1573,38 @@ def _prune(db: sqlite3.Connection, device_id: str, retention_days: int, now: flo
     db.execute("DELETE FROM locates WHERE requested_at<?", (now - LOCATES_KEPT_S,))
 
 
+def _synced_devices(path: Path) -> list[tuple[str, float, bool, bool]]:
+    """The devices that have synced into the store at ``path``, for
+    profile_sharing.reading_profile: (id, last synced, shares location,
+    shares it with the other profiles). Read-only: never upgrades the file
+    or takes its write lock, which may be another profile's; a store
+    another plugin version wrote reads as nothing, as snapshot reads it."""
+    if not path.exists():
+        return []
+    try:
+        connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=5)
+    except sqlite3.DatabaseError:
+        return []
+    try:
+        if _meta(connection, "schema") != str(SCHEMA_VERSION):
+            return []
+        # When the phone sent what's stored, not when a batch last arrived:
+        # a late retry to a profile the phone moved away from (stale, so it
+        # changes no sharing) mustn't look like the newer sync.
+        rows = connection.execute("SELECT id, COALESCE(last_sent, last_seen), sharing FROM devices"
+                                  " WHERE last_seen IS NOT NULL").fetchall()
+    except sqlite3.DatabaseError:
+        return []
+    finally:
+        connection.close()
+    found = []
+    for device_id, synced, sharing in rows:
+        decoded = _decode(sharing, None)
+        on = isinstance(decoded, dict) and bool(decoded.get("talking") or decoded.get("background"))
+        found.append((device_id, float(synced or 0), on, _shares_out(decoded)))
+    return found
+
+
 def _shares_out(sharing: Any) -> bool:
     """Whether a device's sharing offers this host's other profiles."""
     return isinstance(sharing, dict) and sharing.get("other_profiles") is True
