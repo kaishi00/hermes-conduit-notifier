@@ -718,6 +718,10 @@ def test_a_push_says_a_page_the_reply_wrote_and_drops_its_tags():
     # Only tags that pair up go, as the chat draws only those.
     assert plain_text("An <b>unclosed tag") == "An <b>unclosed tag"
     assert plain_text("click <span hidden>secret</span> now") == "click secret now"
+    # A pair around a code span still pairs; the span's own tags stay.
+    from events import without_tags
+    assert without_tags("Use <b>`make`</b> now.") == "Use `make` now."
+    assert without_tags("Write `<b>` then <i>x</i>") == "Write `<b>` then x"
     # A second element opened on the closing line keeps the page going; a table row is the table's.
     from events import pages_said
     assert pages_said("<div>A</div><div>\nB\n</div>\nAfter") == "🗂 Page\nAfter"

@@ -18,6 +18,7 @@ checks it). The format is fixed, because Conduit reads it:
 ### Fixes
 
 - A notification no longer calls a whole reply a page when a line closes a page and then talks about a tag, as in "<div>x</div> Use <div> to wrap.": the prose after it shows as written.
+- A notification keeps no stray `<b>` and `</b>` around inline code: `<b>` with `make` in backticks inside shows as the bold words without the tags.
 
 ## 0.199.0 (2026-11-26)
 
