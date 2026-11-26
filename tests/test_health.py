@@ -186,6 +186,28 @@ def test_a_deleted_workout_stays_deleted(store, phone):
         assert store.events(db, device_id, "workout", "workout", "2026-10-01", "2026-10-13", 10) == ([], False)
 
 
+def _rows(store, *tables):
+    import sqlite3
+    with sqlite3.connect(store.path) as db:
+        return {table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in tables or ("buckets", "events", "windows")}
+
+
+def test_a_deletions_tombstone_goes_after_a_month(store, phone, tmp_path):
+    store.ingest(phone.seal(_batch()))
+    workout_id = _batch()["events"][0]["id"]
+    store.ingest(phone.seal(_batch("batch-0002", windows=[], events=[], deleted=[workout_id])))
+    assert _rows(store, "tombstones") == {"tombstones": 1}
+    # Still there within the month: a late re-send stays out.
+    within = health.HealthStore(tmp_path, clock=lambda: NOW + health.TOMBSTONE_KEPT_S - 60)
+    within.ingest(phone.seal(_batch("batch-0003", windows=[], events=[])))
+    assert _rows(store, "tombstones") == {"tombstones": 1}
+    # Past it, the next batch takes it away.
+    later = health.HealthStore(tmp_path, clock=lambda: NOW + health.TOMBSTONE_KEPT_S + 60)
+    later.ingest(phone.seal(_batch("batch-0004", windows=[], events=[])))
+    assert _rows(store, "tombstones") == {"tombstones": 0}
+
+
 def test_a_tampered_or_foreign_body_is_refused(store, phone):
     sealed = phone.seal(_batch())
     with pytest.raises(health.HealthError) as error:
@@ -238,7 +260,7 @@ def test_bad_batches_are_refused_whole(store, phone, change, code):
     with pytest.raises(health.HealthError) as error:
         store.ingest(phone.seal(batch))
     assert error.value.code == code
-    assert store.status(DEVICE)["device"]["rows"] == {}
+    assert _rows(store) == {"buckets": 0, "events": 0, "windows": 0}
 
 
 @pytest.mark.parametrize("change", [
@@ -330,7 +352,7 @@ def test_formatting_characters_are_neutralized(store, phone):
 def test_status_never_carries_health_values(store, phone):
     store.ingest(phone.seal(_batch()))
     status = store.status(DEVICE)
-    assert status["device"]["rows"] == {"steps": 2, "heart_rate": 1, "sleep": 1, "workout": 1}
+    assert set(status["device"]) == {"kid", "last_sync", "categories"}, "no count of the whole history (issue 1077)"
     assert "1200" not in json.dumps(status)
 
 
@@ -563,6 +585,21 @@ def test_a_time_kept_ahead_before_the_cap_doesnt_keep_the_profile_it_left_lookin
         assert health._sent(db, DEVICE) == NOW + health.MAX_CLOCK_SKEW_S
     found, owner = health.store_for(home)
     assert owner == "work" and found.path == work.path
+
+
+def test_the_next_batch_after_a_time_kept_ahead_stores_its_own_time(home):
+    # The ordinary branch of the same hold (notifier#1070): a fresh batch newer than the held time
+    # stores its own, not the cap.
+    phone = Phone()
+    store = health.HealthStore(home, clock=lambda: NOW)
+    phone.accept(store.register_key(phone.key_request()))
+    store.ingest(phone.seal(_batch(batch_id="batch-0001", computed_at=_computed(NOW))))
+    with store._write() as db:
+        db.execute("INSERT OR REPLACE INTO meta VALUES(?, ?)", (health.SENT_KEY + DEVICE, str(NOW + 86400)))
+    store.clock = lambda: NOW + 3 * 3600
+    store.ingest(phone.seal(_batch(batch_id="batch-0002", computed_at=_computed(NOW + 3 * 3600))))
+    with store._read() as db:
+        assert health._sent(db, DEVICE) == NOW + 3 * 3600
 
 
 def test_a_profile_keeps_its_own_health_beside_another_devices(home):
