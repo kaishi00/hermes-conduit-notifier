@@ -251,16 +251,38 @@ async def workspace_preview(request: Request, port: str, path: str = "") -> Any:
         raise HTTPException(status_code=503, detail="Too many pages are waiting on this host's servers; try again shortly",
                             headers=headers_out)
 
-    def opened() -> Tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+    # The slot is freed exactly once: by the worker when it ran, else by this
+    # request (one it gave up on, or was cancelled in, before it started never runs).
+    state = {"started": False, "abandoned": False}
+    state_lock = threading.Lock()
+
+    def opened() -> Optional[Tuple[http.client.HTTPConnection, http.client.HTTPResponse]]:
+        with state_lock:
+            if state["abandoned"]:
+                return None
+            state["started"] = True
         try:
             return _open(number, request.method, target, page_headers, body)
         finally:
             _preview_slots.release()
 
+    def close_late(done: "asyncio.Future") -> None:
+        # The page went away while its server answered: that connection is closed, not left open.
+        if not done.cancelled() and done.exception() is None and done.result() is not None:
+            done.result()[0].close()
+
+    future = loop.run_in_executor(_preview_executor, opened)
     try:
-        conn, answer = await asyncio.wait_for(
-            loop.run_in_executor(_preview_executor, opened),
-            timeout=PREVIEW_CONNECT_S * 2 + PREVIEW_TIMEOUT_S + 5)
+        try:
+            conn, answer = await asyncio.wait_for(asyncio.shield(future),
+                                                  timeout=PREVIEW_CONNECT_S * 2 + PREVIEW_TIMEOUT_S + 5)
+        except BaseException:
+            with state_lock:
+                if not state["started"]:
+                    state["abandoned"] = True
+                    _preview_slots.release()
+            future.add_done_callback(close_late)
+            raise
     except _Unreachable:
         raise HTTPException(status_code=502, detail=f"Nothing on this host answers on port {number}",
                             headers=headers_out)
