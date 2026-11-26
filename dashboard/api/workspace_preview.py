@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import http.client
 import json
+import re
 import socket
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -58,6 +59,8 @@ PREVIEW_CHUNK = 64 * 1024
 PAGE_HEADERS = "X-Conduit-Page-Headers"
 PAGE_STATUS = "X-Conduit-Page-Status"
 NO_STORE = {"Cache-Control": "no-store"}
+_HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+_HEADER_VALUE_BAD = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 # Headers about this hop, which the dev server and the page each set for their own.
 HOP_HEADERS = frozenset({
@@ -108,6 +111,9 @@ def _page_headers(raw: Optional[str]) -> List[Tuple[str, str]]:
             # What a request line can carry: an ASCII name, a Latin-1 value.
             pair[0].encode("ascii")
             pair[1].encode("latin-1")
+            # A token for a name (no colon, space or control), no controls but a tab in a value.
+            if not _HEADER_NAME.fullmatch(pair[0].strip()) or _HEADER_VALUE_BAD.search(pair[1]):
+                raise UnicodeEncodeError("ascii", "", 0, 1, "illegal")
         except UnicodeEncodeError:
             raise HTTPException(status_code=400, detail=f"{PAGE_HEADERS} holds a header HTTP can't send",
                                 headers=NO_STORE)
@@ -119,7 +125,7 @@ def _page_headers(raw: Optional[str]) -> List[Tuple[str, str]]:
 
 def _target(request: Request, port: int) -> str:
     """The path and query the page asked for, as it sent them (not decoded)."""
-    raw = request.scope.get("raw_path") or urllib.parse.quote(request.url.path, safe="/%:@!$&'()*+,;=-._~").encode()
+    raw = request.scope.get("raw_path") or urllib.parse.quote(request.url.path, safe="/:@!$&'()*+,;=-._~").encode()
     path = raw.decode("latin-1")
     marker = f"/workspace/preview/{port}"
     at = path.find(marker)

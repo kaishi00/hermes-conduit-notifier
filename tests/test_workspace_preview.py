@@ -182,6 +182,8 @@ def test_the_capability_is_listed():
 def test_a_header_http_cant_send_is_a_400(client, dev_port):
     got = client.get(f"{BASE}/workspace/preview/{dev_port}/", headers=wrapped([["X-Name", "\U0001f389"]]))
     assert got.status_code == 400 and got.headers["cache-control"] == "no-store"
+    assert client.get(f"{BASE}/workspace/preview/{dev_port}/", headers=wrapped([["X:Evil", "1"]])).status_code == 400
+    assert client.get(f"{BASE}/workspace/preview/{dev_port}/", headers=wrapped([["X-A", "a\x01b"]])).status_code == 400
     assert seen == []
 
 
