@@ -30,6 +30,7 @@ def _unix_backend(monkeypatch):
     monkeypatch.setattr(api.self_update, "_self_restart_scheduled", False)
     monkeypatch.setattr(api.self_update, "_self_update_thread", None)
     monkeypatch.setattr(api.self_update, "_self_update_job", None)
+    monkeypatch.setattr(api.self_update, "_pull_returned", None)
     monkeypatch.setattr(api.self_update, "_self_update_limiter", api.core._MintLimiter(3, 600.0))
 
 
@@ -737,6 +738,21 @@ def test_a_stalled_pull_lets_a_new_update_start(monkeypatch, tmp_path):
     api.self_update.time.sleep(0.2)
     assert sorted((n["id"], n.get("code")) for n in notified) == sorted([(first["id"], "pull_stalled"),
                                                                          (second["id"], None)])
+
+
+def test_a_stall_marked_on_a_pull_that_came_back_holds_the_slot(monkeypatch):
+    # #1100 review: between a stalled pull coming back and the thread's next write, the job file
+    # still reads pull_stalled. The slot is the thread's again from the moment its pull returns,
+    # so no newer update starts beside it.
+    job = {"id": "j1", "step": "downloading"}
+    monkeypatch.setattr(api.self_update, "_self_update_job", job)
+    stalled = {"id": "j1", "step": "failed", "code": "pull_stalled"}
+    assert api.self_update._stalled_pull(stalled) is True
+    assert api.self_update._pull_came_back(job) is True
+    assert api.self_update._stalled_pull(stalled) is False
+    # A pull that comes back after a newer update took over owns nothing.
+    monkeypatch.setattr(api.self_update, "_self_update_job", {"id": "j2", "step": "downloading"})
+    assert api.self_update._pull_came_back(job) is False
 
 
 def test_the_notification_goes_to_the_profile_that_asked(monkeypatch):

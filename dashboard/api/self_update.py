@@ -341,6 +341,8 @@ _self_update_lock = threading.RLock()
 _self_update_thread: Optional[threading.Thread] = None
 # The job this process started, for when its file can't be read back.
 _self_update_job: Optional[Dict[str, Any]] = None
+# The id of the job whose pull last came back: a stall marked on it no longer frees the slot.
+_pull_returned: Optional[str] = None
 # Each start pulls and restarts the gateway: a few per hour is plenty.
 _self_update_limiter = core._MintLimiter(3, 600.0, message="Too many plugin updates; try again in a few minutes")
 # Each forced restart cuts the gateway's work: a few in five minutes, not a loop of them.
@@ -971,7 +973,7 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
     claimed_restart = False
     try:
         result = pull()
-        if _superseded(job):
+        if not _pull_came_back(job):
             # Its pull stalled and a newer update took over: that one carries on alone.
             logger.info("Conduit plugin: a stalled update's pull came back after a newer update started")
             return
@@ -1144,9 +1146,22 @@ def start_self_update(profile: Optional[str], schedule: Callable[[float, Callabl
 
 
 def _stalled_pull(job: Optional[Dict[str, Any]]) -> bool:
-    """The running thread's job, marked failed because its pull never came back."""
+    """The running thread's job, marked failed because its pull never came back, and still in
+    it: once the pull returns, the thread carries the job on and the slot stays its own."""
     return (job is not None and job.get("step") == "failed" and job.get("code") == "pull_stalled"
-            and _self_update_job is not None and job.get("id") == _self_update_job.get("id"))
+            and _self_update_job is not None and job.get("id") == _self_update_job.get("id")
+            and _pull_returned != job.get("id"))
+
+
+def _pull_came_back(job: Dict[str, Any]) -> bool:
+    """Called as the job's pull returns: whether it still owns the job file, and if so, the
+    slot stays its own from here, in the same step, so no newer update can start beside it."""
+    global _pull_returned
+    with _self_update_lock:
+        if _self_update_job is not None and _self_update_job.get("id") != job.get("id"):
+            return False
+        _pull_returned = job.get("id")
+        return True
 
 
 def _superseded(job: Dict[str, Any]) -> bool:

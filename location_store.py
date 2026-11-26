@@ -432,6 +432,11 @@ class LocationStore:
         finally:
             connection.close()
 
+    def upgrade(self) -> None:
+        """Brings a store an older plugin wrote up to date, as a read of it would."""
+        if self.exists():
+            self._upgrade()
+
     def _upgrade(self) -> None:
         """A store an older plugin wrote is brought up to date before it's
         read, so updating the plugin doesn't hide what's shared until the
@@ -1590,7 +1595,9 @@ def _synced_devices(path: Path) -> list[tuple[str, float, bool, bool]]:
             return []
         # When the phone sent what's stored, not when a batch last arrived:
         # a late retry to a profile the phone moved away from (stale, so it
-        # changes no sharing) mustn't look like the newer sync.
+        # changes no sharing) mustn't look like the newer sync. Both are held
+        # to this host's clock as they're written (_apply), so no skew hold is
+        # needed here, unlike health's sent time.
         rows = connection.execute("SELECT id, COALESCE(last_sent, last_seen), sharing FROM devices"
                                   " WHERE last_seen IS NOT NULL").fetchall()
     except sqlite3.DatabaseError:

@@ -39,9 +39,7 @@ def store_for(home: str | Path, make: Callable[[Any], LocationStore] = LocationS
     frozen fix there and to every other profile, past the new profile's
     own choice about sharing with the others (notifier issue 1078)."""
     own = make(home)
-    if own.exists():
-        # A store an older plugin wrote is brought up to date first, as a read of it would.
-        own._upgrade()
+    own.upgrade()  # a store an older plugin wrote is read as it will be
     found = profile_sharing.reading_profile(home, lambda path: _synced_devices(Path(path) / FILE_NAME))
     if found is None:
         return own, None
