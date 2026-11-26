@@ -7,6 +7,7 @@ import contextlib
 import http.client
 import json
 import socket
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -49,11 +50,14 @@ PREVIEW_LIMIT = 6000
 PREVIEW_WINDOW_S = 60.0
 # A dev server compiles a page on its first request, which can take a while.
 PREVIEW_TIMEOUT_S = 120.0
+# Loopback connects at once or is refused; past this, the next address is tried.
+PREVIEW_CONNECT_S = 5.0
 PREVIEW_MAX_BODY_BYTES = 16 * 1024 * 1024
 PREVIEW_MAX_HEADERS_CHARS = 64 * 1024
 PREVIEW_CHUNK = 64 * 1024
 PAGE_HEADERS = "X-Conduit-Page-Headers"
 PAGE_STATUS = "X-Conduit-Page-Status"
+NO_STORE = {"Cache-Control": "no-store"}
 METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 # Headers about this hop, which the dev server and the page each set for their own.
 HOP_HEADERS = frozenset({
@@ -87,18 +91,26 @@ def _page_headers(raw: Optional[str]) -> List[Tuple[str, str]]:
     if not raw:
         return []
     if len(raw) > PREVIEW_MAX_HEADERS_CHARS:
-        raise HTTPException(status_code=431, detail="The page's headers are too long")
+        raise HTTPException(status_code=431, detail="The page's headers are too long", headers=NO_STORE)
     try:
         pairs = json.loads(raw)
     except ValueError:
-        raise HTTPException(status_code=400, detail=f"{PAGE_HEADERS} must be JSON")
+        raise HTTPException(status_code=400, detail=f"{PAGE_HEADERS} must be JSON", headers=NO_STORE)
     if not isinstance(pairs, list):
-        raise HTTPException(status_code=400, detail=f"{PAGE_HEADERS} must be a list")
+        raise HTTPException(status_code=400, detail=f"{PAGE_HEADERS} must be a list", headers=NO_STORE)
     headers: List[Tuple[str, str]] = []
     for pair in pairs:
         if (not isinstance(pair, list) or len(pair) != 2 or not all(isinstance(p, str) for p in pair)
                 or any(c in pair[0] + pair[1] for c in "\r\n\0") or not pair[0].strip()):
-            raise HTTPException(status_code=400, detail=f"{PAGE_HEADERS} must hold [name, value] pairs")
+            raise HTTPException(status_code=400, detail=f"{PAGE_HEADERS} must hold [name, value] pairs",
+                                headers=NO_STORE)
+        try:
+            # What a request line can carry: an ASCII name, a Latin-1 value.
+            pair[0].encode("ascii")
+            pair[1].encode("latin-1")
+        except UnicodeEncodeError:
+            raise HTTPException(status_code=400, detail=f"{PAGE_HEADERS} holds a header HTTP can't send",
+                                headers=NO_STORE)
         if pair[0].strip().lower() in HOP_HEADERS:
             continue
         headers.append((pair[0].strip(), pair[1]))
@@ -107,7 +119,7 @@ def _page_headers(raw: Optional[str]) -> List[Tuple[str, str]]:
 
 def _target(request: Request, port: int) -> str:
     """The path and query the page asked for, as it sent them (not decoded)."""
-    raw = request.scope.get("raw_path") or request.url.path.encode("utf-8")
+    raw = request.scope.get("raw_path") or urllib.parse.quote(request.url.path, safe="/%:@!$&'()*+,;=-._~").encode()
     path = raw.decode("latin-1")
     marker = f"/workspace/preview/{port}"
     at = path.find(marker)
@@ -121,30 +133,40 @@ def _target(request: Request, port: int) -> str:
 def _open(port: int, method: str, target: str, headers: List[Tuple[str, str]],
           body: bytes) -> Tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
     """The dev server's answer, from this host's loopback: 127.0.0.1, then ::1
-    (a server on "localhost" may listen on either)."""
+    (a server on "localhost" may listen on either). Only a refused or failed
+    connect tries the next address; once connected, what goes wrong is the
+    server's answer (an OSError, an HTTPException or a timeout)."""
     refused: Optional[Exception] = None
+    conn: Optional[http.client.HTTPConnection] = None
     for address in ("127.0.0.1", "::1"):
-        conn = http.client.HTTPConnection(address, port, timeout=PREVIEW_TIMEOUT_S)
+        attempt = http.client.HTTPConnection(address, port, timeout=PREVIEW_CONNECT_S)
         try:
-            conn.putrequest(method, target, skip_host=True, skip_accept_encoding=True)
-            conn.putheader("Host", f"localhost:{port}")
-            for name, value in headers:
-                if name.lower() == "accept-encoding":
-                    continue
-                conn.putheader(name, value)
-            # As it sent it, so the desktop hands the page bytes it can read.
-            conn.putheader("Accept-Encoding", "identity")
-            if body or method in ("POST", "PUT", "PATCH"):
-                conn.putheader("Content-Length", str(len(body)))
-            conn.endheaders(body or None)
-            return conn, conn.getresponse()
-        except (ConnectionRefusedError, socket.gaierror, OSError) as exc:
-            conn.close()
-            if isinstance(exc, (socket.timeout, TimeoutError)):
-                raise
+            attempt.connect()
+        except OSError as exc:
+            attempt.close()
             refused = exc
             continue
-    raise _Unreachable(str(refused) if refused else "refused")
+        conn = attempt
+        break
+    if conn is None:
+        raise _Unreachable(str(refused) if refused else "refused")
+    try:
+        conn.sock.settimeout(PREVIEW_TIMEOUT_S)
+        conn.putrequest(method, target, skip_host=True, skip_accept_encoding=True)
+        conn.putheader("Host", f"localhost:{port}")
+        for name, value in headers:
+            if name.lower() == "accept-encoding":
+                continue
+            conn.putheader(name, value)
+        # As it sent it, so the desktop hands the page bytes it can read.
+        conn.putheader("Accept-Encoding", "identity")
+        if body or method in ("POST", "PUT", "PATCH"):
+            conn.putheader("Content-Length", str(len(body)))
+        conn.endheaders(body or None)
+        return conn, conn.getresponse()
+    except BaseException:
+        conn.close()
+        raise
 
 
 def _chunks(conn: http.client.HTTPConnection, answer: http.client.HTTPResponse) -> Iterator[bytes]:
@@ -181,7 +203,9 @@ async def _body(request: Request) -> bytes:
 
 
 def _answer_headers(answer: http.client.HTTPResponse) -> List[List[str]]:
-    return [[name, value] for name, value in answer.getheaders() if name.lower() not in HOP_HEADERS]
+    # The wrapper's own headers are this route's to set, never the dev server's.
+    return [[name, value] for name, value in answer.getheaders()
+            if name.lower() not in HOP_HEADERS and not name.lower().startswith("x-conduit-page-")]
 
 
 @router.api_route("/workspace/preview/{port}/{path:path}", methods=METHODS)
@@ -207,7 +231,7 @@ async def workspace_preview(request: Request, port: str, path: str = "") -> Any:
     try:
         conn, answer = await asyncio.wait_for(
             loop.run_in_executor(_preview_executor, _open, number, request.method, target, page_headers, body),
-            timeout=PREVIEW_TIMEOUT_S + 5)
+            timeout=PREVIEW_CONNECT_S * 2 + PREVIEW_TIMEOUT_S + 5)
     except _Unreachable:
         raise HTTPException(status_code=502, detail=f"Nothing on this host answers on port {number}",
                             headers=headers_out)

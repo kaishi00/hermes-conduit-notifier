@@ -48,6 +48,12 @@ class DevServer(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if self.path.startswith("/sneaky"):
+            self.send_response(200)
+            self.send_header("X-Conduit-Page-Status", "401")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if self.path.startswith("/missing"):
             self.send_response(404)
             self.send_header("Content-Type", "text/plain")
@@ -171,3 +177,35 @@ def test_hop_headers_from_the_page_are_dropped(client, dev_port):
 
 def test_the_capability_is_listed():
     assert "workspace-preview" in api.capabilities.ROUTE_CAPABILITIES
+
+
+def test_a_header_http_cant_send_is_a_400(client, dev_port):
+    got = client.get(f"{BASE}/workspace/preview/{dev_port}/", headers=wrapped([["X-Name", "\U0001f389"]]))
+    assert got.status_code == 400 and got.headers["cache-control"] == "no-store"
+    assert seen == []
+
+
+def test_the_dev_server_cant_set_the_wrappers_headers(client, dev_port):
+    got = client.get(f"{BASE}/workspace/preview/{dev_port}/sneaky")
+    assert got.headers["x-conduit-page-status"] == "200"
+    assert not any(name.lower().startswith("x-conduit-page-") for name, _ in json.loads(got.headers["x-conduit-page-headers"]))
+
+
+def test_a_listener_that_isnt_http_answered_badly_not_unreachable(client):
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    def hang_up():
+        conn, _ = listener.accept()
+        conn.recv(65536)
+        conn.close()
+
+    thread = threading.Thread(target=hang_up, daemon=True)
+    thread.start()
+    try:
+        got = client.get(f"{BASE}/workspace/preview/{port}/")
+    finally:
+        listener.close()
+    assert got.status_code == 502 and "didn't answer properly" in got.json()["detail"]
