@@ -4641,7 +4641,7 @@ relay key. The host still opens no inbound route.
   runs, or `uv` where that Python has no venv or pip, then
   `pip install --require-hashes -r dashboard/watch_audio_requirements.txt`
   (aiortc 1.15.0 and every package it needs, each pinned with its hashes, so
-  nothing can change under the pin; plugin 0.200.2+; about 150 MB), run isolated and without
+  nothing can change under the pin; plugin 0.200.3+; about 150 MB), run isolated and without
   Hermes' `PYTHONPATH` so it installs everything aiortc needs rather than
   counting on packages Hermes already has. It goes in
   `~/.hermes/conduit_push/watch-audio-env` (under `HERMES_HOME` when that's
