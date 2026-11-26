@@ -887,6 +887,21 @@ def test_the_board_rule_is_only_for_a_conduit_that_draws_boards(tool_home):
     assert tool.board_rule("messaging") is None and tool.board_rule(None) is None
 
 
+def test_a_conduit_that_draws_reply_html_hears_it_may_but_only_where_no_card_fits(tool_home):
+    # Eric, 2026-11-26: HTML in a reply draws, but data stays on conduit_show.
+    _exchange(PresentStore(tool_home), features=BOARD_FEATURES)
+    assert tool.board_rule("conduit") == tool.BOARD_RULE
+    assert "Never draw data as an HTML ::preview page." in tool.BOARD_RULE
+    _exchange(PresentStore(tool_home), features=BOARD_FEATURES + (tool.REPLY_HTML_FEATURE,))
+    rule = tool.board_rule("conduit")
+    assert rule == tool.REPLY_HTML_BOARD_RULE != tool.BOARD_RULE
+    assert "HTML written in your reply draws too" in rule
+    assert "only for a visual no card covers: never draw data a card can show as HTML" in rule
+    assert "<details>" in rule and rule.startswith("[Conduit draws boards")
+    assert tool.board_rule("desktop", desktop_half=lambda: True) in (None, tool.DESKTOP_BOARD_RULE), \
+        "Hermes Desktop doesn't draw it"
+
+
 def test_the_tool_offers_the_boards_layout_and_follow_ups():
     properties = tool.SCHEMA["parameters"]["properties"]
     assert properties["layout"]["enum"] == ["stack", "tabs"] and properties["next"]["maxItems"] == 4

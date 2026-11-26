@@ -701,6 +701,34 @@ def test_cards_and_the_call_screen_show_no_media_path():
     assert call["reason"] == "Send 📎 notes.txt?"
 
 
+def test_a_push_says_a_page_the_reply_wrote_and_drops_its_tags():
+    # Eric, 2026-11-26: Conduit draws HTML a reply writes; a push says a page is there.
+    from events import plain_text, starts_page
+    reply = plain_text('Failures jumped:\n<div class="chart">\n<script>if (a < b) draw("</div>")</script>\n\n'
+                       '<p>Thu: 9</p>\n</div>\nBuild is <span style="color:red">failing</span> on <kbd>main</kbd>.')
+    assert push_event("response.ready", identifier="p", body=reply)["body"] == \
+        "Failures jumped: 🗂 Page Build is failing on main."
+    assert plain_text("<details>\n<summary>Log</summary>\n\nline 1\n</details>") == "Log\n\nline 1"
+    # A fenced page is code, and a tag in a code span is what it shows.
+    assert plain_text("```html\n<div>Hi</div>\n```") == "<div>Hi</div>"
+    assert plain_text("Use `<br>` for a break, or <br>this.") == "Use <br> for a break, or  this."
+    assert plain_text("Mail <me@example.com> or see <https://example.com>.") == "Mail <me@example.com> or see <https://example.com>."
+    assert plain_text("A <video> tag and Vec<String>") == "A <video> tag and Vec<String>"
+    assert plain_text("if a <b and y > z") == "if a <b and y > z"
+    # Only tags that pair up go, as the chat draws only those.
+    assert plain_text("An <b>unclosed tag") == "An <b>unclosed tag"
+    assert plain_text("click <span hidden>secret</span> now") == "click secret now"
+    # A second element opened on the closing line keeps the page going; a table row is the table's.
+    from events import pages_said
+    assert pages_said("<div>A</div><div>\nB\n</div>\nAfter") == "🗂 Page\nAfter"
+    table = "Tag | Meaning\n--- | ---\n<div> | container\n\nNext steps"
+    assert pages_said(table) == table
+    header = "Results:\n<div> | A\n--- | ---\n1 | 2"
+    assert pages_said(header) == header
+    assert starts_page("<table>") and starts_page("<!DOCTYPE html>") and not starts_page("<details>")
+    assert not starts_page("<Conversation>") and not starts_page("say <div> here")
+
+
 def test_no_push_shows_a_desktop_directive():
     # Hermes Desktop's directives (Conduit #1522): a preview reads as its
     # file, a plugin's card as a card, never as the raw line.
