@@ -16,7 +16,7 @@ from typing import Any
 from hermes_constants import get_hermes_home
 
 from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_done_tool, chat_mute, chat_on_screen, clarify_loop, client, compaction_skip, conduit_first, cron_bot_chat, cron_runs,
-               desktop_selected, forks, health_tool, inbox_tool, leaked_calls, link_ask_tool, link_asks, live_activity,
+               desktop_selected, forks, health_tool, inbox_tool, leaked_calls, link_ask_tool, link_asks, live_activity, live_steps,
                location_tool, maps_tool, memory_scan, notify_tool, phone_tool, present_tool, profile_copies, pulse,
                quiet_turns, reply_sources, review_notices,
                room_asks, room_chats, room_cleanup, room_cutoff, room_free_busy, room_identity, room_invites,
@@ -334,6 +334,9 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
                                kwargs.get("args"), turn_id=kwargs.get("turn_id"),
                                tool_call_id=kwargs.get("tool_call_id")))
     _quietly(live_activity.reporter.tool_started, _text(kwargs.get("session_id")), kwargs.get("tool_name"))
+    # The step the bots lists show for this chat: the tool's category only, as on the Lock Screen.
+    _quietly(live_steps.step, _text(kwargs.get("session_id")),
+             "input" if kwargs.get("tool_name") == "clarify" else "tool", live_activity.tool_category(kwargs.get("tool_name")))
     if kwargs.get("tool_name") != "clarify":
         return
     # A workstream's question waits on the user too.
@@ -956,6 +959,7 @@ def _unload() -> None:
     memory_scan.uninstall()
     deadline = time.monotonic() + 1.0
     live_activity.reporter.stop(timeout=max(0.0, deadline - time.monotonic()))
+    _quietly(live_steps.forget)
     client.stop(timeout=max(0.0, deadline - time.monotonic()))
 
 
@@ -1131,6 +1135,7 @@ def _on_session_end(**kwargs: Any) -> None:
     if _session_closed_after_turn(session_id, kwargs):
         return
     _note_turn_ended(session_id)
+    _quietly(live_steps.ended, session_id)
     # Its turn is over: the screen is free for the bot's other chats.
     _quietly(work_tool.screen_turn_ended, session_id)
     _end_parent_turn(session_id)
@@ -1268,6 +1273,7 @@ def _pre_approval_request(**kwargs: Any) -> None:
     description = _text(kwargs.get("description"))
     _quietly(live_activity.reporter.waiting,
              _text(kwargs.get("session_id")) or session_id, "approval")
+    _quietly(live_steps.step, _text(kwargs.get("session_id")) or session_id, "approval")
     wait_session = _text(kwargs.get("session_id")) or session_id
     _quietly(work_tool.needs_you, wait_session, description)
     # The event id deliberately excludes `id(kwargs)`: CPython recycles ids, so
@@ -1335,6 +1341,7 @@ def _post_approval_response(**kwargs: Any) -> None:
     session_key = _text(kwargs.get("session_key"))
     calls.cancel_alerts(session_key or _text(kwargs.get("session_id")), "approval")
     _quietly(live_activity.reporter.thinking, _text(kwargs.get("session_id")) or session_key)
+    _quietly(live_steps.step, _text(kwargs.get("session_id")) or session_key, "thinking")
     _quietly(work_tool.answered, _text(kwargs.get("session_id")) or session_key)
 
 
@@ -1342,6 +1349,7 @@ def _pre_api_request(**kwargs: Any) -> None:
     session_id = _text(kwargs.get("session_id"))
     if not _is_child(session_id):
         _quietly(live_activity.reporter.thinking, session_id)
+        _quietly(live_steps.step, session_id, "thinking")
 
 
 def _post_api_request(**kwargs: Any) -> None:
@@ -1540,6 +1548,9 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         _quietly(work_tool.note_wait_wake, session_id, kwargs.get("turn_id"), kwargs.get("user_message"))
         _start_parent_turn(session_id, kwargs.get("turn_id"))
         _drop_unnamed_end(session_id)
+        if not forks.inside():
+            # Every chat's turn, a workstream's too, has a step the bots lists can show (live_steps).
+            _quietly(live_steps.started, get_hermes_home(), session_id)
         # A workstream's hidden turn shows no Lock Screen progress, as Pulse's
         # doesn't; one that starts after its row settled (a follow-up queued
         # behind the last turn) puts it back to running.

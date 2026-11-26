@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.199.0 (2026-11-26)
+
+### New and improved
+
+- Conduit's bots lists can show what each bot is doing now in any of its chats, not only the one you have open: thinking, running a command, searching the web, or waiting on you. Only the kind of step is shared, never what a tool was given or returned.
+
 ## 0.198.2 (2026-11-26)
 
 ### Fixes
