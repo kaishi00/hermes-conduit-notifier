@@ -163,6 +163,19 @@ If they decline or miss the call, the next turn in this chat starts with a
 note from Conduit saying so. They haven't heard your news: lead with it if
 it still matters. Don't call again about it unless they ask.
 
+## Calls about a question you're waiting on
+
+Alert calls read what you're waiting on (a clarify question, an approval)
+aloud from the plugin's store. On the Apple Watch the spoken answer reaches
+that store live; on the iPhone it can't go in while the call runs — the
+words arrive when Conduit saves the call at its end, and the plugin feeds
+them to the waiting question itself (0.198.3): the question the call read
+aloud takes the user's first answer after the model asked it. A question
+the call never asked, and several read in one turn, keep their cards; the
+card still wins if it answered first. So after such a call, don't assume
+the spoken answer was lost: check the clarify result first — the user's
+own words may already be in — and only ask again what still has no answer.
+
 ## Writing the reason
 
 One short spoken sentence, said first when they answer. Lead with the news.
