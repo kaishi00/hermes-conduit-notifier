@@ -715,6 +715,11 @@ def test_a_push_says_a_page_the_reply_wrote_and_drops_its_tags():
     assert plain_text("Mail <me@example.com> or see <https://example.com>.") == "Mail <me@example.com> or see <https://example.com>."
     assert plain_text("A <video> tag and Vec<String>") == "A <video> tag and Vec<String>"
     assert plain_text("if a <b and y > z") == "if a <b and y > z"
+    # A second element opened on the closing line keeps the page going; a table row is the table's.
+    from events import pages_said
+    assert pages_said("<div>A</div><div>\nB\n</div>\nAfter") == "🗂 Page\nAfter"
+    table = "Tag | Meaning\n--- | ---\n<div> | container\n\nNext steps"
+    assert pages_said(table) == table
     assert starts_page("<table>") and starts_page("<!DOCTYPE html>") and not starts_page("<details>")
     assert not starts_page("<Conversation>") and not starts_page("say <div> here")
 

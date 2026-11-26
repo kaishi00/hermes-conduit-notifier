@@ -876,7 +876,6 @@ _PAGE_START = re.compile(r"^ {0,3}(?:<!doctype\s+html\b|<([a-zA-Z][a-zA-Z0-9]*)(
 _TOKEN = re.compile(
     r"<!--[\s\S]*?(?:-->|$)|<![^>]*>?|</([a-zA-Z][a-zA-Z0-9-]*)\s*>"
     r"|<([a-zA-Z][a-zA-Z0-9-]*)((?:\s+[^\s\"'>/=]+(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))?)*)\s*(/?)>")
-_PARTIAL_TAG = re.compile(r"^ {0,3}<[!a-zA-Z]*$")
 # The tags Conduit draws; any other stays text there, so it stays in a push too.
 _HTML_TAG = re.compile(r"""</?(?:b|strong|i|em|u|ins|s|del|strike|mark|kbd|sub|sup|span|font|details|summary)"""
                        r"""(?:\s+[\w-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>]+)|\s+open)*\s*/?>""", re.IGNORECASE)
@@ -891,15 +890,20 @@ def starts_page(line: str) -> bool:
     return bool(match) and (match.group(1) is None or match.group(1).lower() in _PAGE_TAGS)
 
 
-def _closes_at(text: str) -> int:
-    """The index just past the tag that leaves no element open, or -1 while
-    one is still open. A closing tag closes its element and any left open
-    inside it, as a browser does."""
+def _closes_at(text: str, at: int = 0) -> int:
+    """The index just past the tag that leaves no element open, from ``at``,
+    or -1 while one is still open. A closing tag closes its element and any
+    left open inside it, as a browser does. Tags after it on its line are
+    read too, so an element opened there keeps the page going."""
     opened: list[str] = []
-    lower = text.lower()
-    at = 0
+    lower = ""
+    emptied = -1
     while True:
         match = _TOKEN.search(text, at)
+        if emptied >= 0:
+            line_end = text.find("\n", emptied)
+            if not match or (line_end >= 0 and match.start() > line_end):
+                return emptied
         if not match:
             return -1
         token = match.group(0)
@@ -915,6 +919,7 @@ def _closes_at(text: str) -> int:
             name = match.group(2).lower()
             if name not in _VOID and not match.group(4):
                 if name in _RAW_TEXT:
+                    lower = lower or text.lower()
                     end = lower.find(f"</{name}", at)
                     close = -1 if end < 0 else text.find(">", end)
                     if close < 0:
@@ -922,31 +927,29 @@ def _closes_at(text: str) -> int:
                     at = close + 1
                 else:
                     opened.append(name)
-        if not opened and not token.startswith("<!"):
-            return at
+        if token.startswith("<!"):
+            continue
+        emptied = at if not opened else -1
 
 
-def page_end(lines: list[str], start: int) -> tuple[int, bool]:
-    """The line after the page starting at ``start``, and whether it is
-    complete (closed, with something other than a page after it)."""
+def page_end(lines: list[str], start: int) -> int:
+    """The line after the page starting at ``start``."""
+    text = "\n".join(lines[start:])
+    offset = 0
     line = start
     while True:
-        text = "\n".join(lines[line:])
-        at = _closes_at(text)
+        at = _closes_at(text, offset)
         if at < 0:
-            return len(lines), False
-        end = line + text[:at].count("\n") + 1
+            return len(lines)
+        end = line + text.count("\n", offset, at) + 1
         following = end
         while following < len(lines) and not lines[following].strip():
             following += 1
         if following < len(lines) and starts_page(lines[following]):
+            offset += sum(len(lines[index]) + 1 for index in range(line, following))
             line = following
             continue
-        if following >= len(lines):
-            return end, False
-        if following == len(lines) - 1 and _PARTIAL_TAG.match(lines[following]):
-            return end, False
-        return end, True
+        return end
 
 
 def pages_said(text: str, said: str = _PAGE_SAID) -> str:
@@ -965,8 +968,9 @@ def pages_said(text: str, said: str = _PAGE_SAID) -> str:
                 fence = None
         elif found:
             fence = found.group(1)
-        elif starts_page(line):
-            index, _ = page_end(lines, index)
+        elif starts_page(line) and not (index and "|" in line and "|" in lines[index - 1]):
+            # A table row that starts with a tag is the table's.
+            index = page_end(lines, index)
             out.append(said)
             continue
         out.append(line)
