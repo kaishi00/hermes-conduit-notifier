@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.200.1 (2026-11-26)
+
+### Security
+
+- Setting up GPT-Live for the Apple Watch now installs aiortc and every package it needs from a list pinned with checksums, so a package published later can't slip into the install.
+
 ## 0.200.0 (2026-11-26)
 
 ### New and improved
