@@ -146,6 +146,10 @@ WATCH_AUDIO_MAX_QUEUED_EVENT_BYTES = 1024 * 1024
 WATCH_AUDIO_MAX_HELD = 200
 WATCH_AUDIO_AIORTC = "aiortc==1.15.0"
 WATCH_AUDIO_ENV_VAR = "CONDUIT_WATCH_AUDIO_ENV"
+# Set to "off" on a host whose admin manages packages: prepare never runs pip
+# or uv, and only a Python that already has aiortc and av is used (notifier
+# issue 156). Unset, Conduit's Set up makes the environment as before.
+WATCH_AUDIO_PREPARE_VAR = "CONDUIT_WATCH_AUDIO_PREPARE"
 _WATCH_AUDIO_MARKER = "conduit-watch-audio.json"
 WATCH_AUDIO_VENV_TIMEOUT_S = 180.0
 WATCH_AUDIO_PIP_TIMEOUT_S = 900.0
@@ -160,6 +164,8 @@ WATCH_AUDIO_NEEDS_RUNTIME = ("GPT-Live on the Watch needs its WebRTC runtime on 
                              "prepare it from Conduit's Voice settings")
 WATCH_AUDIO_STALE_RUNTIME = ("GPT-Live on the Watch needs its WebRTC runtime made again for this plugin version; "
                              "prepare it from Conduit's Voice settings")
+WATCH_AUDIO_PREPARE_OFF = ("This host's admin turned off preparing GPT-Live's WebRTC runtime for the Watch; "
+                           "they can install aiortc and av into Hermes' Python instead")
 
 
 class WatchAudioError(Exception):
@@ -326,6 +332,21 @@ def _watch_audio_marker_current(env_dir: str) -> bool:
     return _watch_audio_marker_pin(env_dir) == WATCH_AUDIO_AIORTC
 
 
+_PREPARE_OFF_VALUES = ("off", "0", "false", "no")
+_PREPARE_ON_VALUES = ("", "on", "1", "true", "yes")
+_prepare_values_warned: set = set()
+
+
+def _watch_audio_prepare_off() -> bool:
+    """Whether the host's admin turned prepare off (CONDUIT_WATCH_AUDIO_PREPARE=off)."""
+    value = str(os.environ.get(WATCH_AUDIO_PREPARE_VAR) or "").strip().lower()
+    if value not in _PREPARE_OFF_VALUES and value not in _PREPARE_ON_VALUES and value not in _prepare_values_warned:
+        # Once per value: status polls read this too.
+        _prepare_values_warned.add(value)
+        logger.warning("%s=%r isn't off or on; preparing stays on", WATCH_AUDIO_PREPARE_VAR, value)
+    return value in _PREPARE_OFF_VALUES
+
+
 def _watch_audio_helper_env(extra: Tuple[str, ...] = ()) -> Dict[str, str]:
     names = frozenset(_WATCH_AUDIO_HELPER_ENV + extra)
     return {name: value for name, value in os.environ.items() if name in names or name.startswith("LC_")}
@@ -392,12 +413,19 @@ class _WatchAudioRuntime:
         return failure or self._marker_reason()
 
     def _marker_reason(self) -> str:
+        if _watch_audio_prepare_off():
+            return WATCH_AUDIO_PREPARE_OFF
         pin = _watch_audio_marker_pin(self._env_dir())
         return WATCH_AUDIO_STALE_RUNTIME if pin is not None and pin != WATCH_AUDIO_AIORTC else WATCH_AUDIO_NEEDS_RUNTIME
 
     def prepare(self, start: Optional[Callable[[Callable[[], None]], None]] = None) -> Dict[str, Any]:
         """Starts making the environment unless it's there or on its way; returns the status."""
         if self.python() is not None:
+            return self.status()
+        if _watch_audio_prepare_off():
+            # Nothing is installed; the status says why, as a failed prepare would.
+            with self._lock:
+                self.failure = WATCH_AUDIO_PREPARE_OFF
             return self.status()
         with self._lock:
             if self.preparing:

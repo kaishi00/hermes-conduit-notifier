@@ -316,3 +316,40 @@ test('the sweep drops every expired unwatched end, whatever order they came in',
   activities.sweep();
   assert.deepEqual([...activities.unwatchedEnds.keys()], ['install-1\nfresh']);
 });
+
+test('the first gateway to report owns the card; another on the same phone is told nobody watches', async () => {
+  const { activities, sent } = harness({ minIntervalMs: 0 });
+  activities.register('install-1', TOKEN_A, ['session-1']);
+  assert.equal(activities.report('install-1', 'session-1', { phase: 'thinking', tools: 0 }, undefined, { gatewayId: 'gw-a' }), true);
+  await settle();
+  assert.equal(activities.report('install-1', 'session-1', { phase: 'tool', tool: 'web', tools: 1 }, 'done', { gatewayId: 'gw-b', endedAgoS: 0 }), false);
+  assert.equal(activities.find('install-1', 'session-1', 'gw-b'), undefined);
+  assert.ok(activities.find('install-1', 'session-1', 'gw-a'));
+  await settle();
+  assert.equal(sent.length, 1, 'the other gateway reached nothing');
+  assert.equal(activities.report('install-1', 'session-1', { phase: 'thinking', tools: 1 }, 'done', { gatewayId: 'gw-a', endedAgoS: 0 }), true);
+  await settle();
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].push.payload.aps.event, 'end');
+});
+
+test('an end kept before the card registered binds the card to its gateway, and another gateway can not replace it', async () => {
+  const { activities, sent } = harness({ minIntervalMs: 0 });
+  assert.equal(activities.report('install-1', 'session-1', { phase: 'thinking', tools: 2 }, 'done', { gatewayId: 'gw-a', endedAgoS: 0 }), false);
+  assert.equal(activities.report('install-1', 'session-1', { phase: 'thinking', tools: 0 }, undefined, { gatewayId: 'gw-b' }), false,
+    "another gateway's report leaves the kept end alone");
+  const activity = activities.register('install-1', TOKEN_A, ['session-1'], { startedAgoS: 60 });
+  await settle();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].push.payload.aps.event, 'end');
+  assert.equal(activity.gatewayId, 'gw-a');
+});
+
+test('the phone registering the same activity again keeps its owner', async () => {
+  const { activities } = harness({ minIntervalMs: 0 });
+  activities.register('install-1', TOKEN_A, ['session-1']);
+  assert.equal(activities.report('install-1', 'session-1', { phase: 'thinking', tools: 0 }, undefined, { gatewayId: 'gw-a' }), true);
+  activities.register('install-1', TOKEN_A, ['session-1']);
+  assert.equal(activities.report('install-1', 'session-1', { phase: 'thinking', tools: 0 }, undefined, { gatewayId: 'gw-b' }), false);
+  assert.equal(activities.report('install-1', 'session-1', { phase: 'thinking', tools: 1 }, undefined, { gatewayId: 'gw-a' }), true);
+});

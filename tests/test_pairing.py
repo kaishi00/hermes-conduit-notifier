@@ -199,6 +199,21 @@ def test_malformed_requests_are_refused_without_claiming(tmp_path, body):
     assert not (tmp_path / "s.json").exists()
 
 
+def test_a_relay_off_the_operators_allowlist_is_refused_without_claiming(tmp_path, monkeypatch):
+    # CONDUIT_RELAY_ALLOWLIST (notifier issue 156): set, Conduit's pair goes
+    # only to the relays it names, the default one included.
+    monkeypatch.setenv("CONDUIT_RELAY_ALLOWLIST", "https://relay.example")
+    calls = []
+    for body in ({"pairing_code": CODE, "relay_url": "https://elsewhere.example"}, {"pairing_code": CODE}):
+        with pytest.raises(api.core.TokenError, match="CONDUIT_RELAY_ALLOWLIST") as raised:
+            api.pairing.pair_profile(body, path=tmp_path / "s.json", claim=_recording_claim(calls))
+        assert raised.value.status == 400
+    assert calls == []
+    api.pairing.pair_profile({"pairing_code": CODE, "relay_url": "https://relay.example"}, path=tmp_path / "s.json",
+                             claim=_recording_claim(calls))
+    assert len(calls) == 1
+
+
 class _Response:
     def __init__(self, status, body):
         self.status, self._body = status, json.dumps(body).encode()

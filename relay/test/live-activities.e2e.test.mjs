@@ -24,6 +24,7 @@ let child;
 let base;
 let device;
 let host;
+let otherHost;
 let installationId;
 const TOKEN = 'ab'.repeat(40);
 
@@ -72,6 +73,9 @@ before(async () => {
   installationId = created.installation.id;
   device = `${installationId}.${created.deviceSecret}`;
   host = `${installationId}.${claim.gatewayId}.${claim.gatewaySecret}`;
+  // A second gateway paired with the same phone (notifier issue 156).
+  const otherClaim = fixture.claimPairing(fixture.createPairing(created.installation.id).code, 'other host');
+  otherHost = `${installationId}.${otherClaim.gatewayId}.${otherClaim.gatewaySecret}`;
   const port = await freePort();
   base = `http://127.0.0.1:${port}`;
   child = spawn(process.execPath, ['src/server.mjs'], {
@@ -154,6 +158,24 @@ test('the phone removes an activity; the host then hears nobody is watching', as
   assert.equal(removed.status, 204);
   const answer = await api('/v1/live-activity', { method: 'POST', credential: host, body: { session_id: 'stored-2', state: { phase: 'thinking' } } });
   assert.deepEqual(answer.json, { tracked: false });
+});
+
+test('another gateway on the same phone never reaches a card the first one reports on', async () => {
+  const token = 'cd'.repeat(40);
+  const before = captured().length;
+  await api(`/v1/installations/${installationId}/live-activities`, {
+    method: 'PUT', credential: device, body: { push_token: token, session_ids: ['owned-1'] },
+  });
+  const report = (credential, body) => api('/v1/live-activity', { method: 'POST', credential, body });
+  assert.deepEqual((await report(host, { session_id: 'owned-1', state: { phase: 'thinking' } })).json, { tracked: true });
+  await waitForCaptures(before + 1);
+  assert.deepEqual((await report(otherHost, { session_id: 'owned-1', state: { phase: 'thinking' }, end: 'done' })).json,
+    { tracked: false });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(captured().length, before + 1, 'the other gateway sent nothing to the card');
+  assert.deepEqual((await report(host, { session_id: 'owned-1', state: { phase: 'thinking' }, end: 'done' })).json, { tracked: true });
+  const pushes = await waitForCaptures(before + 2);
+  assert.equal(pushes.at(-1).notification.payload.aps.event, 'end');
 });
 
 test('malformed or unauthenticated requests are refused', async () => {

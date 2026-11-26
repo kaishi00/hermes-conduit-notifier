@@ -15,11 +15,19 @@ route, so both pairing paths apply the same rules:
 
 No URL with credentials, a query or a fragment is ever used. Error messages
 never echo the URL, which may hold a secret.
+
+An operator can pin the relays this host talks to with the environment
+variable CONDUIT_RELAY_ALLOWLIST: relay origins separated by commas or spaces
+(`https://push.milim.dev`). When it's set, a claim and every request that
+carries a credential must go to one of them, by scheme, host and port, and a
+relay the claim answers with that isn't on it is not saved. A value with no
+valid origin allows none. Unset or empty, nothing changes (notifier issue 156).
 """
 
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
 import urllib.parse
 
@@ -33,8 +41,33 @@ _METADATA = {ipaddress.ip_address(a) for a in ("169.254.169.254", "169.254.170.2
 _METADATA_NAMES = ("metadata.google.internal", "metadata", "instance-data", "instance-data.ec2.internal")
 
 
+ALLOWLIST_ENV = "CONDUIT_RELAY_ALLOWLIST"
+
+
 class RelayURLError(ValueError):
     """A relay URL this host won't use. The message is safe to show."""
+
+
+def allowed_origins() -> frozenset[tuple[str, str, int]] | None:
+    """The relay origins CONDUIT_RELAY_ALLOWLIST allows, or None when it's unset (any relay)."""
+    raw = str(os.environ.get(ALLOWLIST_ENV) or "").strip()
+    if not raw:
+        return None
+    origins = set()
+    for entry in re.split(r"[\s,]+", raw):
+        try:
+            parts = urllib.parse.urlsplit(entry)
+            if parts.scheme in ("https", "http") and parts.hostname and parts.username is None:
+                origins.add(_origin(parts))
+        except ValueError:
+            continue
+    return frozenset(origins)
+
+
+def _check_allowed(parts: urllib.parse.SplitResult) -> None:
+    allowed = allowed_origins()
+    if allowed is not None and _origin(parts) not in allowed:
+        raise RelayURLError(f"This host only uses the relays its administrator allows ({ALLOWLIST_ENV}).")
 
 
 def _split(url: object) -> urllib.parse.SplitResult:
@@ -105,6 +138,7 @@ def check_request_url(url: object) -> str:
         raise RelayURLError("The relay URL must not contain a query.")
     if parts.scheme != "https" and not is_loopback(parts.hostname or ""):
         raise RelayURLError("The relay URL must use https://.")
+    _check_allowed(parts)
     return url  # type: ignore[return-value]
 
 
@@ -118,6 +152,7 @@ def check_claim_base(url: object) -> str:
         raise RelayURLError("The relay URL must not contain a query.")
     if parts.scheme != "https" and not is_private(parts.hostname or ""):
         raise RelayURLError("The relay URL must use https:// (plain http:// only works for a LAN or Tailscale address).")
+    _check_allowed(parts)
     return url.rstrip("/")  # type: ignore[union-attr]
 
 

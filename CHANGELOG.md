@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.199.2 (2026-11-26)
+
+### New and improved
+
+- A host's admin can limit which push relays it pairs with and sends to (CONDUIT_RELAY_ALLOWLIST), and turn off the plugin installing GPT-Live's Watch runtime by itself (CONDUIT_WATCH_AUDIO_PREPARE=off). Nothing changes where they're not set.
+
 ## 0.199.1 (2026-11-26)
 
 ### Fixes

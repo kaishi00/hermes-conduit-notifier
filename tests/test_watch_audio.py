@@ -375,6 +375,36 @@ def test_a_failed_prepare_says_why_and_can_be_asked_again(tmp_path):
     assert runtime.prepare(start=lambda target: target())["runtime"] == "ready"
 
 
+@pytest.mark.parametrize("value", ["off", "OFF", "0", "false"])
+def test_prepare_turned_off_runs_nothing_and_says_why(tmp_path, monkeypatch, value):
+    # CONDUIT_WATCH_AUDIO_PREPARE=off (notifier issue 156): a locked-down host
+    # never runs pip or uv; the status and the Watch hear why.
+    monkeypatch.setenv("CONDUIT_WATCH_AUDIO_PREPARE", value)
+    run = FakeRun()
+    runtime = _runtime(tmp_path, run=run, which=lambda name: "/opt/uv")
+    off = api.watch_audio.WATCH_AUDIO_PREPARE_OFF
+    assert runtime.status() == {"runtime": "missing", "source": None, "reason": off}
+    status = runtime.prepare(start=lambda target: pytest.fail("prepare started"))
+    assert status == {"runtime": "failed", "source": None, "reason": off}
+    assert runtime.missing_reason() == off
+    assert run.commands == []
+    assert not (tmp_path / "env").exists()
+
+
+def test_prepare_turned_off_still_uses_a_hermes_python_with_aiortc(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONDUIT_WATCH_AUDIO_PREPARE", "off")
+    runtime = _runtime(tmp_path, has=lambda name: True)
+    assert runtime.prepare(start=lambda target: pytest.fail("prepare started"))["runtime"] == "ready"
+    assert runtime.status()["source"] == "hermes"
+
+
+@pytest.mark.parametrize("value", ["", "on", "1"])
+def test_prepare_left_on_makes_the_environment_as_before(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("CONDUIT_WATCH_AUDIO_PREPARE", value)
+    runtime = _runtime(tmp_path)
+    assert runtime.prepare(start=lambda target: target())["runtime"] == "ready"
+
+
 def test_prepare_never_deletes_a_folder_it_did_not_make(tmp_path):
     env = tmp_path / "env"
     env.mkdir()

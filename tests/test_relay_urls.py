@@ -241,6 +241,16 @@ def test_unpair_with_a_legacy_http_url_removes_the_local_pairing_and_says_so(mon
     assert client.load_state() is None
 
 
+def test_unpair_off_the_allowlist_removes_the_local_pairing_and_names_the_allowlist(monkeypatch, tmp_path):
+    _paired_client(monkeypatch, tmp_path)
+    monkeypatch.setenv("CONDUIT_RELAY_ALLOWLIST", "https://push.milim.dev")
+    monkeypatch.setattr(client, "request_json", lambda *a, **k: pytest.fail("sent off the allowlist"))
+    client.save_state({"credential": "c", "relay_url": "https://relay.example"})
+    with pytest.raises(client.UnpairedLocally, match="CONDUIT_RELAY_ALLOWLIST"):
+        client.unpair()
+    assert client.load_state() is None
+
+
 def test_unpair_keeps_a_pairing_claimed_while_the_relay_revoked_the_old_one(monkeypatch, tmp_path):
     _paired_client(monkeypatch, tmp_path)
     client.save_state({"credential": "old", "relay_url": "https://relay.example"})
@@ -328,3 +338,52 @@ def test_status_strips_control_characters(monkeypatch, capsys):
     assert cli.dispatch(types.SimpleNamespace(conduit_push_action="status")) == 0
     out = capsys.readouterr().out
     assert "\x1b" not in out and "Paired: box[31m" in out and "Warning" not in out
+
+
+# CONDUIT_RELAY_ALLOWLIST (notifier issue 156): an operator pins the relays
+# this host talks to; unset, nothing changes.
+
+def test_an_unset_or_empty_allowlist_changes_nothing(monkeypatch):
+    for value in (None, "", "  "):
+        if value is None:
+            monkeypatch.delenv(urls.ALLOWLIST_ENV, raising=False)
+        else:
+            monkeypatch.setenv(urls.ALLOWLIST_ENV, value)
+        assert urls.allowed_origins() is None
+        assert urls.check_claim_base("https://relay.example/") == "https://relay.example"
+        assert urls.check_request_url("https://other.example/v1/events") == "https://other.example/v1/events"
+
+
+def test_the_allowlist_admits_only_its_origins(monkeypatch):
+    monkeypatch.setenv(urls.ALLOWLIST_ENV, "https://push.milim.dev, http://192.168.1.5:8787")
+    assert urls.check_claim_base("https://push.milim.dev") == "https://push.milim.dev"
+    assert urls.check_claim_base("https://PUSH.milim.dev:443/") == "https://PUSH.milim.dev:443"
+    assert urls.check_claim_base("http://192.168.1.5:8787") == "http://192.168.1.5:8787"
+    assert urls.check_request_url("https://push.milim.dev/v1/events") == "https://push.milim.dev/v1/events"
+    for url in ("https://relay.example", "https://push.milim.dev:8443", "http://192.168.1.5:8788"):
+        with pytest.raises(urls.RelayURLError, match="CONDUIT_RELAY_ALLOWLIST") as caught:
+            urls.check_claim_base(url)
+        assert url not in str(caught.value)
+    with pytest.raises(urls.RelayURLError, match="CONDUIT_RELAY_ALLOWLIST"):
+        urls.check_request_url("https://relay.example/v1/events")
+
+
+def test_a_relay_answer_off_the_allowlist_is_not_saved(monkeypatch):
+    monkeypatch.setenv(urls.ALLOWLIST_ENV, "https://push.milim.dev")
+    assert urls.paired_relay_url("https://elsewhere.example", "https://push.milim.dev") == "https://push.milim.dev"
+
+
+def test_an_allowlist_with_no_valid_origin_allows_none(monkeypatch):
+    monkeypatch.setenv(urls.ALLOWLIST_ENV, "push.milim.dev, ftp://x")
+    assert urls.allowed_origins() == frozenset()
+    with pytest.raises(urls.RelayURLError):
+        urls.check_claim_base("https://push.milim.dev")
+
+
+def test_the_cli_claim_refuses_a_relay_off_the_allowlist_before_spending_the_code(monkeypatch, tmp_path):
+    _paired_client(monkeypatch, tmp_path)
+    monkeypatch.setenv(urls.ALLOWLIST_ENV, "https://push.milim.dev")
+    monkeypatch.setattr(client, "_request", lambda *a, **k: pytest.fail("claimed"))
+    with pytest.raises(ValueError, match="CONDUIT_RELAY_ALLOWLIST"):
+        client.claim_pairing("CODE", "https://relay.example", "box")
+    assert client.load_state() is None
