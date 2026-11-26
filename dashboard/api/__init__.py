@@ -48,6 +48,8 @@ MODULES = (
     "session_route",
     "rooms",
     "workspace",
+    "source_control",
+    "terminals",
     "workstreams",
     "waiting",
     "live_steps",

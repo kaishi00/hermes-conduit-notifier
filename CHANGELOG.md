@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.201.0 (2026-11-26)
+
+### New and improved
+
+- Conduit for desktop can open terminals on your Hermes host, in a chat's folder. They keep running while Conduit is closed, and you can turn them off for this Hermes in Settings.
+- Conduit for desktop can show what changed in a chat's folder with Git, and stage, commit, switch branches, pull and push there.
+
 ## 0.200.0 (2026-11-26)
 
 ### New and improved
