@@ -4636,7 +4636,7 @@ relay key. The host still opens no inbound route.
   set, or `CONDUIT_WATCH_AUDIO_ENV`). Nothing is installed into Hermes' own
   Python; if that Python already has `aiortc`, it's used as it is. A host
   whose admin manages packages (no package index, an image built ahead)
-  sets `CONDUIT_WATCH_AUDIO_PREPARE=off` (plugin 0.198.3+): `prepare` then
+  sets `CONDUIT_WATCH_AUDIO_PREPARE=off` (or `0`, `false`, `no`; plugin 0.198.3+): `prepare` then
   runs neither pip nor uv and answers `failed` saying so, and GPT-Live on
   the Watch works only where Hermes' Python (or an environment made before)
   already has `aiortc` and `av`.

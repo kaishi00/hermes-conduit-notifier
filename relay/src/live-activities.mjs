@@ -173,11 +173,10 @@ export class LiveActivities {
   // as unwatched and leaves the activity, and an end kept for it, alone.
   report(installationId, sessionId, state, end, { endedAgoS, gatewayId } = {}) {
     const key = sessionKey(installationId, sessionId);
-    const registered = this.bySession.has(key);
     const activity = this.find(installationId, sessionId, gatewayId);
     if (!activity) {
       // Another gateway's card: nothing of it is touched.
-      if (registered && this.bySession.has(key)) return false;
+      if (this.bySession.has(key)) return false;
       const kept = this.unwatchedEnds.get(key);
       if (kept && !ownedBy(kept, gatewayId)) return false;
       // Kept for an activity registered late. A report without an end is

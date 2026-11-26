@@ -40,7 +40,8 @@ from . import e2e, link_status
 from .events import PLUGIN_VERSION, redact_event
 from . import push_proxy
 from .keep_alive import KeepAliveHTTPSHandler
-from .relay_urls import check_claim_base, check_request_url, is_https, paired_relay_url, replaced_pairing_query
+from .relay_urls import (ALLOWLIST_ENV, allowed_origins, check_claim_base, check_request_url, is_https,
+                         paired_relay_url, replaced_pairing_query)
 
 
 DEFAULT_RELAY_URL = "https://push.milim.dev"
@@ -521,8 +522,11 @@ def _unpair_main() -> bool:
         url = check_request_url(f"{str(state.get('relay_url') or '').rstrip('/')}/v1/gateways/current")
     except ValueError:
         remove_state(state["credential"])
+        https = is_https(str(state.get("relay_url") or ""))
+        why = (f"its saved relay isn't one {ALLOWLIST_ENV} allows" if https and allowed_origins() is not None
+               else "its saved relay URL is not https://")
         raise UnpairedLocally(
-            "Removed this profile's pairing, but its saved relay URL is not https://, so the relay was not told. "
+            f"Removed this profile's pairing, but {why}, so the relay was not told. "
             "Remove this gateway in Conduit to revoke it there."
         ) from None
     request_json(url, method="DELETE", credential=state["credential"])

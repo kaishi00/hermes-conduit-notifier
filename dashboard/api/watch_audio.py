@@ -332,9 +332,16 @@ def _watch_audio_marker_current(env_dir: str) -> bool:
     return _watch_audio_marker_pin(env_dir) == WATCH_AUDIO_AIORTC
 
 
+_PREPARE_OFF_VALUES = ("off", "0", "false", "no")
+_PREPARE_ON_VALUES = ("", "on", "1", "true", "yes")
+
+
 def _watch_audio_prepare_off() -> bool:
     """Whether the host's admin turned prepare off (CONDUIT_WATCH_AUDIO_PREPARE=off)."""
-    return str(os.environ.get(WATCH_AUDIO_PREPARE_VAR) or "").strip().lower() in ("off", "0", "false", "no")
+    value = str(os.environ.get(WATCH_AUDIO_PREPARE_VAR) or "").strip().lower()
+    if value not in _PREPARE_OFF_VALUES and value not in _PREPARE_ON_VALUES:
+        logger.warning("%s=%r isn't off or on; preparing stays on", WATCH_AUDIO_PREPARE_VAR, value)
+    return value in _PREPARE_OFF_VALUES
 
 
 def _watch_audio_helper_env(extra: Tuple[str, ...] = ()) -> Dict[str, str]:

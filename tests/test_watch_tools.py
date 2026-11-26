@@ -316,6 +316,19 @@ def test_a_grant_needs_a_paired_profile_on_an_https_relay(tmp_path):
     assert relay.requests == []
 
 
+def test_a_grant_refuses_a_saved_relay_off_the_allowlist(tmp_path, monkeypatch):
+    # CONDUIT_RELAY_ALLOWLIST set after pairing (notifier issue 156): the
+    # grant, and so its polls, results and audio bridge, never reach that relay.
+    path = write_pairing(tmp_path)
+    monkeypatch.setenv("CONDUIT_RELAY_ALLOWLIST", "https://push.milim.dev")
+    relay = FakeRelay()
+    with pytest.raises(api.core.TokenError, match="CONDUIT_RELAY_ALLOWLIST") as err:
+        api.watch_tools.open_watch_grant({"tools": ["web_search"]}, profile=None, path=path, relay=relay,
+                                         start=lambda g: None)
+    assert err.value.status == 409
+    assert relay.requests == []
+
+
 def test_an_older_relay_reads_as_unsupported(tmp_path):
     relay = FakeRelay([(404, {"error": "not_found"})])
     with pytest.raises(api.core.TokenError) as err:

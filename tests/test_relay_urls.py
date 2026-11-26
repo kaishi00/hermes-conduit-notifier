@@ -241,6 +241,16 @@ def test_unpair_with_a_legacy_http_url_removes_the_local_pairing_and_says_so(mon
     assert client.load_state() is None
 
 
+def test_unpair_off_the_allowlist_removes_the_local_pairing_and_names_the_allowlist(monkeypatch, tmp_path):
+    _paired_client(monkeypatch, tmp_path)
+    monkeypatch.setenv("CONDUIT_RELAY_ALLOWLIST", "https://push.milim.dev")
+    monkeypatch.setattr(client, "request_json", lambda *a, **k: pytest.fail("sent off the allowlist"))
+    client.save_state({"credential": "c", "relay_url": "https://relay.example"})
+    with pytest.raises(client.UnpairedLocally, match="CONDUIT_RELAY_ALLOWLIST"):
+        client.unpair()
+    assert client.load_state() is None
+
+
 def test_unpair_keeps_a_pairing_claimed_while_the_relay_revoked_the_old_one(monkeypatch, tmp_path):
     _paired_client(monkeypatch, tmp_path)
     client.save_state({"credential": "old", "relay_url": "https://relay.example"})
