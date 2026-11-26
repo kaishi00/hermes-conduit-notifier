@@ -19,6 +19,12 @@ checks it). The format is fixed, because Conduit reads it:
 
 - Conduit's bots lists can show what each bot is doing now in any of its chats, not only the one you have open: thinking, running a command, searching the web, or waiting on you. Only the kind of step is shared, never what a tool was given or returned.
 
+## 0.199.2 (2026-11-26)
+
+### New and improved
+
+- A host's admin can limit which push relays it pairs with and sends to (CONDUIT_RELAY_ALLOWLIST), and turn off the plugin installing GPT-Live's Watch runtime by itself (CONDUIT_WATCH_AUDIO_PREPARE=off). Nothing changes where they're not set.
+
 ## 0.199.1 (2026-11-26)
 
 ### Fixes

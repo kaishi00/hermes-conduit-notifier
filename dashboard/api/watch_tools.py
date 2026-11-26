@@ -1257,6 +1257,13 @@ def open_watch_grant(body: Any, *, profile: Optional[str], ticket_home: Optional
         raise core.TokenError(409, "This Hermes profile isn't paired with Conduit notifications")
     if not relay_url.startswith(_WATCH_RELAY_SCHEMES):
         raise core.TokenError(409, "The push relay must use HTTPS")
+    relay_urls = pairing._relay_urls()
+    try:
+        # CONDUIT_RELAY_ALLOWLIST (notifier issue 156): the grant's polls,
+        # results and the audio bridge all reuse this URL, so it's checked once here.
+        relay_urls.check_request_url(relay_url)
+    except relay_urls.RelayURLError as exc:
+        raise core.TokenError(409, str(exc))
     _watch_grant_limiter.acquire(core._limiter_key(profile))
     secret = os.urandom(32)
     watch_key = _b64u(os.urandom(32))

@@ -519,10 +519,11 @@ def _unpair_main() -> bool:
         return False
     try:
         url = check_request_url(f"{str(state.get('relay_url') or '').rstrip('/')}/v1/gateways/current")
-    except ValueError:
+    except ValueError as exc:
         remove_state(state["credential"])
+        # relay_urls' messages never echo the URL, so the reason is shown as it is.
         raise UnpairedLocally(
-            "Removed this profile's pairing, but its saved relay URL is not https://, so the relay was not told. "
+            f"Removed this profile's pairing, but the relay was not told: {exc} "
             "Remove this gateway in Conduit to revoke it there."
         ) from None
     request_json(url, method="DELETE", credential=state["credential"])
