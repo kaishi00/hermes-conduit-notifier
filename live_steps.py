@@ -58,13 +58,15 @@ _not_moved: set[str] = set()
 _unsettled: dict[str, float] = {}
 
 
-def _moved(session_id: str) -> str | None:
+def _moved(session_id: str, recheck: bool = False) -> str | None:
     """The home of the noted turn ``session_id`` continues through a compaction,
-    with the turn's step moved to ``session_id``; None when it continues none."""
+    with the turn's step moved to ``session_id``; None when it continues none.
+    ``recheck`` asks the store even inside the retry wait: a turn's end has no
+    later hook to put it right."""
     with _lock:
         if session_id in _home_of or session_id in _not_moved or not _home_of:
             return None
-        if time.monotonic() < _unsettled.get(session_id, 0.0):
+        if not recheck and time.monotonic() < _unsettled.get(session_id, 0.0):
             return None
         running = set(_home_of)
         find = lineage
@@ -146,7 +148,7 @@ def ended(session_id: str) -> None:
     """The turn of ``session_id`` is over, however it ended."""
     if not session_id:
         return
-    _moved(session_id)
+    _moved(session_id, recheck=True)
     with _lock:
         key = _home_of.pop(session_id, None)
         if key is None or _steps.get(key, {}).pop(session_id, None) is None:

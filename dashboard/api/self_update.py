@@ -341,6 +341,8 @@ _self_update_lock = threading.RLock()
 _self_update_thread: Optional[threading.Thread] = None
 # The job this process started, for when its file can't be read back.
 _self_update_job: Optional[Dict[str, Any]] = None
+# The id of the job whose pull last came back: a stall marked on it no longer frees the slot.
+_pull_returned: Optional[str] = None
 # Each start pulls and restarts the gateway: a few per hour is plenty.
 _self_update_limiter = core._MintLimiter(3, 600.0, message="Too many plugin updates; try again in a few minutes")
 # Each forced restart cuts the gateway's work: a few in five minutes, not a loop of them.
@@ -971,6 +973,10 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
     claimed_restart = False
     try:
         result = pull()
+        if not _pull_came_back(job):
+            # Its pull stalled and a newer update took over: that one carries on alone.
+            logger.info("Conduit plugin: a stalled update's pull came back after a newer update started")
+            return
         if not result.get("ok"):
             # Not found, no owned checkout, a re-pin needing consent, a blocked
             # scan: Hermes' own words, which Conduit acts on.
@@ -1075,7 +1081,7 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
         logger.exception("Conduit plugin: the update on the host failed")
         _self_update_failed(job, f"The update failed on the host ({type(exc).__name__})")
     finally:
-        if job["step"] in ("done", "failed"):
+        if job["step"] in ("done", "failed") and not _superseded(job):
             with contextlib.suppress(OSError):
                 _write_self_update(path, job)
             notify(job)
@@ -1107,7 +1113,11 @@ def start_self_update(profile: Optional[str], schedule: Callable[[float, Callabl
     path = path or _self_update_path()
     with _self_update_lock:
         if _self_update_thread is not None and _self_update_thread.is_alive():
-            return _read_self_update(path) or dict(_self_update_job or {"id": "", "step": "downloading"})
+            current = _self_update_status(path, None, notify or _notify_self_update)
+            if not _stalled_pull(current):
+                return current or dict(_self_update_job or {"id": "", "step": "downloading"})
+            # Its pull never came back, and the job says so: a new update starts, and the
+            # stalled thread, should Hermes ever answer it, stops there (issue 1080).
         # A job whose thread ended can still be under way: the dashboard
         # restart it handed over hasn't happened yet.
         current = self_update_status(path, notify=notify)
@@ -1133,6 +1143,31 @@ def start_self_update(profile: Optional[str], schedule: Callable[[float, Callabl
             raise
         _self_update_job, _self_update_thread = job, thread
         return dict(job)
+
+
+def _stalled_pull(job: Optional[Dict[str, Any]]) -> bool:
+    """The running thread's job, marked failed because its pull never came back, and still in
+    it: once the pull returns, the thread carries the job on and the slot stays its own."""
+    return (job is not None and job.get("step") == "failed" and job.get("code") == "pull_stalled"
+            and _self_update_job is not None and job.get("id") == _self_update_job.get("id")
+            and _pull_returned != job.get("id"))
+
+
+def _pull_came_back(job: Dict[str, Any]) -> bool:
+    """Called as the job's pull returns: whether it still owns the job file, and if so, the
+    slot stays its own from here, in the same step, so no newer update can start beside it."""
+    global _pull_returned
+    with _self_update_lock:
+        if _self_update_job is not None and _self_update_job.get("id") != job.get("id"):
+            return False
+        _pull_returned = job.get("id")
+        return True
+
+
+def _superseded(job: Dict[str, Any]) -> bool:
+    """A newer update started while this job's pull stalled: it owns the job file now."""
+    with _self_update_lock:
+        return _self_update_job is not None and _self_update_job.get("id") != job.get("id")
 
 
 def self_update_status(path: Optional[Path] = None, now: Optional[float] = None,

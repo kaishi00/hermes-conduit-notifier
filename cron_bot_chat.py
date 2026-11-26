@@ -251,7 +251,7 @@ def _load_profile() -> str:
     try:
         from . import _current_profile
 
-        return _current_profile() or "default"
+        return _current_profile()
     except Exception:  # noqa: BLE001 — loaded without the entry module
         pass
     return session_titles.current_profile()

@@ -13,11 +13,25 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.200.1 (2026-11-26)
+## 0.200.2 (2026-11-26)
 
 ### Fixes
 
 - When a long chat is compacted partway through a reply, the bots lists no longer stay stuck on the step it was on before: the step follows the chat to its compacted session and goes when the reply ends.
+
+## 0.200.1 (2026-11-26)
+
+### Fixes
+
+- After you moved location sharing to another profile, the profile you left, and the host's other profiles, kept reading where you were at the move instead of where you are now, even when the new profile keeps your location to itself.
+- A plugin update whose download never finished held off every later update from Conduit until the Hermes dashboard restarted. Updating again now starts afresh.
+- On a Watch call, a request whose answer from Hermes got lost made the chat read the same part of the conversation again with every later request.
+- A notification for a background task that finished after its turn, or for a chat closed mid-turn, could carry another profile's name and picture on a host running several profiles in one gateway.
+- Leaving a profile out of Pulse's report while another device changed the same list could drop your pick without saying so.
+
+### New and improved
+
+- Health data on the host grows less: deleted readings' records go after 30 days, and the phone's check on each sync no longer counts the whole history.
 
 ## 0.200.0 (2026-11-26)
 

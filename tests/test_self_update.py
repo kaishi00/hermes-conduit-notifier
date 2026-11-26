@@ -29,6 +29,8 @@ def _unix_backend(monkeypatch):
     monkeypatch.delenv("HERMES_DESKTOP_CHILD_PID", raising=False)
     monkeypatch.setattr(api.self_update, "_self_restart_scheduled", False)
     monkeypatch.setattr(api.self_update, "_self_update_thread", None)
+    monkeypatch.setattr(api.self_update, "_self_update_job", None)
+    monkeypatch.setattr(api.self_update, "_pull_returned", None)
     monkeypatch.setattr(api.self_update, "_self_update_limiter", api.core._MintLimiter(3, 600.0))
 
 
@@ -693,6 +695,64 @@ def test_start_runs_one_job_at_a_time(monkeypatch, tmp_path):
     release.set()
     api.self_update._self_update_thread.join(5)
     assert json.loads(path.read_text())["step"] == "failed"
+
+
+def test_a_stalled_pull_lets_a_new_update_start(monkeypatch, tmp_path):
+    """Issue 1080: a pull that never came back held the one update slot
+    until the dashboard restarted; every later update answered with the old
+    failed job. Once the job reads as stalled, a new one starts, and the old
+    thread, should Hermes ever answer it, leaves the new job alone."""
+    import threading
+    release, pulls, notified = threading.Event(), [], []
+
+    def stuck():
+        pulls.append("stuck")
+        release.wait(5)
+        return {"ok": True}
+
+    def fresh():
+        pulls.append("fresh")
+        return {"ok": False, "error": "stop"}
+
+    path = tmp_path / "job.json"
+    first = api.self_update.start_self_update("coder", lambda *a: None, path=path, steps=(stuck, _restarted),
+                                              homes=lambda: [tmp_path], notify=notified.append)
+    stalled = api.self_update._self_update_thread
+    # Not yet stalled: the same job.
+    again = api.self_update.start_self_update("coder", lambda *a: None, path=path, steps=(fresh, _restarted),
+                                              homes=lambda: [tmp_path], notify=notified.append)
+    assert again["id"] == first["id"]
+    job = json.loads(path.read_text())
+    job["pull_started_at"] -= api.self_update.SELF_UPDATE_PULL_STALL_S + 1
+    path.write_text(json.dumps(job))
+    second = api.self_update.start_self_update("coder", lambda *a: None, path=path, steps=(fresh, _restarted),
+                                               homes=lambda: [tmp_path], notify=notified.append)
+    assert second["id"] != first["id"] and second["step"] == "downloading"
+    api.self_update._self_update_thread.join(5)
+    assert json.loads(path.read_text())["detail"] == "stop"
+    release.set()
+    stalled.join(5)
+    assert pulls == ["stuck", "fresh"]
+    final = json.loads(path.read_text())
+    assert (final["id"], final["detail"]) == (second["id"], "stop"), "the stalled thread wrote nothing more"
+    api.self_update.time.sleep(0.2)
+    assert sorted((n["id"], n.get("code")) for n in notified) == sorted([(first["id"], "pull_stalled"),
+                                                                         (second["id"], None)])
+
+
+def test_a_stall_marked_on_a_pull_that_came_back_holds_the_slot(monkeypatch):
+    # #1100 review: between a stalled pull coming back and the thread's next write, the job file
+    # still reads pull_stalled. The slot is the thread's again from the moment its pull returns,
+    # so no newer update starts beside it.
+    job = {"id": "j1", "step": "downloading"}
+    monkeypatch.setattr(api.self_update, "_self_update_job", job)
+    stalled = {"id": "j1", "step": "failed", "code": "pull_stalled"}
+    assert api.self_update._stalled_pull(stalled) is True
+    assert api.self_update._pull_came_back(job) is True
+    assert api.self_update._stalled_pull(stalled) is False
+    # A pull that comes back after a newer update took over owns nothing.
+    monkeypatch.setattr(api.self_update, "_self_update_job", {"id": "j2", "step": "downloading"})
+    assert api.self_update._pull_came_back(job) is False
 
 
 def test_the_notification_goes_to_the_profile_that_asked(monkeypatch):

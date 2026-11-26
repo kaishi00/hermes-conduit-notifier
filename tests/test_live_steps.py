@@ -250,3 +250,13 @@ def test_the_first_step_after_a_compaction_may_repeat_the_turns_step(tmp_path, m
 def test_the_plugin_follows_compactions_with_live_activitys_lineage():
     source = (ROOT / "__init__.py").read_text(encoding="utf-8")
     assert "live_steps.lineage = live_activity.compacted_from" in source
+
+
+def test_an_end_asks_the_store_again_inside_the_retry_wait(tmp_path, monkeypatch):
+    settled = []
+    monkeypatch.setattr(steps, "lineage", lambda session_id, running: ("s-1" if settled else None) if session_id == "s-2" else False)
+    steps.started(tmp_path, "s-1", now=10.0)
+    steps.step("s-2", "tool", "terminal")  # the store hasn't the compacted row yet
+    settled.append(True)
+    steps.ended("s-2")
+    assert not (tmp_path / steps.FILE_NAME).exists()
