@@ -118,7 +118,7 @@ is ignored with a warning in the log, and
 or why it was ignored. WSS through the proxy needs websockets 15 or newer
 in Hermes' environment. Proposed by aminrpg (#746).
 
-### Pinning the relays a host uses (plugin 0.199.1+)
+### Pinning the relays a host uses (plugin 0.199.2+)
 
 A host whose egress allows only known relays can say so with
 `CONDUIT_RELAY_ALLOWLIST` in the gateway's and the dashboard's environment:
@@ -4639,7 +4639,7 @@ relay key. The host still opens no inbound route.
   set, or `CONDUIT_WATCH_AUDIO_ENV`). Nothing is installed into Hermes' own
   Python; if that Python already has `aiortc`, it's used as it is. A host
   whose admin manages packages (no package index, an image built ahead)
-  sets `CONDUIT_WATCH_AUDIO_PREPARE=off` (or `0`, `false`, `no`; plugin 0.199.1+): `prepare` then
+  sets `CONDUIT_WATCH_AUDIO_PREPARE=off` (or `0`, `false`, `no`; plugin 0.199.2+): `prepare` then
   runs neither pip nor uv and answers `failed` saying so, and GPT-Live on
   the Watch works only where Hermes' Python (or an environment made before)
   already has `aiortc` and `av`.
