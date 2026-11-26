@@ -153,6 +153,7 @@ def test_every_capability_names_a_served_route_family():
         "predict": "/predict",
         "predict-custom-instructions": "/predict",
         "side-question": "/side-question",
+        "live-steps": "/live-steps",
         "room-files": "/room-files",
         "room-file-pictures": "/room-files/data-url",
         "room-file-reads": "/room-files/data-url",

@@ -241,6 +241,9 @@ ROUTE_CAPABILITIES = (
     # POST /side-question: Conduit's step summaries, answered as Hermes' /btw
     # answers but only to the asking device (no "[btw …]" note in Desktop).
     "side-question",
+    # GET /live-steps: each running chat's step (thinking, a tool's category, waiting), for the
+    # bots lists (live_steps.py).
+    "live-steps",
     "room-files",
     # GET /room-files/data-url: a picture sent into a room, read back so
     # Conduit draws it instead of its file name.

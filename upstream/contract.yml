@@ -739,6 +739,7 @@ routes:
   - GET /links/asks
   - GET /links/rules
   - PUT /links/rules
+  - GET /live-steps
   - POST /local-live/key
   - WS /local-live/socket
   - GET /local-live/status

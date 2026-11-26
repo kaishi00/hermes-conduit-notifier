@@ -67,6 +67,8 @@ they run:
     waiting               Hermes is waiting on you: every chat with an
                           approval or a question waiting, for the Needs you
                           list
+    live_steps            Live steps: what each running chat is doing now,
+                          for the bots lists
     boards                Boards: the ticks on conduit_show's checklist cards,
                           the boards agents showed in group rooms, and the
                           boards Hermes Desktop draws
