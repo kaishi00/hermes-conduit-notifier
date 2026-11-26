@@ -73,7 +73,7 @@ def _moved(session_id: str) -> str | None:
     try:
         found = find(session_id, running)
     except Exception:  # noqa: BLE001 — never into the turn
-        return None
+        found = None  # a locked or broken store: asked again later, not on every hook
     with _lock:
         if found is False:
             _unsettled.pop(session_id, None)
@@ -134,10 +134,11 @@ def step(session_id: str, phase: str, tool: str | None = None, *, now: float | N
             return
         tool = tool if phase == "tool" else None
         if entry["phase"] == phase and entry["tool"] == tool:
-            if moved is not None:
-                _publish(moved)
-            return
-        entry.update(phase=phase, tool=tool, since=time.time() if now is None else now)
+            if moved is None:
+                return
+        else:
+            entry.update(phase=phase, tool=tool, since=time.time() if now is None else now)
+    # Outside the lock: _publish takes it. A step moved to its compacted id is published even when unchanged.
     _publish(key)
 
 

@@ -224,14 +224,27 @@ def test_an_id_the_store_cant_place_yet_is_asked_again_later(tmp_path, monkeypat
     assert asked == ["s-2", "s-2"]
 
 
-def test_a_failing_lineage_lookup_leaves_the_step_alone(tmp_path, monkeypatch):
+def test_a_failing_lineage_lookup_leaves_the_step_alone_and_waits_to_ask_again(tmp_path, monkeypatch):
+    asked = []
+
     def broken(session_id, running):
+        asked.append(session_id)
         raise RuntimeError("store locked")
 
     monkeypatch.setattr(steps, "lineage", broken)
     steps.started(tmp_path, "s-1", now=10.0)
     steps.step("s-2", "tool", "terminal")
+    steps.step("s-2", "tool", "terminal")
     assert steps.read(tmp_path) == {"s-1": {"phase": "thinking", "tool": None, "since": 10.0}}
+    assert asked == ["s-2"]
+
+
+def test_the_first_step_after_a_compaction_may_repeat_the_turns_step(tmp_path, monkeypatch):
+    # The turn was thinking; the first hook under the compacted id says thinking too.
+    monkeypatch.setattr(steps, "lineage", lambda session_id, running: "s-1" if session_id == "s-2" else False)
+    steps.started(tmp_path, "s-1", now=10.0)
+    steps.step("s-2", "thinking", now=12.0)
+    assert steps.read(tmp_path) == {"s-2": {"phase": "thinking", "tool": None, "since": 10.0}}
 
 
 def test_the_plugin_follows_compactions_with_live_activitys_lineage():
