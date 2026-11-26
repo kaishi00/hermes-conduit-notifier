@@ -932,6 +932,22 @@ def _closes_at(text: str, at: int = 0) -> int:
         emptied = at if not opened else -1
 
 
+_TABLE_SEPARATOR = re.compile(r"^ {0,3}\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?\s*$")
+
+
+def _starts_page_at(lines: list[str], index: int) -> bool:
+    """Whether line ``index`` starts a page: a table row or header that
+    starts with a tag is the table's."""
+    line = lines[index]
+    if not starts_page(line):
+        return False
+    if "|" not in line:
+        return True
+    if index and "|" in lines[index - 1]:
+        return False
+    return not (index + 1 < len(lines) and _TABLE_SEPARATOR.match(lines[index + 1]))
+
+
 def page_end(lines: list[str], start: int) -> int:
     """The line after the page starting at ``start``."""
     text = "\n".join(lines[start:])
@@ -945,7 +961,7 @@ def page_end(lines: list[str], start: int) -> int:
         following = end
         while following < len(lines) and not lines[following].strip():
             following += 1
-        if following < len(lines) and starts_page(lines[following]):
+        if following < len(lines) and _starts_page_at(lines, following):
             offset += sum(len(lines[index]) + 1 for index in range(line, following))
             line = following
             continue
@@ -968,8 +984,7 @@ def pages_said(text: str, said: str = _PAGE_SAID) -> str:
                 fence = None
         elif found:
             fence = found.group(1)
-        elif starts_page(line) and not (index and "|" in line and "|" in lines[index - 1]):
-            # A table row that starts with a tag is the table's.
+        elif _starts_page_at(lines, index):
             index = page_end(lines, index)
             out.append(said)
             continue

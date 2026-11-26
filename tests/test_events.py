@@ -720,6 +720,8 @@ def test_a_push_says_a_page_the_reply_wrote_and_drops_its_tags():
     assert pages_said("<div>A</div><div>\nB\n</div>\nAfter") == "🗂 Page\nAfter"
     table = "Tag | Meaning\n--- | ---\n<div> | container\n\nNext steps"
     assert pages_said(table) == table
+    header = "Results:\n<div> | A\n--- | ---\n1 | 2"
+    assert pages_said(header) == header
     assert starts_page("<table>") and starts_page("<!DOCTYPE html>") and not starts_page("<details>")
     assert not starts_page("<Conversation>") and not starts_page("say <div> here")
 
