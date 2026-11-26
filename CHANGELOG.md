@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.202.2 (2026-11-26)
+
+### Fixes
+
+- Desktop Browser tab pages that were closed or left while they loaded could slowly use up the host's page slots until no page opened without a dashboard restart.
+
 ## 0.202.1 (2026-11-26)
 
 ### Fixes

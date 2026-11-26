@@ -106,6 +106,18 @@ def client(state):
     return TestClient(app)
 
 
+def assert_all_slots_free():
+    slots = api.workspace_preview._preview_slots
+    taken = 0
+    try:
+        for _ in range(api.workspace_preview.PREVIEW_SLOTS):
+            assert slots.acquire(blocking=False), "a preview slot was never given back"
+            taken += 1
+    finally:
+        for _ in range(taken):
+            slots.release()
+
+
 def wrapped(pairs):
     return {"X-Conduit-Page-Headers": json.dumps(pairs)}
 
@@ -147,6 +159,7 @@ def test_redirects_and_errors_come_back_wrapped_not_followed(client, dev_port):
 def test_nothing_listening_is_a_502(client):
     got = client.get(f"{BASE}/workspace/preview/{free_port()}/")
     assert got.status_code == 502 and "answers on port" in got.json()["detail"]
+    assert_all_slots_free()
 
 
 def test_refusals(client, state, dev_port):
@@ -213,7 +226,7 @@ def test_a_listener_that_isnt_http_answered_badly_not_unreachable(client):
     assert got.status_code == 502 and "didn't answer properly" in got.json()["detail"]
 
 
-def test_requests_past_the_slots_are_turned_away_not_queued(client, dev_port, monkeypatch):
+def test_requests_past_the_slots_are_turned_away_not_queued(client, dev_port):
     held = []
     for _ in range(api.workspace_preview.PREVIEW_SLOTS):
         assert api.workspace_preview._preview_slots.acquire(blocking=False)
@@ -240,3 +253,30 @@ def test_a_connect_that_times_out_is_a_504(client, monkeypatch):
 
     monkeypatch.setattr(api.workspace_preview.http.client, "HTTPConnection", Slow)
     assert client.get(f"{BASE}/workspace/preview/{free_port()}/").status_code == 504
+    assert_all_slots_free()
+
+
+def test_a_request_given_up_on_before_its_worker_ran_gives_its_slot_back(client, monkeypatch):
+    jobs = []
+
+    class Stalled:
+        def submit(self, fn, *args):
+            import concurrent.futures
+            jobs.append(fn)
+            return concurrent.futures.Future()
+
+    monkeypatch.setattr(api.workspace_preview, "_preview_executor", Stalled())
+    monkeypatch.setattr(api.workspace_preview, "PREVIEW_CONNECT_S", 0)
+    monkeypatch.setattr(api.workspace_preview, "PREVIEW_TIMEOUT_S", -4.9)
+    assert client.get(f"{BASE}/workspace/preview/{free_port()}/").status_code == 504
+    assert_all_slots_free()
+    # The worker that runs late does nothing, and gives back no slot it never took.
+    assert jobs and jobs[0]() is None
+    assert_all_slots_free()
+
+
+def test_the_target_without_raw_path_is_escaped_again():
+    from starlette.requests import Request
+    request = Request({"type": "http", "method": "GET", "scheme": "http", "server": ("t", 80), "root_path": "",
+                       "path": f"{BASE}/workspace/preview/5173/a b%c/d", "query_string": b"x=1", "headers": []})
+    assert api.workspace_preview._target(request, 5173) == "/a%20b%25c/d?x=1"
