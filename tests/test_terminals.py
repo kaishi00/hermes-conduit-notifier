@@ -166,6 +166,15 @@ def test_typing_into_a_shell_that_isnt_reading_gives_up(host, tmp_path, monkeypa
     assert exc.value.status == 409 and time.monotonic() - started < 2
 
 
+def test_an_ended_terminal_lets_go_of_its_descriptor(host, tmp_path):
+    terminal = host.create("me", str(tmp_path), 80, 24)
+    terminal.write(b"exit 3\n")
+    until(lambda: terminal.exit_code is not None and terminal.fd < 0)
+    with pytest.raises(th.TerminalError):
+        terminal.write(b"x")
+    terminal.resize(90, 30)
+
+
 def test_sizes_are_kept_in_range(host, tmp_path):
     terminal = host.create("", str(tmp_path), cols="wide", rows=10_000)
     assert (terminal.cols, terminal.rows) == (80, 24) or terminal.rows == th.MAX_ROWS

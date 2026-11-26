@@ -100,6 +100,9 @@ class Terminal:
         self.last_watched = self.created
         self.exit_code: Optional[int] = None
         self._lock = threading.Lock()
+        # Guards the pty's descriptor: it's closed (and set to -1) only while no write or resize holds it,
+        # so a late write never lands on a number the system has given to something else.
+        self._io = threading.Lock()
         self._buffer = bytearray()
         self._end = 0
         self._viewers: Dict[int, Callable[[Optional[bytes], int], None]] = {}
@@ -160,10 +163,12 @@ class Terminal:
                 viewer(None, end)
             except Exception:
                 pass
-        try:
-            os.close(self.fd)
-        except OSError:
-            pass
+        with self._io:
+            fd, self.fd = self.fd, -1
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     def _wait(self) -> int:
         code = self._process.wait()
@@ -227,7 +232,10 @@ class Terminal:
         deadline = time.monotonic() + WRITE_TIMEOUT_S
         while view:
             try:
-                written = os.write(self.fd, view)
+                with self._io:
+                    if self.fd < 0:
+                        raise TerminalError(409, "This terminal has ended")
+                    written = os.write(self.fd, view)
             except OSError as exc:
                 if exc.errno == errno.EINTR:
                     continue
@@ -241,10 +249,13 @@ class Terminal:
             view = view[written:]
 
     def _resize_fd(self, cols: int, rows: int) -> None:
-        try:
-            fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-        except OSError:
-            pass
+        with self._io:
+            if self.fd < 0:
+                return
+            try:
+                fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+            except OSError:
+                pass
 
     def resize(self, cols: Any, rows: Any) -> None:
         self.cols, self.rows = _size(cols, rows)

@@ -48,7 +48,8 @@ _ENV = {
     "GIT_OPTIONAL_LOCKS": "0",
 }
 _BATCH_SSH = "ssh -o BatchMode=yes"
-_CONFIG = ("-c", "core.quotepath=false", "-c", "color.ui=false", "-c", "core.fsmonitor=false")
+# --literal-pathspecs: a path a client sends is one path, never a pattern (`*`, `:(glob)`).
+_CONFIG = ("--literal-pathspecs", "-c", "core.quotepath=false", "-c", "color.ui=false", "-c", "core.fsmonitor=false")
 
 STATUS_NAMES = {
     "M": "modified", "T": "modified", "A": "added", "D": "deleted", "R": "renamed",
@@ -233,6 +234,19 @@ class Git:
                 at += 2
         return None
 
+    def _secret_moved_to(self, top: str, rel: str) -> bool:
+        """Whether an untracked file is a secret moved there without Git (a
+        plain mv): its contents match a sensitive tracked file deleted from
+        the folder."""
+        deleted = self._git(["ls-files", "-d", "-z"], cwd=top)
+        secrets_gone = [path for path in _split_z(deleted.out) if self._secret(top, path)] if deleted.code == 0 else []
+        if not secrets_gone:
+            return False
+        staged = self._git(["ls-files", "-s", "-z", "--", *secrets_gone], cwd=top)
+        blobs = {row.split("\t", 1)[0].split(" ")[1] for row in _split_z(staged.out) if "\t" in row and " " in row}
+        mine = self._git(["hash-object", "--", rel], cwd=top)
+        return mine.code == 0 and mine.out.strip() in blobs
+
     def _rel(self, top: str, raw: Any) -> str:
         """A path the client sent, as a path inside the repository. It may be
         relative to the top folder or absolute under it."""
@@ -354,6 +368,10 @@ class Git:
         source = self._renamed_from(top, rel) if staged else None
         if self._secret(top, rel) or (source is not None and self._secret(top, source)):
             raise GitError(403, "Conduit doesn't open files that hold keys or passwords")
+        # One file: a folder's path would show every file under it, secrets included.
+        names = self._git(["diff", "--name-only", "-z", *(["--cached"] if staged else []), "--", rel], cwd=top)
+        if names.code == 0 and any(name != rel for name in _split_z(names.out)):
+            raise GitError(400, "Pick one file to see its changes")
         base = ["--no-color", "--no-ext-diff", "-U3", "--find-renames"]
         if staged:
             result = self._git(["diff", "--cached", *base, "--", rel], cwd=top)
@@ -362,6 +380,8 @@ class Git:
             if result.code == 0 and not result.out.strip():
                 tracked = self._git(["ls-files", "--error-unmatch", "--", rel], cwd=top)
                 if tracked.code != 0:
+                    if self._secret_moved_to(top, rel):
+                        raise GitError(403, "Conduit doesn't open files that hold keys or passwords")
                     # Untracked: the whole file as added (exit 1 means it differs).
                     result = self._git(["diff", "--no-index", *base, "--", os.devnull if self._path is os.path
                                         else "/dev/null", rel], cwd=top)
@@ -492,17 +512,33 @@ class Git:
 
     def _discard(self, top: str, body: Dict[str, Any]) -> None:
         paths = self._rels(top, body.get("paths"))
-        tracked, untracked = [], []
-        listed = self._git(["ls-files", "-z", "--", *paths], cwd=top)
-        known = set(_split_z(listed.out)) if listed.code == 0 else set()
-        for rel in paths:
-            (tracked if rel in known else untracked).append(rel)
-        if tracked:
-            if self._has_head(top):
-                args = ["checkout", "-q", "HEAD", "--", *tracked]
-            else:
-                args = ["checkout", "-q", "--", *tracked]
-            self._check(self._git(args, timeout=CHANGE_TIMEOUT_S, cwd=top), "Git couldn't discard those changes")
+        has_head = self._has_head(top)
+        # Back to the last commit: what HEAD has is checked out from it (a staged deletion included);
+        # what only the index has (a staged addition, a rename's new name) is unstaged, then removed.
+        in_head: set = set()
+        if has_head:
+            listed = self._git(["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", *paths], cwd=top)
+            in_head = set(_split_z(listed.out)) if listed.code == 0 else set()
+        indexed = self._git(["ls-files", "-z", "--", *paths], cwd=top)
+        in_index = set(_split_z(indexed.out)) if indexed.code == 0 else set()
+        restore = [rel for rel in paths if rel in in_head]
+        index_only = [rel for rel in paths if rel not in in_head and rel in in_index]
+        untracked = [rel for rel in paths if rel not in in_head and rel not in in_index]
+        # A staged rename comes back under its old name too.
+        for rel in index_only:
+            source = self._renamed_from(top, rel)
+            if source is not None and source not in restore:
+                restore.append(source)
+        if index_only:
+            self._check(self._git(["rm", "-q", "--cached", "-f", "--", *index_only], timeout=CHANGE_TIMEOUT_S, cwd=top),
+                        "Git couldn't discard those changes")
+            untracked += index_only
+        if restore and has_head:
+            self._check(self._git(["checkout", "-q", "HEAD", "--", *restore], timeout=CHANGE_TIMEOUT_S, cwd=top),
+                        "Git couldn't discard those changes")
+        elif restore:
+            self._check(self._git(["checkout", "-q", "--", *restore], timeout=CHANGE_TIMEOUT_S, cwd=top),
+                        "Git couldn't discard those changes")
         if untracked:
             self._check(self._git(["clean", "-f", "-q", "--", *untracked], timeout=CHANGE_TIMEOUT_S, cwd=top),
                         "Git couldn't remove those new files")
@@ -558,7 +594,8 @@ class Git:
                     or "permission denied" in text or "authentication failed" in text):
                 raise GitError(401, "Git needs a sign-in on the Hermes host for this remote: "
                                     "run it once in a terminal there")
-            if "not possible to fast-forward" in text or "diverging" in text:
+            if ("not possible to fast-forward" in text or "diverging" in text or "non-fast-forward" in text
+                    or "fetch first" in text or "[rejected]" in text):
                 raise GitError(409, "This branch and its remote have both changed: pull in a terminal to merge them")
             if "no configured push destination" in text or "does not appear to be a git repository" in text:
                 raise GitError(409, "This repository has no remote to use")

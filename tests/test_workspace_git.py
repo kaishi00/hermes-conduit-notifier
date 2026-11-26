@@ -255,6 +255,71 @@ def test_discard_restores_tracked_files_and_removes_new_ones(repo):
     assert exc.value.status == 403
 
 
+def test_discard_takes_back_staged_additions_deletions_and_renames(repo):
+    (repo / "new.txt").write_text("new\n")
+    sh(repo, "add", "new.txt")
+    sh(repo, "rm", "-q", "README.md")
+    sh(repo, "mv", "src/index.astro", "src/home.astro")
+    git(repo).change("discard", {"paths": ["new.txt", "README.md", "src/home.astro"]})
+    assert not (repo / "new.txt").exists()
+    assert (repo / "README.md").read_text() == "# Site\n"
+    assert (repo / "src" / "index.astro").exists() and not (repo / "src" / "home.astro").exists()
+    assert git(repo).status()["files"] == []
+
+
+def test_paths_are_paths_never_patterns(repo):
+    (repo / ".env").write_text("TOKEN=old\n")
+    sh(repo, "add", ".env")
+    sh(repo, "commit", "-q", "-m", "env")
+    (repo / ".env").write_text("TOKEN=new\n")
+    (repo / "keep.txt").write_text("mine\n")
+    for pattern in ("*", ":(glob)**/.env", "?env"):
+        try:
+            shown = git(repo).diff(pattern)["diff"]
+        except wg.GitError:
+            shown = ""
+        assert "TOKEN" not in shown
+    git(repo).change("discard", {"paths": ["*"]})
+    assert (repo / "keep.txt").exists() and (repo / ".env").read_text() == "TOKEN=new\n"
+
+
+def test_a_folders_path_shows_no_diff(repo):
+    (repo / "src" / "index.astro").write_text("changed\n")
+    (repo / "README.md").write_text("changed\n")
+    with pytest.raises(wg.GitError) as exc:
+        git(repo).diff("src")
+    assert exc.value.status == 400
+
+
+def test_a_secret_moved_without_git_stays_closed(repo):
+    (repo / ".env").write_text("TOKEN=hunter2\n")
+    sh(repo, "add", ".env")
+    sh(repo, "commit", "-q", "-m", "env")
+    (repo / ".env").rename(repo / "notes.txt")
+    with pytest.raises(wg.GitError) as exc:
+        git(repo).diff("notes.txt")
+    assert exc.value.status == 403
+    (repo / "other.txt").write_text("plain\n")
+    assert "+plain" in git(repo).diff("other.txt")["diff"]
+
+
+def test_a_push_the_remote_moved_past_says_pull_first(repo, tmp_path):
+    bare = tmp_path / "remote.git"
+    sh(tmp_path, "init", "-q", "--bare", str(bare))
+    sh(repo, "remote", "add", "origin", str(bare))
+    git(repo).change("push", {})
+    other = tmp_path / "other"
+    sh(tmp_path, "clone", "-q", str(bare), str(other))
+    (other / "README.md").write_text("theirs\n")
+    sh(other, "commit", "-qam", "Theirs")
+    sh(other, "push", "-q")
+    (repo / "README.md").write_text("ours\n")
+    sh(repo, "commit", "-qam", "Ours")
+    with pytest.raises(wg.GitError) as exc:
+        git(repo).change("push", {})
+    assert exc.value.status == 409
+
+
 def test_switch_and_make_branches(repo):
     made = git(repo).change("switch", {"branch": "hero-copy", "create": True})["status"]
     assert made["branch"]["head"] == "hero-copy"
