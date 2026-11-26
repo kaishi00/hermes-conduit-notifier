@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.202.1 (2026-11-26)
+
+### Fixes
+
+- A desktop Browser tab's page with an unusual header got a server error instead of a clear refusal, and a dev server that took connections but never answered could hold up every other page for two minutes.
+
 ## 0.202.0 (2026-11-26)
 
 ### New and improved

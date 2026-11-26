@@ -211,3 +211,32 @@ def test_a_listener_that_isnt_http_answered_badly_not_unreachable(client):
     finally:
         listener.close()
     assert got.status_code == 502 and "didn't answer properly" in got.json()["detail"]
+
+
+def test_requests_past_the_slots_are_turned_away_not_queued(client, dev_port, monkeypatch):
+    held = []
+    for _ in range(api.workspace_preview.PREVIEW_SLOTS):
+        assert api.workspace_preview._preview_slots.acquire(blocking=False)
+        held.append(1)
+    try:
+        got = client.get(f"{BASE}/workspace/preview/{dev_port}/")
+        assert got.status_code == 503 and got.headers["cache-control"] == "no-store"
+    finally:
+        for _ in held:
+            api.workspace_preview._preview_slots.release()
+    assert client.get(f"{BASE}/workspace/preview/{dev_port}/").status_code == 200
+
+
+def test_a_connect_that_times_out_is_a_504(client, monkeypatch):
+    class Slow:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def connect(self):
+            raise socket.timeout("timed out")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(api.workspace_preview.http.client, "HTTPConnection", Slow)
+    assert client.get(f"{BASE}/workspace/preview/{free_port()}/").status_code == 504
