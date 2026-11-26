@@ -6,7 +6,9 @@ import asyncio
 import contextlib
 import http.client
 import json
+import re
 import socket
+import threading
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -58,6 +60,8 @@ PREVIEW_CHUNK = 64 * 1024
 PAGE_HEADERS = "X-Conduit-Page-Headers"
 PAGE_STATUS = "X-Conduit-Page-Status"
 NO_STORE = {"Cache-Control": "no-store"}
+_HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+_HEADER_VALUE_BAD = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 # Headers about this hop, which the dev server and the page each set for their own.
 HOP_HEADERS = frozenset({
@@ -67,6 +71,10 @@ HOP_HEADERS = frozenset({
 _preview_limiter = core._MintLimiter(PREVIEW_LIMIT, PREVIEW_WINDOW_S,
                                      message="Too many page requests; try again shortly")
 _preview_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="conduit-preview")
+# Requests waiting on a dev server at once: past these, the next is turned away rather than queued behind a
+# server that isn't answering. Each is freed when its worker is, not when the route stops waiting.
+PREVIEW_SLOTS = 6
+_preview_slots = threading.BoundedSemaphore(PREVIEW_SLOTS)
 
 
 class _Unreachable(Exception):
@@ -108,6 +116,9 @@ def _page_headers(raw: Optional[str]) -> List[Tuple[str, str]]:
             # What a request line can carry: an ASCII name, a Latin-1 value.
             pair[0].encode("ascii")
             pair[1].encode("latin-1")
+            # A token for a name (no colon, space or control), no controls but a tab in a value.
+            if not _HEADER_NAME.fullmatch(pair[0].strip()) or _HEADER_VALUE_BAD.search(pair[1]):
+                raise UnicodeEncodeError("ascii", "", 0, 1, "illegal")
         except UnicodeEncodeError:
             raise HTTPException(status_code=400, detail=f"{PAGE_HEADERS} holds a header HTTP can't send",
                                 headers=NO_STORE)
@@ -119,7 +130,7 @@ def _page_headers(raw: Optional[str]) -> List[Tuple[str, str]]:
 
 def _target(request: Request, port: int) -> str:
     """The path and query the page asked for, as it sent them (not decoded)."""
-    raw = request.scope.get("raw_path") or urllib.parse.quote(request.url.path, safe="/%:@!$&'()*+,;=-._~").encode()
+    raw = request.scope.get("raw_path") or urllib.parse.quote(request.url.path, safe="/:@!$&'()*+,;=-._~").encode()
     path = raw.decode("latin-1")
     marker = f"/workspace/preview/{port}"
     at = path.find(marker)
@@ -137,11 +148,17 @@ def _open(port: int, method: str, target: str, headers: List[Tuple[str, str]],
     connect tries the next address; once connected, what goes wrong is the
     server's answer (an OSError, an HTTPException or a timeout)."""
     refused: Optional[Exception] = None
+    timed_out = False
     conn: Optional[http.client.HTTPConnection] = None
     for address in ("127.0.0.1", "::1"):
         attempt = http.client.HTTPConnection(address, port, timeout=PREVIEW_CONNECT_S)
         try:
             attempt.connect()
+        except (socket.timeout, TimeoutError):
+            # Something holds the port without taking the connection (a full backlog): a timeout, not a refusal.
+            attempt.close()
+            timed_out = True
+            continue
         except OSError as exc:
             attempt.close()
             refused = exc
@@ -149,6 +166,8 @@ def _open(port: int, method: str, target: str, headers: List[Tuple[str, str]],
         conn = attempt
         break
     if conn is None:
+        if timed_out:
+            raise TimeoutError(f"port {port} took no connection")
         raise _Unreachable(str(refused) if refused else "refused")
     try:
         conn.sock.settimeout(PREVIEW_TIMEOUT_S)
@@ -221,16 +240,26 @@ async def workspace_preview(request: Request, port: str, path: str = "") -> Any:
     if isinstance(server, (tuple, list)) and len(server) > 1 and server[1] == number:
         raise HTTPException(status_code=403, detail="That port is the dashboard's own", headers=headers_out)
     await core._scoped_acquire(_preview_limiter, None)
-    refused = await asyncio.get_running_loop().run_in_executor(_preview_executor, _why_not)
+    refused = await asyncio.to_thread(_why_not)
     if refused is not None:
         raise HTTPException(status_code=refused[0], detail=refused[1], headers=headers_out)
     page_headers = _page_headers(request.headers.get(PAGE_HEADERS))
     body = await _body(request) if request.method not in ("GET", "HEAD") else b""
     target = _target(request, number)
     loop = asyncio.get_running_loop()
+    if not _preview_slots.acquire(blocking=False):
+        raise HTTPException(status_code=503, detail="Too many pages are waiting on this host's servers; try again shortly",
+                            headers=headers_out)
+
+    def opened() -> Tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+        try:
+            return _open(number, request.method, target, page_headers, body)
+        finally:
+            _preview_slots.release()
+
     try:
         conn, answer = await asyncio.wait_for(
-            loop.run_in_executor(_preview_executor, _open, number, request.method, target, page_headers, body),
+            loop.run_in_executor(_preview_executor, opened),
             timeout=PREVIEW_CONNECT_S * 2 + PREVIEW_TIMEOUT_S + 5)
     except _Unreachable:
         raise HTTPException(status_code=502, detail=f"Nothing on this host answers on port {number}",
