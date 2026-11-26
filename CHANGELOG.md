@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.200.1 (2026-11-26)
+
+### Fixes
+
+- When a long chat is compacted partway through a reply, the bots lists no longer stay stuck on the step it was on before: the step follows the chat to its compacted session and goes when the reply ends.
+
 ## 0.200.0 (2026-11-26)
 
 ### New and improved

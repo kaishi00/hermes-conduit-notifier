@@ -47,8 +47,10 @@ _api_spec.loader.exec_module(api)
 
 
 @pytest.fixture(autouse=True)
-def fresh():
+def fresh(monkeypatch):
     steps.forget()
+    # A test that registers the plugin leaves its lineage behind; each case sets its own.
+    monkeypatch.setattr(steps, "lineage", None)
     yield
     steps.forget()
 
@@ -170,3 +172,68 @@ def test_the_route_reads_the_profile_s_steps(monkeypatch, tmp_path):
     response = http.get(f"{BASE}/live-steps")
     assert response.headers["Cache-Control"] == "no-store"
     assert response.json() == {"ok": True, "steps": {"s-1": {"phase": "tool", "tool": "web", "since": 11.0}}}
+
+
+def test_a_compaction_mid_turn_moves_the_step_to_the_new_session_id(tmp_path, monkeypatch):
+    asked = []
+
+    def lineage(session_id, running):
+        asked.append((session_id, set(running)))
+        return "s-1" if session_id == "s-2" else False
+
+    monkeypatch.setattr(steps, "lineage", lineage)
+    steps.started(tmp_path, "s-1", now=10.0)
+    steps.step("s-2", "tool", "terminal", now=12.0)
+    # The live registry lists the compacted session: the step is under its id now.
+    assert steps.read(tmp_path) == {"s-2": {"phase": "tool", "tool": "terminal", "since": 12.0}}
+    assert asked == [("s-2", {"s-1"})]
+    steps.step("s-2", "thinking", now=13.0)
+    assert len(asked) == 1  # found directly from then on
+    steps.ended("s-2")
+    assert not (tmp_path / steps.FILE_NAME).exists()
+
+
+def test_the_turn_ends_under_its_compacted_id_with_no_step_taken_since(tmp_path, monkeypatch):
+    monkeypatch.setattr(steps, "lineage", lambda session_id, running: "s-1" if session_id == "s-2" else False)
+    steps.started(tmp_path, "s-1", now=10.0)
+    steps.ended("s-2")
+    assert not (tmp_path / steps.FILE_NAME).exists()
+
+
+def test_an_id_that_continues_no_turn_is_asked_once(tmp_path, monkeypatch):
+    asked = []
+    monkeypatch.setattr(steps, "lineage", lambda session_id, running: asked.append(session_id) or False)
+    steps.started(tmp_path, "s-1", now=10.0)
+    steps.step("other", "tool", "terminal")
+    steps.step("other", "thinking")
+    assert asked == ["other"]
+    assert steps.read(tmp_path)["s-1"]["phase"] == "thinking"
+
+
+def test_an_id_the_store_cant_place_yet_is_asked_again_later(tmp_path, monkeypatch):
+    asked = []
+    clock = [100.0]
+    monkeypatch.setattr(steps.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(steps, "lineage", lambda session_id, running: asked.append(session_id) or None)
+    steps.started(tmp_path, "s-1", now=10.0)
+    steps.step("s-2", "tool", "terminal")
+    steps.step("s-2", "tool", "terminal")
+    assert asked == ["s-2"]
+    clock[0] += steps.UNSETTLED_RETRY_S + 1
+    steps.step("s-2", "tool", "terminal")
+    assert asked == ["s-2", "s-2"]
+
+
+def test_a_failing_lineage_lookup_leaves_the_step_alone(tmp_path, monkeypatch):
+    def broken(session_id, running):
+        raise RuntimeError("store locked")
+
+    monkeypatch.setattr(steps, "lineage", broken)
+    steps.started(tmp_path, "s-1", now=10.0)
+    steps.step("s-2", "tool", "terminal")
+    assert steps.read(tmp_path) == {"s-1": {"phase": "thinking", "tool": None, "since": 10.0}}
+
+
+def test_the_plugin_follows_compactions_with_live_activitys_lineage():
+    source = (ROOT / "__init__.py").read_text(encoding="utf-8")
+    assert "live_steps.lineage = live_activity.compacted_from" in source
