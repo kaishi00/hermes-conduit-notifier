@@ -904,6 +904,9 @@ def _closes_at(text: str, at: int = 0) -> int:
             line_end = text.find("\n", emptied)
             if not match or (line_end >= 0 and match.start() > line_end):
                 return emptied
+            # Only another page element carries the page on; prose with a tag in it stays prose.
+            if not match.group(2) or match.group(2).lower() not in _PAGE_TAGS:
+                return emptied
         if not match:
             return -1
         token = match.group(0)
