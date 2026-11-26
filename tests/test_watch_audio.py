@@ -401,6 +401,7 @@ def test_prepare_turned_off_still_uses_a_hermes_python_with_aiortc(tmp_path, mon
 def test_an_unknown_prepare_value_leaves_it_on_and_warns_once(monkeypatch, caplog):
     # Status polls read the switch too, so a typo warns once, not on every poll.
     monkeypatch.setenv("CONDUIT_WATCH_AUDIO_PREPARE", "maybe-not-a-value")
+    monkeypatch.setattr(api.watch_audio, "_prepare_values_warned", set())
     with caplog.at_level("WARNING"):
         assert api.watch_audio._watch_audio_prepare_off() is False
         assert api.watch_audio._watch_audio_prepare_off() is False
