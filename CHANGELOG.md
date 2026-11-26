@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.198.3 (2026-11-26)
+## 0.199.3 (2026-11-26)
 
 ### Fixes
 
@@ -26,6 +26,25 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 
 - Health data on the host grows less: deleted readings' records go after 30 days, and the phone's check on each sync no longer counts the whole history.
+
+## 0.199.2 (2026-11-26)
+
+### New and improved
+
+- A host's admin can limit which push relays it pairs with and sends to (CONDUIT_RELAY_ALLOWLIST), and turn off the plugin installing GPT-Live's Watch runtime by itself (CONDUIT_WATCH_AUDIO_PREPARE=off). Nothing changes where they're not set.
+
+## 0.199.1 (2026-11-26)
+
+### Fixes
+
+- A notification no longer calls a whole reply a page when a line closes a page and then talks about a tag, as in "<div>x</div> Use <div> to wrap.": the prose after it shows as written.
+- A notification keeps no stray `<b>` and `</b>` around inline code: `<b>` with `make` in backticks inside shows as the bold words without the tags.
+
+## 0.199.0 (2026-11-26)
+
+### New and improved
+
+- Hermes can write HTML in a reply for a visual no card covers, and Conduit draws it: a page in a card, and folded details, highlights, keys and colored words in the text. A notification says there's a page rather than showing its code.
 
 ## 0.198.2 (2026-11-26)
 

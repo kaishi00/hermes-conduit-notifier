@@ -20,6 +20,13 @@
 // a registration whose activity started before it gets the end at once,
 // instead of the Lock Screen counting up on a finished turn for hours. An
 // activity that started after it (the chat's next turn) is left alone.
+//
+// One phone can pair with several gateways, and the phone's registration
+// doesn't say which one runs the chat. The first gateway to report on an
+// activity owns it: reports from any other gateway on the same phone are
+// answered `tracked: false` and never reach the card (notifier issue 156).
+// A gateway's session ids are its own, so a second gateway only reaches a
+// card by naming another's session id.
 
 export const LIVE_ACTIVITIES_CAPABILITY = 'live-activities';
 
@@ -75,6 +82,10 @@ export class LiveActivities {
   // `startedAgoS` seconds ago (unknown from an older Conduit).
   register(installationId, token, sessionIds, { startedAgoS } = {}) {
     this.sweep();
+    // The phone registering the same activity again (a retry, Conduit back
+    // on screen) keeps the gateway that owns it.
+    const previous = this.activities.get(token);
+    const owner = previous?.installationId === installationId ? previous.gatewayId : null;
     this.remove(token);
     const activity = {
       token,
@@ -87,6 +98,8 @@ export class LiveActivities {
       sending: false,
       ending: false,
       endAttempts: 0,
+      // The gateway that owns it, once one has reported (see the top).
+      gatewayId: owner ?? null,
     };
     const tokens = this.byInstallation.get(installationId) ?? new Set();
     // The oldest goes first: a phone shows only a few at once anyway.
@@ -113,15 +126,16 @@ export class LiveActivities {
       const ended = this.unwatchedEnds.get(key);
       if (!ended || now - ended.endedAt > ACTIVITY_TTL_MS || ended.endedAt < startedAt) continue;
       this.unwatchedEnds.delete(key);
+      activity.gatewayId = ended.gatewayId ?? null;
       activity.pending = { state: ended.state, end: ended.end };
       this.schedule(activity);
       return;
     }
   }
 
-  rememberEnd(key, state, end, endedAt) {
+  rememberEnd(key, state, end, endedAt, gatewayId) {
     this.unwatchedEnds.delete(key);
-    this.unwatchedEnds.set(key, { state, end, endedAt });
+    this.unwatchedEnds.set(key, { state, end, endedAt, gatewayId: gatewayId ?? null });
     const now = this.now();
     for (const [old, ended] of this.unwatchedEnds) {
       // Insertion order: the oldest first.
@@ -139,7 +153,10 @@ export class LiveActivities {
     return true;
   }
 
-  find(installationId, sessionId) {
+  // The activity for a chat, if `gatewayId` may reach it: one no gateway
+  // has reported on yet, or one this gateway owns. Without a gateway id
+  // (an in-process caller) the owner isn't checked.
+  find(installationId, sessionId, gatewayId) {
     const token = this.bySession.get(sessionKey(installationId, sessionId));
     const activity = token ? this.activities.get(token) : undefined;
     if (!activity) return undefined;
@@ -147,6 +164,7 @@ export class LiveActivities {
       this.remove(token);
       return undefined;
     }
+    if (!ownedBy(activity, gatewayId)) return undefined;
     return activity;
   }
 
@@ -155,16 +173,23 @@ export class LiveActivities {
   // Only an end that says when the turn ended is kept for a late
   // registration: an older plugin's, retried, could look newer than the
   // chat's next turn.
-  report(installationId, sessionId, state, end, { endedAgoS } = {}) {
+  // A report from a gateway that doesn't own the chat's activity is answered
+  // as unwatched and leaves the activity, and an end kept for it, alone.
+  report(installationId, sessionId, state, end, { endedAgoS, gatewayId } = {}) {
     const key = sessionKey(installationId, sessionId);
-    const activity = this.find(installationId, sessionId);
+    const activity = this.find(installationId, sessionId, gatewayId);
     if (!activity) {
+      // Another gateway's card: nothing of it is touched.
+      if (this.bySession.has(key)) return false;
+      const kept = this.unwatchedEnds.get(key);
+      if (kept && !ownedBy(kept, gatewayId)) return false;
       // Kept for an activity registered late. A report without an end is
       // the chat's next turn, which the older end mustn't reach.
-      if (end && endedAgoS !== undefined) this.rememberEnd(key, state, end, this.now() - endedAgoS * 1000);
+      if (end && endedAgoS !== undefined) this.rememberEnd(key, state, end, this.now() - endedAgoS * 1000, gatewayId);
       else this.unwatchedEnds.delete(key);
       return false;
     }
+    if (gatewayId && !activity.gatewayId) activity.gatewayId = gatewayId;
     this.unwatchedEnds.delete(key);
     // Once the end is on its way, nothing after it may overtake it.
     if (activity.ending || activity.pending?.end) return true;
@@ -288,6 +313,12 @@ export class LiveActivities {
 
 function sessionKey(installationId, sessionId) {
   return `${installationId}\n${sessionId}`;
+}
+
+// Whether `gatewayId` may act on an activity or a kept end: nobody owns it
+// yet, it's this gateway's, or the caller named no gateway.
+function ownedBy(owned, gatewayId) {
+  return !gatewayId || !owned.gatewayId || owned.gatewayId === gatewayId;
 }
 
 // The APNs request for one update or end. `content-state` must decode as

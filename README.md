@@ -118,6 +118,19 @@ is ignored with a warning in the log, and
 or why it was ignored. WSS through the proxy needs websockets 15 or newer
 in Hermes' environment. Proposed by aminrpg (#746).
 
+### Pinning the relays a host uses (plugin 0.199.2+)
+
+A host whose egress allows only known relays can say so with
+`CONDUIT_RELAY_ALLOWLIST` in the gateway's and the dashboard's environment:
+relay origins separated by commas or spaces, such as
+`CONDUIT_RELAY_ALLOWLIST=https://push.milim.dev`. Pairing from Conduit,
+`hermes conduit-push pair` and every request that carries the relay
+credential then go only to those origins (scheme, host and port), and a
+relay the claim answers with that isn't on the list isn't saved. A
+self-hosted relay paired over the LAN needs both its LAN address and its
+HTTPS `PUBLIC_URL` on the list. A value with no valid origin allows none.
+Unset, any relay works as before. Suggested by malaiwah (#156).
+
 Pairing codes expire after ten minutes and can only be claimed once.
 
 With plugin 0.24+ Conduit pairs the active dashboard's profile by itself: it
@@ -185,7 +198,7 @@ The plugin currently emits notifications for:
 
 A turn in a session Hermes doesn't list as a conversation sends no reply, failure or background-task notification and shows no Lock Screen progress (plugin 0.153.7+): a script's `hermes chat --source tool`, a one-shot `hermes chat -q` or `-z`, and a Kanban worker. Their answers go to whoever ran them, and Conduit's chat lists hide those sessions. An approval or question from one still notifies, and so do a call you asked for and a notification the run wrote with `conduit_notify`.
 
-A fork of a chat never notifies as the chat (plugin 0.119.1+): Conduit's predictions (`/predict`), a step summary's `/btw` and the self-improvement review each answer from a fork that runs under the chat's session id, and on a Hermes that runs plugin hooks for forks (0.21 among them) the plugin keeps the fork's answer from going out as a reply and off the chat's Live Activity. An exact `[Silent]` assistant response does not emit a completion notification. Reply and task bodies are sent as plain text: Markdown fences, emphasis, headings, link targets and table rules are dropped (plugin 0.35+). No notification shows a file's path on the host (plugin 0.71.2+): a `MEDIA:` tag in a reply, a question, an approval, a call or a phone change, and in the answer card or call screen that comes with it, reads as 📎 and the file's name, or its type (`📎 PPTX`) when the name is only a hash, and `[[audio_as_voice]]` and `[[as_document]]` are dropped. A Hermes Desktop directive reads the same way (plugin 0.120.4+): a page shown with `::preview{file="…"}` as its file, and a Desktop plugin's card, such as hermes-rich-ui's `::richui{id="…"}`, as `🗂 hermes-rich-ui card`. Code in a reply's fenced block stays as written.
+A fork of a chat never notifies as the chat (plugin 0.119.1+): Conduit's predictions (`/predict`), a step summary's `/btw` and the self-improvement review each answer from a fork that runs under the chat's session id, and on a Hermes that runs plugin hooks for forks (0.21 among them) the plugin keeps the fork's answer from going out as a reply and off the chat's Live Activity. An exact `[Silent]` assistant response does not emit a completion notification. Reply and task bodies are sent as plain text: Markdown fences, emphasis, headings, link targets and table rules are dropped (plugin 0.35+). No notification shows a file's path on the host (plugin 0.71.2+): a `MEDIA:` tag in a reply, a question, an approval, a call or a phone change, and in the answer card or call screen that comes with it, reads as 📎 and the file's name, or its type (`📎 PPTX`) when the name is only a hash, and `[[audio_as_voice]]` and `[[as_document]]` are dropped. A page the reply writes in HTML (a line starting with `<div>`, `<table>`, `<svg>` and the like, which Conduit draws in a page card) reads as `🗂 Page`, and the reply's other tags are dropped. A Hermes Desktop directive reads the same way (plugin 0.120.4+): a page shown with `::preview{file="…"}` as its file, and a Desktop plugin's card, such as hermes-rich-ui's `::richui{id="…"}`, as `🗂 hermes-rich-ui card`. Code in a reply's fenced block stays as written.
 
 ### Cron runs (plugin 0.33+)
 
@@ -624,6 +637,10 @@ relay (relay 0.15+), and the end of the turn ends it.
   arguments or output), a tool count and a context percentage. The chat's
   title stays on the phone. With `redact on` the tool category is left out
   too.
+- One phone can pair with several hosts. The first host to report on an
+  activity owns it (relay 0.28.1+); another host paired with the same phone
+  is answered as if nobody watched and never reaches that card, even if it
+  names the same session id (#156).
 - The relay keeps registrations in memory only (at most 8 hours, the longest
   iOS runs an activity). A relay restart stops updates; the activity then
   shows as out of date on the phone and Conduit ends it when you open it.
@@ -3351,7 +3368,10 @@ the schema's `board` section.
   hard to read without it, never for an explanation, advice or a short
   answer, a second one in a reply only when it shows something the first
   doesn't, the user's own wishes about cards first, and
-  never data as an HTML `::preview` page.
+  never data as an HTML `::preview` page. A Conduit that draws the HTML a
+  reply writes (`reply-html` in its exchange: a page in a card, and
+  `<details>`, `<mark>`, `<kbd>` and colored text) hears it may write HTML,
+  but only for a visual no card covers, never for data a card can show.
 - **Older Conduits.** A Conduit says `board-cards` in its exchange when it
   draws boards. Until every Conduit that draws cards does, the tool leaves
   the new kinds out, keeps the first four cards, drops `layout` and `next`,
@@ -3807,7 +3827,7 @@ marked private is reported only as "at a private place".
   or background on) always reads its own, and if several profiles share
   with the others the first wins (default, then named ones alphabetically).
   When you move location sharing to another profile, the old one stops
-  counting (plugin 0.198.3+), as for health: a device that has since synced
+  counting (plugin 0.199.3+), as for health: a device that has since synced
   into another paired profile's store is no longer that profile's own, so
   it and the other profiles read the new store, and only if that one
   shares with the others.
@@ -4624,7 +4644,12 @@ relay key. The host still opens no inbound route.
   counting on packages Hermes already has. It goes in
   `~/.hermes/conduit_push/watch-audio-env` (under `HERMES_HOME` when that's
   set, or `CONDUIT_WATCH_AUDIO_ENV`). Nothing is installed into Hermes' own
-  Python; if that Python already has `aiortc`, it's used as it is.
+  Python; if that Python already has `aiortc`, it's used as it is. A host
+  whose admin manages packages (no package index, an image built ahead)
+  sets `CONDUIT_WATCH_AUDIO_PREPARE=off` (or `0`, `false`, `no`; plugin 0.199.2+): `prepare` then
+  runs neither pip nor uv and answers `failed` saying so, and GPT-Live on
+  the Watch works only where Hermes' Python (or an environment made before)
+  already has `aiortc` and `av`.
   `runtime` reads `ready`, `preparing`, `failed` (with the reason) or
   `missing`, and `engines` in a grant lists `gpt_live` only once it's
   ready. The helper writes to the plugin from its own thread, so a slow
