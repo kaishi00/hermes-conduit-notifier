@@ -877,8 +877,8 @@ _TOKEN = re.compile(
     r"<!--[\s\S]*?(?:-->|$)|<![^>]*>?|</([a-zA-Z][a-zA-Z0-9-]*)\s*>"
     r"|<([a-zA-Z][a-zA-Z0-9-]*)((?:\s+[^\s\"'>/=]+(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))?)*)\s*(/?)>")
 # The tags Conduit draws; any other stays text there, so it stays in a push too.
-_HTML_TAG = re.compile(r"""</?(?:b|strong|i|em|u|ins|s|del|strike|mark|kbd|sub|sup|span|font|details|summary)"""
-                       r"""(?:\s+[\w-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>]+)|\s+open)*\s*/?>""", re.IGNORECASE)
+_HTML_TAG = re.compile(r"""</?(b|strong|i|em|u|ins|s|del|strike|mark|kbd|sub|sup|span|font|details|summary)"""
+                       r"""(?:\s+[\w-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>]+))?)*\s*/?>""", re.IGNORECASE)
 _BREAK = re.compile(r"<br\s*/?>", re.IGNORECASE)
 
 _PAGE_SAID = "🗂 Page"
@@ -1005,7 +1005,36 @@ def without_tags(line: str) -> str:
     if "<" not in line:
         return line
     parts = _TAG_CODE_SPAN.split(line)
-    return "".join(part if index % 2 else _HTML_TAG.sub("", _BREAK.sub(" ", part)) for index, part in enumerate(parts))
+    return "".join(part if index % 2 else _paired_tags_out(_BREAK.sub(" ", part)) for index, part in enumerate(parts))
+
+
+def _paired_tags_out(text: str) -> str:
+    """``text`` without the drawn tags that pair up, as the chat draws only
+    those; an unclosed ``<b>`` stays, as it does there. A fold's
+    ``<details>`` and ``<summary>`` always go."""
+    found = list(_HTML_TAG.finditer(text))
+    if not found:
+        return text
+    dropped: set[int] = set()
+    opened: list[tuple[str, int]] = []
+    for index, match in enumerate(found):
+        name = match.group(1).lower()
+        if name in ("details", "summary"):
+            dropped.add(index)
+        elif not match.group(0).startswith("</"):
+            opened.append((name, index))
+        else:
+            at = next((place for place in range(len(opened) - 1, -1, -1) if opened[place][0] == name), None)
+            if at is not None:
+                dropped.update((opened[at][1], index))
+                del opened[at:]
+    out, at = [], 0
+    for index, match in enumerate(found):
+        if index in dropped:
+            out.append(text[at:match.start()])
+            at = match.end()
+    out.append(text[at:])
+    return "".join(out)
 
 
 class _Plain(str):
