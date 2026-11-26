@@ -221,6 +221,14 @@ TEMPLATES_RULE = "[Your saved card templates (conduit_show type template): {name
 
 
 DESKTOP_BOARD_RULE = BOARD_RULE.replace("[Conduit draws boards", "[Hermes Desktop draws boards")
+# A Conduit that draws the HTML a reply writes ("reply-html": a page in a card,
+# a few tags as text) hears it may, but only for what no card covers (Eric
+# 2026-11-26: data stays on conduit_show).
+REPLY_HTML_FEATURE = "reply-html"
+REPLY_HTML_BOARD_RULE = BOARD_RULE.replace(
+    "Never draw data as an HTML ::preview page.]",
+    "HTML written in your reply draws too (a page in a card; <details>, <mark>, <kbd> and a colored <span> in the "
+    "text), but only for a visual no card covers: never draw data a card can show as HTML or a ::preview page.]")
 
 
 def board_rule(turn_source: str | None, desktop_half: Callable[[], bool] = lambda: False) -> str | None:
@@ -235,11 +243,13 @@ def board_rule(turn_source: str | None, desktop_half: Callable[[], bool] = lambd
     if turn_source != "conduit" or not available():
         return None
     try:
-        if not _store().has_feature_everywhere(card_schema.BOARD_FEATURE):
+        store = _store()
+        if not store.has_feature_everywhere(card_schema.BOARD_FEATURE):
             return None
+        html = store.has_feature_everywhere(REPLY_HTML_FEATURE)
     except Exception:  # noqa: BLE001
         return None
-    return _with_templates(BOARD_RULE)
+    return _with_templates(REPLY_HTML_BOARD_RULE if html else BOARD_RULE)
 
 
 def _with_templates(rule: str) -> str:
