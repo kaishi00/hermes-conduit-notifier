@@ -82,6 +82,10 @@ export class LiveActivities {
   // `startedAgoS` seconds ago (unknown from an older Conduit).
   register(installationId, token, sessionIds, { startedAgoS } = {}) {
     this.sweep();
+    // The phone registering the same activity again (a retry, Conduit back
+    // on screen) keeps the gateway that owns it.
+    const previous = this.activities.get(token);
+    const owner = previous?.installationId === installationId ? previous.gatewayId : null;
     this.remove(token);
     const activity = {
       token,
@@ -95,7 +99,7 @@ export class LiveActivities {
       ending: false,
       endAttempts: 0,
       // The gateway that owns it, once one has reported (see the top).
-      gatewayId: null,
+      gatewayId: owner ?? null,
     };
     const tokens = this.byInstallation.get(installationId) ?? new Set();
     // The oldest goes first: a phone shows only a few at once anyway.

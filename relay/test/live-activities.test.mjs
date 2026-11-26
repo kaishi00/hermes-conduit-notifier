@@ -344,3 +344,12 @@ test('an end kept before the card registered binds the card to its gateway, and 
   assert.equal(sent[0].push.payload.aps.event, 'end');
   assert.equal(activity.gatewayId, 'gw-a');
 });
+
+test('the phone registering the same activity again keeps its owner', async () => {
+  const { activities } = harness({ minIntervalMs: 0 });
+  activities.register('install-1', TOKEN_A, ['session-1']);
+  assert.equal(activities.report('install-1', 'session-1', { phase: 'thinking', tools: 0 }, undefined, { gatewayId: 'gw-a' }), true);
+  activities.register('install-1', TOKEN_A, ['session-1']);
+  assert.equal(activities.report('install-1', 'session-1', { phase: 'thinking', tools: 0 }, undefined, { gatewayId: 'gw-b' }), false);
+  assert.equal(activities.report('install-1', 'session-1', { phase: 'thinking', tools: 1 }, undefined, { gatewayId: 'gw-a' }), true);
+});
