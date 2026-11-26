@@ -126,3 +126,27 @@ def test_installing_twice_wraps_hermes_once_and_unloading_puts_it_back(launchers
     assert launchers.runtime_command.__wrapped__ is own
     update.uninstall()
     assert launchers.runtime_command is own
+
+
+def test_the_cgroup_check_reads_this_process_by_pid(monkeypatch):
+    """With no path, it reads this process's own cgroup file, built from its pid."""
+    opened = []
+
+    class Handle:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return "0::/system.slice/hermes-dashboard.service\n"
+
+    def fake_open(path, *args, **kwargs):
+        opened.append(path)
+        return Handle()
+
+    monkeypatch.setattr(update.os, "getpid", lambda: 4242)
+    monkeypatch.setattr("builtins.open", fake_open)
+    assert update._in_service_cgroup() is True
+    assert opened == [update.os.path.join("/proc", "4242", "cgroup")]

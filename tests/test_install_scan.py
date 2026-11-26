@@ -36,7 +36,8 @@ def _scanned_files():
             yield path
 
 
-def test_no_literal_hermes_reads_as_a_secret():
+def _literal_findings(pattern):
+    """Each line of a file the scan reads at full severity that matches pattern."""
     found = []
     for path in _scanned_files():
         try:
@@ -44,21 +45,18 @@ def test_no_literal_hermes_reads_as_a_secret():
         except (UnicodeDecodeError, OSError):
             continue
         for number, line in enumerate(text.splitlines(), 1):
-            if HARDCODED_SECRET.search(line):
+            if pattern.search(line):
                 found.append(f"{path.relative_to(ROOT)}:{number}: {line.strip()}")
+    return found
+
+
+def test_no_literal_hermes_reads_as_a_secret():
+    found = _literal_findings(HARDCODED_SECRET)
     assert not found, ("Hermes' install scan would refuse the plugin (hardcoded_secret); build these "
                        "at run time instead:\n" + "\n".join(found))
 
 
 def test_no_literal_proc_path_holds_an_older_hermes():
-    found = []
-    for path in _scanned_files():
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
-            continue
-        for number, line in enumerate(text.splitlines(), 1):
-            if PROC_ACCESS.search(line):
-                found.append(f"{path.relative_to(ROOT)}:{number}: {line.strip()}")
+    found = _literal_findings(PROC_ACCESS)
     assert not found, ("An older Hermes' install scan would hold the update at caution (proc_access); "
                        "build the path at run time instead:\n" + "\n".join(found))
