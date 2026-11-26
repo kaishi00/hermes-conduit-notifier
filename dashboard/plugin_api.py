@@ -61,6 +61,10 @@ they run:
                           Hermes rebuilds it on (gateway_runtime)
     rooms                 Room files, room pictures and the room planner
     workspace             Artifacts and workspace files
+    source_control        Source control: Git in a chat's folder, for the
+                          coding workspace's Changes view
+    terminals             Terminals: shells on the Hermes host in a chat's
+                          folder, for the coding workspace
     workstreams           Bot workstreams: the Work panel, and Reply, Stop,
                           Continue and Check first on a workstream, and
                           the bot's work settings (Edit Bot > Work)

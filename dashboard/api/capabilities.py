@@ -271,6 +271,12 @@ ROUTE_CAPABILITIES = (
     # POST /workspace/duplicate with "to": a copy pasted into another folder,
     # keeping its name there when free (hermes-conduit#1438).
     "workspace-copy",
+    # /workspace/git/*: Git in a Folder root (status, diffs, history, branches,
+    # stage, commit, switch, pull, push), for the desktop's Changes view.
+    "workspace-git",
+    # /terminals and its socket: shells on the host in a Folder root, kept
+    # running while nothing shows them, for the desktop's terminal drawer.
+    "terminals",
     "local-live",
     # GET/PUT /rooms/choices and /rooms/defaults: an agent's choices in rooms
     # with other people's agents, enforced on this host (Linked Rooms).

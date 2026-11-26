@@ -868,6 +868,13 @@ routes:
   - WS /speech-server/socket
   - GET /speech-server/status
   - POST /speech-server/test
+  - DELETE /terminals
+  - GET /terminals
+  - POST /terminals
+  - POST /terminals/rename
+  - GET /terminals/settings
+  - POST /terminals/settings
+  - WS /terminals/socket
   - POST /turn-surface
   - POST /turn-surface/discard
   - GET /voice-context
@@ -888,6 +895,11 @@ routes:
   - POST /watch-tools/revoke
   - POST /web-search
   - GET /web-search/status
+  - GET /workspace/git/branches
+  - GET /workspace/git/diff
+  - GET /workspace/git/log
+  - GET /workspace/git/status
+  - POST /workspace/git/{action}
   - GET /workspace/list
   - GET /workspace/recent
   - GET /workspace/resolve
