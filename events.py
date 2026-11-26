@@ -904,8 +904,12 @@ def _closes_at(text: str, at: int = 0) -> int:
             line_end = text.find("\n", emptied)
             if not match or (line_end >= 0 and match.start() > line_end):
                 return emptied
-            # Only another page element carries the page on; prose with a tag in it stays prose.
-            if not match.group(2) or match.group(2).lower() not in _PAGE_TAGS:
+            # Only another page element right after it carries the page on; prose with a tag in it stays prose.
+            if (
+                not match.group(2)
+                or match.group(2).lower() not in _PAGE_TAGS
+                or text[emptied : match.start()].strip()
+            ):
                 return emptied
         if not match:
             return -1
@@ -1005,14 +1009,22 @@ def without_tags(line: str) -> str:
     if "<" not in line:
         return line
     parts = _TAG_CODE_SPAN.split(line)
-    return "".join(part if index % 2 else _paired_tags_out(_BREAK.sub(" ", part)) for index, part in enumerate(parts))
+    spaced = "".join(part if index % 2 else _BREAK.sub(" ", part) for index, part in enumerate(parts))
+    # Paired over the whole line, a code span's own tags left out: <b>`make`</b> pairs.
+    code = [span.span() for span in _TAG_CODE_SPAN.finditer(spaced)]
+    return _paired_tags_out(spaced, code)
 
 
-def _paired_tags_out(text: str) -> str:
+def _paired_tags_out(text: str, code: list[tuple[int, int]] | None = None) -> str:
     """``text`` without the drawn tags that pair up, as the chat draws only
     those; an unclosed ``<b>`` stays, as it does there. A fold's
-    ``<details>`` and ``<summary>`` always go."""
-    found = list(_HTML_TAG.finditer(text))
+    ``<details>`` and ``<summary>`` always go. Tags inside ``code`` spans
+    are what the code shows, and stay."""
+    found = [
+        match
+        for match in _HTML_TAG.finditer(text)
+        if not any(start <= match.start() < end for start, end in code or ())
+    ]
     if not found:
         return text
     dropped: set[int] = set()

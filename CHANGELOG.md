@@ -19,6 +19,13 @@ checks it). The format is fixed, because Conduit reads it:
 
 - Conduit's bots lists can show what each bot is doing now in any of its chats, not only the one you have open: thinking, running a command, searching the web, or waiting on you. Only the kind of step is shared, never what a tool was given or returned.
 
+## 0.199.1 (2026-11-26)
+
+### Fixes
+
+- A notification no longer calls a whole reply a page when a line closes a page and then talks about a tag, as in "<div>x</div> Use <div> to wrap.": the prose after it shows as written.
+- A notification keeps no stray `<b>` and `</b>` around inline code: `<b>` with `make` in backticks inside shows as the bold words without the tags.
+
 ## 0.199.0 (2026-11-26)
 
 ### New and improved
