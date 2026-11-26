@@ -48,6 +48,8 @@ MAX_PER_PROFILE = 8
 MAX_TOTAL = 32
 IDLE_UNWATCHED_S = 7 * 24 * 3600
 MAX_TITLE_CHARS = 80
+# How long typing waits on a shell that isn't reading before it's dropped.
+WRITE_TIMEOUT_S = 2.0
 MAX_INPUT_BYTES = 64 * 1024
 MIN_SIZE, MAX_COLS, MAX_ROWS = 2, 500, 200
 KILL_GRACE_S = 2.0
@@ -222,6 +224,7 @@ class Terminal:
         if len(data) > MAX_INPUT_BYTES:
             raise TerminalError(413, "That's too much to type at once")
         view = memoryview(data)
+        deadline = time.monotonic() + WRITE_TIMEOUT_S
         while view:
             try:
                 written = os.write(self.fd, view)
@@ -229,6 +232,9 @@ class Terminal:
                 if exc.errno == errno.EINTR:
                     continue
                 if exc.errno == errno.EAGAIN:
+                    # The shell isn't reading: what's left is dropped rather than holding a worker.
+                    if time.monotonic() >= deadline:
+                        raise TerminalError(409, "This terminal isn't reading what's typed")
                     time.sleep(0.01)
                     continue
                 raise TerminalError(409, "This terminal has ended")

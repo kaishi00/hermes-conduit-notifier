@@ -150,6 +150,20 @@ def test_an_unwatched_terminal_ends_after_a_week(tmp_path):
         made.close_all()
 
 
+def test_typing_into_a_shell_that_isnt_reading_gives_up(host, tmp_path, monkeypatch):
+    terminal = host.create("me", str(tmp_path), 80, 24)
+    monkeypatch.setattr(th, "WRITE_TIMEOUT_S", 0.2)
+
+    def full(fd, data):
+        raise OSError(th.errno.EAGAIN, "full")
+
+    monkeypatch.setattr(th.os, "write", full)
+    started = time.monotonic()
+    with pytest.raises(th.TerminalError) as exc:
+        terminal.write(b"x")
+    assert exc.value.status == 409 and time.monotonic() - started < 2
+
+
 def test_sizes_are_kept_in_range(host, tmp_path):
     terminal = host.create("", str(tmp_path), cols="wide", rows=10_000)
     assert (terminal.cols, terminal.rows) == (80, 24) or terminal.rows == th.MAX_ROWS

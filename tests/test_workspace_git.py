@@ -174,6 +174,53 @@ def test_commit_with_nothing_staged_asks_or_takes_everything(repo):
     assert done["status"]["files"] == []
 
 
+def test_a_fresh_repository_with_nothing_staged_is_asked_not_failed(tmp_path):
+    folder = tmp_path / "fresh"
+    folder.mkdir()
+    git(folder).change("init", {})
+    for body in ({"message": "x"}, {"message": "x", "all": True}):
+        with pytest.raises(wg.GitError) as exc:
+            git(folder).change("commit", body)
+        assert exc.value.status == 409
+
+
+def test_counts_line_up_when_the_folder_is_inside_the_repository(repo):
+    # The chat's folder is src/, the repository's top is its parent: both lists use top paths.
+    (repo / "README.md").write_text("# Site\n\nOne.\nTwo.\n")
+    (repo / "src" / "index.astro").write_text("<h1>Conduit for Hermes Agent</h1>\n")
+    sh(repo, "add", "README.md")
+    files = by_path(git(repo / "src").status())
+    assert files["README.md"]["stagedAdded"] == 3 and files["README.md"]["added"] is None
+    assert (files["src/index.astro"]["added"], files["src/index.astro"]["removed"]) == (0, 1)
+
+
+def test_a_secret_renamed_away_from_its_name_stays_closed(repo):
+    (repo / ".env").write_text("TOKEN=hunter2\n")
+    sh(repo, "add", ".env")
+    sh(repo, "commit", "-q", "-m", "env")
+    sh(repo, "mv", ".env", "settings.txt")
+    row = by_path(git(repo).status())["settings.txt"]
+    assert row["from"] == ".env" and row["secret"] is True
+    with pytest.raises(wg.GitError) as exc:
+        git(repo).diff("settings.txt", staged=True)
+    assert exc.value.status == 403
+    # An ordinary rename still shows its diff.
+    sh(repo, "mv", "README.md", "READ.md")
+    assert git(repo).diff("READ.md", staged=True)["path"] == "READ.md"
+
+
+def test_an_inherited_ssh_command_is_kept_in_batch_mode(monkeypatch, repo):
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen.update(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /keys/deploy")
+    wg.LocalRunner(run=run)(str(repo), ["status"], 5)
+    assert seen["GIT_SSH_COMMAND"] == "ssh -i /keys/deploy -o BatchMode=yes"
+
+
 def test_unstage_before_the_first_commit(tmp_path):
     folder = tmp_path / "fresh"
     folder.mkdir()

@@ -57,6 +57,8 @@ _terminals_limiter = core._MintLimiter(TERMINALS_LIMIT, TERMINALS_WINDOW_S,
                                        message="Too many terminal requests; try again shortly")
 _terminals_auth_failure_limiter = core._MintLimiter(30, 60.0, message="Too many refused terminal sockets")
 _terminals_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-terminals")
+# Typing goes through its own workers, so a shell that isn't reading never holds up the routes.
+_terminal_input_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="conduit-terminal-input")
 _settings_lock = threading.Lock()
 NO_STORE = {"Cache-Control": "no-store"}
 
@@ -278,11 +280,9 @@ async def terminal_socket(ws: WebSocket) -> None:
 
     loop = asyncio.get_running_loop()
     queue: "asyncio.Queue[Any]" = asyncio.Queue()
-    behind = {"dropped": False}
 
     def push(item: Any) -> None:
         if queue.qsize() >= TERMINALS_SOCKET_BACKLOG:
-            behind["dropped"] = True
             queue.put_nowait(("slow", None))
             return
         queue.put_nowait(item)
@@ -329,9 +329,11 @@ async def terminal_socket(ws: WebSocket) -> None:
                 if frame.get("type") == "input" and isinstance(frame.get("data"), str):
                     data = frame["data"].encode("utf-8", errors="replace")
                     try:
-                        await loop.run_in_executor(_terminals_executor, terminal.write, data)
+                        await loop.run_in_executor(_terminal_input_executor, terminal.write, data)
                     except module.TerminalError:
-                        return
+                        if terminal.exit_code is not None:
+                            return
+                        # A shell that isn't reading drops what was typed; the socket stays.
                 elif frame.get("type") == "resize":
                     terminal.resize(frame.get("cols"), frame.get("rows"))
 

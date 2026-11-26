@@ -95,7 +95,9 @@ class LocalRunner:
 
     def __call__(self, cwd: str, args: Sequence[str], timeout: int, stdin: Optional[str] = None) -> Result:
         env = {**os.environ, **_ENV}
-        env.setdefault("GIT_SSH_COMMAND", _BATCH_SSH)
+        # Batch mode always, an inherited ssh command included, so a passphrase prompt never waits.
+        inherited = env.get("GIT_SSH_COMMAND", "").strip()
+        env["GIT_SSH_COMMAND"] = f"{inherited} -o BatchMode=yes" if inherited else _BATCH_SSH
         try:
             done = self._run([self._git, *_CONFIG, *args], cwd=cwd, env=env, input=stdin, capture_output=True,
                              text=True, encoding="utf-8", errors="replace", timeout=timeout)
@@ -212,6 +214,25 @@ class Git:
     def _secret(self, top: str, rel: str) -> bool:
         return bool(self._sensitive(self._full(top, rel)))
 
+    def _renamed_from(self, top: str, rel: str) -> Optional[str]:
+        """The path a staged file was renamed or copied from, if it was. Read
+        over the whole index, since a diff limited to the new path shows a
+        rename as a new file with the old one's contents."""
+        result = self._git(["diff", "--cached", "--name-status", "-z", "--no-ext-diff", "-M", "-C"], cwd=top)
+        if result.code != 0:
+            return None
+        fields = _split_z(result.out)
+        at = 0
+        while at < len(fields):
+            code = fields[at]
+            if code[:1] in ("R", "C") and at + 2 < len(fields):
+                if fields[at + 2] == rel:
+                    return fields[at + 1]
+                at += 3
+            else:
+                at += 2
+        return None
+
     def _rel(self, top: str, raw: Any) -> str:
         """A path the client sent, as a path inside the repository. It may be
         relative to the top folder or absolute under it."""
@@ -299,7 +320,7 @@ class Git:
                 "staged": None if index in ".?" or conflict else STATUS_NAMES.get(index, "modified"),
                 "unstaged": "conflict" if conflict else (
                     "untracked" if kind == "?" else (None if worktree == "." else STATUS_NAMES.get(worktree, "modified"))),
-                "secret": self._secret(top, path),
+                "secret": self._secret(top, path) or bool(orig and self._secret(top, orig)),
                 "added": None,
                 "removed": None,
                 "stagedAdded": None,
@@ -312,7 +333,8 @@ class Git:
                 args = ["diff", "--numstat", "-z", "--no-ext-diff", "--no-renames"]
                 if cached:
                     args.append("--cached")
-                counts = self._git(args)
+                # Paths relative to the top folder, as the status rows are.
+                counts = self._git(args, cwd=top)
                 if counts.code != 0:
                     continue
                 for row in _split_z(counts.out):
@@ -329,7 +351,8 @@ class Git:
     def diff(self, raw_path: Any, staged: bool = False) -> Dict[str, Any]:
         top = self._require_top()
         rel = self._rel(top, raw_path)
-        if self._secret(top, rel):
+        source = self._renamed_from(top, rel) if staged else None
+        if self._secret(top, rel) or (source is not None and self._secret(top, source)):
             raise GitError(403, "Conduit doesn't open files that hold keys or passwords")
         base = ["--no-color", "--no-ext-diff", "-U3", "--find-renames"]
         if staged:
@@ -490,14 +513,13 @@ class Git:
             raise GitError(400, "A commit message is required")
         if len(message) > MAX_MESSAGE_CHARS:
             raise GitError(400, "That commit message is too long")
-        staged = self._git(["diff", "--cached", "--quiet"], cwd=top)
-        if staged.code == 0 and self._has_head(top):
-            if body.get("all") is True:
-                self._check(self._git(["add", "-A"], timeout=CHANGE_TIMEOUT_S, cwd=top), "Git couldn't stage that")
-            else:
+        # Exit 0 means nothing is staged, a repository with no commit yet included.
+        if self._git(["diff", "--cached", "--quiet"], cwd=top).code == 0:
+            if body.get("all") is not True:
                 raise GitError(409, "Nothing is staged to commit")
-        elif not self._has_head(top) and body.get("all") is True:
             self._check(self._git(["add", "-A"], timeout=CHANGE_TIMEOUT_S, cwd=top), "Git couldn't stage that")
+            if self._git(["diff", "--cached", "--quiet"], cwd=top).code == 0:
+                raise GitError(409, "Nothing changed to commit")
         result = self._git(["commit", "-q", "-F", "-"], timeout=CHANGE_TIMEOUT_S, cwd=top, stdin=message)
         if result.code != 0:
             text = (result.err + result.out).lower()
