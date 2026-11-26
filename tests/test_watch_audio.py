@@ -337,7 +337,7 @@ def test_preparing_makes_a_private_environment_with_venv_and_pip(tmp_path):
     env = tmp_path / "env"
     assert run.commands[0] == ["/usr/bin/python3", "-m", "venv", str(env)]
     assert run.commands[1][:5] == [str(env / "bin" / "python"), "-I", "-m", "pip", "install"]
-    assert run.commands[1][-1] == "aiortc==1.15.0"
+    assert run.commands[1][-3:] == ["--require-hashes", "-r", api.watch_audio.WATCH_AUDIO_LOCK]
     assert json.loads((env / "conduit-watch-audio.json").read_text()) == {"aiortc": "1.15.0", "requirement": "aiortc==1.15.0"}
     python, _, flags, source = runtime.python()
     assert (python, flags, source) == (str(env / "bin" / "python"), ("-I",), "plugin")
@@ -348,6 +348,32 @@ def test_a_python_without_venv_falls_back_to_uv(tmp_path):
     runtime = _runtime(tmp_path, run=run, which=lambda name: "/opt/uv" if name == "uv" else None)
     assert runtime.prepare(start=lambda target: target())["runtime"] == "ready"
     assert [command[:2] for command in run.commands[1:3]] == [["/opt/uv", "venv"], ["/opt/uv", "pip"]]
+    assert run.commands[2][-3:] == ["--require-hashes", "-r", api.watch_audio.WATCH_AUDIO_LOCK]
+
+
+def test_the_lock_pins_aiortc_and_hashes_every_package():
+    # pip refuses the whole install under --require-hashes if any line lacks
+    # a hash, so this catches a hand edit before a host does.
+    import re
+    text = pathlib.Path(api.watch_audio.WATCH_AUDIO_LOCK).read_text(encoding="utf-8")
+    entries = re.split(r"\n(?=[A-Za-z0-9])", "\n" + "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#")))
+    entries = [e.strip() for e in entries if e.strip()]
+    assert entries
+    for entry in entries:
+        assert "==" in entry.split()[0], entry
+        assert "--hash=sha256:" in entry, entry
+    assert any(entry.split()[0] == api.watch_audio.WATCH_AUDIO_AIORTC for entry in entries), \
+        "regenerate dashboard/watch_audio_requirements.txt for the new aiortc pin"
+    for name in ("av", "cryptography", "aioice", "pylibsrtp"):
+        assert any(entry.startswith(name + "==") for entry in entries), name
+
+
+def test_a_missing_lock_fails_prepare_without_installing(tmp_path, monkeypatch):
+    monkeypatch.setattr(api.watch_audio, "WATCH_AUDIO_LOCK", str(tmp_path / "missing.txt"))
+    run = FakeRun()
+    status = _runtime(tmp_path, run=run).prepare(start=lambda target: target())
+    assert status["runtime"] == "failed" and "watch_audio_requirements.txt" in status["reason"]
+    assert run.commands == []
 
 
 @pytest.mark.parametrize("uv", [False, True])
@@ -396,6 +422,16 @@ def test_prepare_turned_off_still_uses_a_hermes_python_with_aiortc(tmp_path, mon
     runtime = _runtime(tmp_path, has=lambda name: True)
     assert runtime.prepare(start=lambda target: pytest.fail("prepare started"))["runtime"] == "ready"
     assert runtime.status()["source"] == "hermes"
+
+
+def test_an_unknown_prepare_value_leaves_it_on_and_warns_once(monkeypatch, caplog):
+    # Status polls read the switch too, so a typo warns once, not on every poll.
+    monkeypatch.setenv("CONDUIT_WATCH_AUDIO_PREPARE", "maybe-not-a-value")
+    monkeypatch.setattr(api.watch_audio, "_prepare_values_warned", set())
+    with caplog.at_level("WARNING"):
+        assert api.watch_audio._watch_audio_prepare_off() is False
+        assert api.watch_audio._watch_audio_prepare_off() is False
+    assert sum("CONDUIT_WATCH_AUDIO_PREPARE" in r.getMessage() for r in caplog.records) == 1
 
 
 @pytest.mark.parametrize("value", ["", "on", "1"])
