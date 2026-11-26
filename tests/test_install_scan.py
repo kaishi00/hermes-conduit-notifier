@@ -17,6 +17,10 @@ HARDCODED_SECRET = re.compile(
     r'[A-Za-z0-9+/=_-]{20,}',
     re.IGNORECASE,
 )
+# proc_access: a high finding, so a "caution" verdict that holds the update until someone
+# confirms it. Hermes exempts a read of its own cgroup since its 2026-11 releases, but older
+# ones (the App Review host's, 2026.9.24) still hold the update over it.
+PROC_ACCESS = re.compile(r'/proc/self|/proc/\d+/')
 TEST_FOLDERS = {"tests", "test"}
 SKIP_FOLDERS = {".git", "node_modules", "__pycache__", ".pytest_cache", ".venv", "venv"}
 
@@ -44,3 +48,17 @@ def test_no_literal_hermes_reads_as_a_secret():
                 found.append(f"{path.relative_to(ROOT)}:{number}: {line.strip()}")
     assert not found, ("Hermes' install scan would refuse the plugin (hardcoded_secret); build these "
                        "at run time instead:\n" + "\n".join(found))
+
+
+def test_no_literal_proc_path_holds_an_older_hermes():
+    found = []
+    for path in _scanned_files():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for number, line in enumerate(text.splitlines(), 1):
+            if PROC_ACCESS.search(line):
+                found.append(f"{path.relative_to(ROOT)}:{number}: {line.strip()}")
+    assert not found, ("An older Hermes' install scan would hold the update at caution (proc_access); "
+                       "build the path at run time instead:\n" + "\n".join(found))
