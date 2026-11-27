@@ -70,6 +70,7 @@ def test_every_capability_names_a_served_route_family():
         "history-page": "/sessions/history-page",
         "session-usage": "/sessions/usage",
         "chat-kanban-tasks": "/sessions/kanban-tasks",
+        "chat-live-work": "/sessions/live-work",
         "chat-done": "/chats/done",
         "bot-plugin": "/profiles/plugin",
         "hermes-calls": "/calls",

@@ -75,6 +75,8 @@ they run:
                           list
     live_steps            Live steps: what each running chat is doing now,
                           for the bots lists
+    live_work             A chat's turn running in the gateway: its step, its
+                          delegate agents and the messages queued behind it
     boards                Boards: the ticks on conduit_show's checklist cards,
                           the boards agents showed in group rooms, and the
                           boards Hermes Desktop draws

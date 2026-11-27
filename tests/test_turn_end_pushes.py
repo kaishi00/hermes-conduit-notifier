@@ -434,6 +434,23 @@ def test_a_child_whose_compaction_replaced_its_id_is_still_a_child(pushed, sessi
     assert not plugin._is_child("c3"), "the child ended: no more reads"
 
 
+def test_a_compacted_child_s_live_step_stays_under_the_id_it_started_with(pushed, sessions):
+    _compacted_child(sessions)
+    assert plugin._is_child("c3")
+    # Its parent's turn lists it under "c": its steps under "c3" go there.
+    assert plugin._child_root("c3") == "c" and plugin._child_root("other") == "other"
+    plugin._subagent_stop(child_session_id="c3", parent_session_id="p", parent_turn_id="t")
+
+
+def test_a_compacted_child_s_id_is_learned_when_nothing_asked_about_it_yet(pushed, sessions):
+    # A Hermes with the delegation flag never reads the child's lineage for _is_child.
+    _compacted_child(sessions)
+    assert "c3" not in plugin._compacted_children
+    assert plugin._child_root("c3") == "c"
+    assert "c3" in plugin._compacted_children, "learned once"
+    plugin._subagent_stop(child_session_id="c3", parent_session_id="p", parent_turn_id="t")
+
+
 def test_a_child_ending_under_a_compacted_id_no_one_asked_about_is_cleared(pushed, sessions):
     _compacted_child(sessions)
     plugin._subagent_stop(child_session_id="c3", parent_session_id="p", parent_turn_id="t")

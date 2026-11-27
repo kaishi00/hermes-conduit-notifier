@@ -19,6 +19,22 @@ checks it). The format is fixed, because Conduit reads it:
 
 - Control from Hermes: a bot can drive the computer where you run Conduit for desktop (open apps, read the screen, click and type), wherever Hermes runs. It's off until you turn it on in Conduit's Settings on that computer, only the bots you pick can use it, each chat asks you first, and a bar on the screen with Stop shows while a bot is in control.
 
+## 0.202.12 (2026-11-27)
+
+### Fixes
+
+- A subagent that compacted its conversation partway through kept showing its old step in Conduit until it finished, on hosts with a recent Hermes. Its step now keeps updating.
+
+## 0.202.11 (2026-11-27)
+
+### Fixes
+
+- A message you sent into a chat while a turn ran in the gateway (an API chat's, or another app's) waited in Hermes' queue, but Conduit couldn't show it there after you left the chat, so it looked like it never went through. Conduit now reads the queue and shows the message waiting, on the phone and on desktop.
+
+### New and improved
+
+- A turn running in the gateway now shows what it's doing in a chat opened from Conduit, and its subagents' own steps, so a chat waiting on a subagent no longer looks finished.
+
 ## 0.202.10 (2026-11-27)
 
 ### Fixes

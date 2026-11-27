@@ -865,6 +865,7 @@ routes:
   - GET /sessions/desktop-views
   - POST /sessions/history-page
   - GET /sessions/kanban-tasks
+  - GET /sessions/live-work
   - POST /sessions/takeover
   - GET /sessions/usage
   - POST /side-question
