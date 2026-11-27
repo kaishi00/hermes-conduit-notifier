@@ -2712,7 +2712,7 @@ def test_a_chats_summary_is_not_the_users_words(db, tmp_path):
     db.message("user", "[CONTEXT SUMMARY]: Earlier.\n\n--- END OF CONTEXT SUMMARY — respond to the message below, not the "
                "summary above ---\n\nWhat about j3?", sid="work", at=DAY + 18)
     assert [r["content"] for r in hermes.chat_messages(tmp_path, chat_id="work", after_id=0, since=0, max_chars=40,
-                                                       limit=10)][-1:] == ["What about j3?"]
+                                                       limit=10)] == shown + ["What about j3?"]
     db.message("user", "pulse-tag-7 hidden ask", sid="work", at=DAY + 19, display_kind="hidden")
     db.message("user", lcm, sid="work", at=DAY + 20)
     db.message("user", "[PRIOR CONTEXT — for reference only; not a new message]\n5 stars\n\n[END OF PRIOR CONTEXT — "
@@ -2737,7 +2737,7 @@ def test_pulse_tells_a_summary_by_the_same_header_as_the_other_readers():
                "[Durable Summary (d2, node 7)]\nx", "[Depth-12 Summary (d12, node 9001)]\nx",
                "[Session Arc Summary quoted]\nx", "[Recent Summary (dx, node 1)]\nx",
                "[Durable Summary (d2, notes)]\nx", "hello"]
-    # Pulse's SQL is looser at the edges (no digit required, no newline), reading less, never more:
+    # Pulse's SQL is looser at the edges (a digit run may go on past its digits, no newline), reading less, never more:
     # nothing LCM-X writes. Every real shape above agrees.
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE messages (role, content)")
