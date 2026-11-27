@@ -86,7 +86,7 @@ def test_the_warning_names_helpers_on_hold(holds):
     until[("home", "openrouter")] = time.time() - 5
     holds.compression._emit_feasibility_notice(object(), HERMES_SAYS)
     said = holds.warned[-1]
-    assert "(zai, api.stepfun.ai)" in said and "about 5 more minutes" in said
+    assert "(zai, api.stepfun.ai)" in said and "the first of them is back in about 5 minutes" in said
     assert "nous" not in said and "openrouter" not in said and "hermes setup" not in said
 
 
@@ -103,7 +103,20 @@ def test_one_minute_is_singular():
     spec = importlib.util.spec_from_file_location("conduit_push_helper_holds_words", ROOT / "helper_holds.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert "about 1 more minute," in module.held_warning(["zai"], 20)
+    assert "(about 1 more minute)" in module.held_warning(["zai"], 20)
+    assert "(a, b, c and 2 more)" in module.held_warning(list("abcde"), 300)
+
+
+def test_a_hold_table_that_cant_be_read_leaves_hermes_words(holds):
+    assert holds.install()
+
+    class Shifting(dict):
+        def items(self):
+            raise RuntimeError("dictionary changed size during iteration")
+
+    holds.client._aux_unhealthy_until = Shifting()
+    holds.compression._emit_feasibility_notice(object(), HERMES_SAYS)
+    assert holds.warned == [HERMES_SAYS]
 
 
 def test_install_is_once_and_uninstall_puts_hermes_own_back(holds):

@@ -110,18 +110,22 @@ def _held(client: Any) -> tuple[list[str], float]:
 def held_warning(names: list[str], seconds: float) -> str:
     """The warning for a compaction that found its helpers on hold."""
     minutes = max(1, round(seconds / 60))
-    who = ", ".join(names[:3])
+    who = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+    back = (f"about {minutes} more minute{'s' if minutes != 1 else ''}" if len(names) == 1
+            else f"the first of them is back in about {minutes} minute{'s' if minutes != 1 else ''}")
     return (f"⚠ Hermes' helper model for summarising long chats ({who}) didn't answer in time and is paused "
-            f"for about {minutes} more minute{'s' if minutes != 1 else ''}, so until then older messages "
-            "will be cut without a summary.")
+            f"({back}), so until then older messages will be cut without a summary.")
 
 
 def _notice_guard(client: Any, own: Callable[..., Any]) -> Callable[..., Any]:
     def emit(agent: Any, msg: Any, *args: Any, **kwargs: Any) -> Any:
         if isinstance(msg, str) and msg.startswith(NO_PROVIDER):
-            names, seconds = _held(client)
-            if names:
-                msg = held_warning(names, seconds)
+            try:
+                names, seconds = _held(client)
+                if names:
+                    msg = held_warning(names, seconds)
+            except Exception:  # noqa: BLE001 - never break Hermes' check; its own words stand
+                logger.debug("conduit_push: couldn't read the helpers on hold", exc_info=True)
         return own(agent, msg, *args, **kwargs)
 
     functools.update_wrapper(emit, own)
