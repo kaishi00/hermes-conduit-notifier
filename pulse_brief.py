@@ -120,7 +120,7 @@ def context(home: Path, pulse_store: store.PulseStore, cards: list[dict], *, hom
         ref = candidates.reminder_ref if what == "reminder" else candidates.event_ref
         return {n for n, entry in enumerate(entries) if entry.get("id") and ref(entry) in refs}
 
-    phone = report.phone_context(home, now, leave_out=on_phone_cards)[0]
+    phone = report.phone_context(home, now, leave_out=on_phone_cards, zone=zone)[0]
     since = report.window_start(pulse_store, now)
     start = datetime.fromtimestamp(since, zone).strftime("%a %d %b %H:%M")
     logged = report.inbox_context(home, since, title=LOGGED_TITLE.format(start=start))

@@ -62,6 +62,7 @@ from datetime import datetime, time as clock, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Collection, Optional, Sequence
 
+from . import pulse_dates
 from . import pulse_delivery as delivery
 from . import pulse_followup as followup
 from . import pulse_hermes as hermes
@@ -370,12 +371,14 @@ def today_related(pulse_store: Any, home: Path, zone: tzinfo, now: float, *, lea
 
 def _event_when(event: dict, zone: tzinfo) -> str:
     """An event's start in ``zone`` ("13:00"), or "" when it can't be read."""
+    moved = pulse_dates.in_zone(event.get("start"), zone)
+    if moved is not None:
+        return moved.strftime("%H:%M")
     text = str(event.get("start") or "").strip()
     try:
-        start = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+        return datetime.fromisoformat(text).strftime("%H:%M")  # a floating time: the same clock everywhere
     except ValueError:
         return ""
-    return (start.astimezone(zone) if start.tzinfo else start).strftime("%H:%M")
 
 
 def _clip(text: Any, limit: int) -> str:

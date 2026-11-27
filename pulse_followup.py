@@ -531,7 +531,7 @@ def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzi
     except hermes.HermesUnreadable:
         later = ""
     # The phone's calendar and open reminders: already planned is covered.
-    phone, _ = report.phone_context(home, now)
+    phone, _ = report.phone_context(home, now, zone=zone)
     # What a watch waits for often shows up first as a notification or a message.
     logged = report.inbox_context(home, float(item["valid_from"]), budget=INBOX_BUDGET,
                                   title="## Logged on the phone since, by Shortcuts automations (other people's "
@@ -862,7 +862,7 @@ def held_material(pulse_store: store.PulseStore, home: Path, card: dict, *, zone
     except hermes.HermesUnreadable:
         later = ""
     if phone is None:
-        phone, _ = report.phone_context(home, now)
+        phone, _ = report.phone_context(home, now, zone=zone)
     parts += [section for section in (later, evidence.background(where, zone), report.cron_jobs(where), phone)
               if section]
     return "\n\n".join(parts)
@@ -1008,7 +1008,7 @@ def check_rested(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: t
     cards = [card for card in pulse_store.rested_cards(now) if rest_read(card)]
     marks = pulse_store.done_marks([card["id"] for card in cards]) if cards else {}
     cards = [card for card in cards if card["id"] not in marks]  # return_rested ends a done card's rest
-    phone = report.phone_context(home, now)[0] if cards else ""  # the same for every card
+    phone = report.phone_context(home, now, zone=zone)[0] if cards else ""  # the same for every card
     for card in cards:
         if not still_leader():
             break  # the process that leads now has its own loop
@@ -1074,7 +1074,7 @@ def check_held(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
              and now - checked.get(str(card["id"]), 0.0) >= HELD_EVERY_S]
     if not cards and not checked:
         return
-    phone = report.phone_context(home, now)[0] if cards else ""  # the same for every card
+    phone = report.phone_context(home, now, zone=zone)[0] if cards else ""  # the same for every card
     for card in cards:
         if not still_leader() or done.get("tokens", 0) >= budget or \
                 done.get("checks", 0) + done.get("failed", 0) >= MAX_CHECKS:
@@ -1183,7 +1183,7 @@ def check_found(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tz
     checked = _times(pulse_store.get(FOUND_CHECKED))
     if not cards and not checked:
         return
-    phone = report.phone_context(home, now)[0] if cards else ""  # the same for every card
+    phone = report.phone_context(home, now, zone=zone)[0] if cards else ""  # the same for every card
     for card in cards:
         if not still_leader() or done.get("tokens", 0) >= budget:
             break
