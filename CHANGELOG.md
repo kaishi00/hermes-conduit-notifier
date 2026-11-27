@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.205.2 (2026-11-27)
+
+### Fixes
+
+- Control from Hermes: a bot asked to do something on your computer used to look for Hermes' own computer tools, which act on the server, and say it couldn't. While your computer is on, every chat is now told it can control it and which tool to use.
+
 ## 0.205.1 (2026-11-27)
 
 ### Fixes
