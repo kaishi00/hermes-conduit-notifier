@@ -17,7 +17,7 @@ from typing import Any, Iterator
 from hermes_constants import get_hermes_home
 
 from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_done_tool, chat_mute, chat_on_screen, clarify_loop, client, compaction_skip, conduit_first, cron_bot_chat, cron_runs,
-               desktop_selected, forks, health_tool, inbox_tool, leaked_calls, link_ask_tool, link_asks, live_activity, live_steps,
+               desktop_selected, forks, health_tool, helper_holds, inbox_tool, leaked_calls, link_ask_tool, link_asks, live_activity, live_steps,
                location_tool, maps_tool, memory_scan, notify_tool, pc_control_tool, phone_tool, present_tool, profile_copies, pulse,
                quiet_turns, reply_sources, reply_speed, review_notices,
                room_asks, room_chats, room_cleanup, room_cutoff, room_free_busy, room_identity, room_invites,
@@ -134,6 +134,10 @@ def register(ctx: Any) -> None:
     # still goes on to the model, rather than ending on Hermes' status line
     # (compaction_skip).
     compaction_skip.install()
+    # A summary that runs into compaction's deadline no longer puts the
+    # chat's helper models on hold for ten minutes, and a helper on hold
+    # isn't called missing (helper_holds).
+    helper_holds.install()
     # A fork of a chat (the self-improvement review, /btw, Conduit's
     # predictions) shares the chat's session id: its turn is never the
     # chat's (forks).
@@ -979,6 +983,7 @@ def _unload() -> None:
     room_cleanup.uninstall()
     cron_bot_chat.uninstall()
     compaction_skip.uninstall()
+    helper_holds.uninstall()
     room_rules.forget()
     review_notices.uninstall()
     forks.uninstall()

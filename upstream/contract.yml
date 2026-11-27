@@ -378,6 +378,16 @@ notes:
     responses so neither becomes a card or a push. upstream/test_compaction_skip.py checks
     Hermes' own verdict (a known failure until Hermes counts the ask) and runs a hidden turn that
     has to compact first on the canary.
+  helper models on hold: >-
+    When a compaction summary runs into its host deadline, Hermes walks its fallbacks, each fails at
+    once ("timed out at the host compression deadline after 0s") and agent.auxiliary_client.
+    _quarantine_fallback_candidate holds each for ten minutes; with the chat's provider among them,
+    agent.conversation_compression's feasibility check then says "No auxiliary LLM provider
+    configured ... Run `hermes setup`" for ten minutes though one is. helper_holds wraps both,
+    reached by name through their modules: a fallback stopped by a spent deadline isn't held, and
+    _emit_feasibility_notice's no-provider warning names the helpers on hold instead (it reads
+    _aux_unhealthy_until and hermes_constants.hermes_home_key). upstream/test_helper_holds.py
+    checks Hermes' own hold (a known failure) and both guards on the real modules.
   memory provider discovery: >-
     Hermes lists memory providers (plugins.memory.discover_memory_providers) on every dashboard
     plugins hub build, and parses each top-level module of a plugin folder whose __init__.py
@@ -456,6 +466,12 @@ known_failures:
     upstream: NousResearch/hermes-agent#80622's guard counts no display_kind row as an ask
     since: v0.22.3
     workaround: compaction_skip.py lets a hidden turn's own ask through Hermes' check
+  - test: test_hermes_leaves_a_fallback_the_deadline_stopped_off_hold
+    signature: spent deadline held
+    issue: kaishi00/hermes-conduit-notifier (helper_holds, 2026-11-27)
+    upstream: agent/auxiliary_client.py _quarantine_fallback_candidate holds a fallback that failed at the host compression deadline for the long TTL ("request timed out" isn't a short hold in agent/auxiliary_health.py)
+    since: v0.23.3
+    workaround: helper_holds.py leaves such a fallback off hold and words the warning for helpers on hold
   - test: test_hermes_keeps_a_notes_type_through_a_compaction
     signature: folded note untyped
     issue: kaishi00/hermes-conduit (cron report drawn as the user's bubble, 2026-11-15)
@@ -577,7 +593,7 @@ imports:
     optional: ["_config_profile_scope"]
   hermes_constants:
     required: ["*", "get_hermes_home"]
-    optional: ["get_default_hermes_root", "reset_hermes_home_override", "set_hermes_home_override"]
+    optional: ["get_default_hermes_root", "hermes_home_key", "reset_hermes_home_override", "set_hermes_home_override"]
   hermes_time:
     optional: ["now"]
   hermes_yaml:
