@@ -7346,7 +7346,7 @@ ROOM_WORK_ACTIONS = {"start": "work_start", "list": "work_list", "read": "work_r
 # What a Linked Room's workstream never calls: what's in the room isn't the owner's to keep, and the work answers
 # only through the bot.
 LINKED_WORKER_NEVER = frozenset({
-    "memory", "skill_manage", "send_message", "message_agent", "react_to_message", "cronjob", "cronjob_manage",
+    "memory", "skill_manage", "send_message", "message_agent", "react_to_message", "conduit_react", "cronjob", "cronjob_manage",
     "conduit_call_user", "conduit_call_watch", "conduit_settings", "conduit_room",
     # A helper's chat isn't this work's, so the limits wouldn't follow it.
     "delegate_task",

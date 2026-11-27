@@ -59,7 +59,7 @@ MAX_AT = 4_102_444_800
 # calls other tools without it (execute_code's script) is never allowed either.
 NEVER = frozenset({
     "memory", "skill_manage", "delegate_task", "kanban_create", "execute_code",
-    "send_message", "message_agent", "react_to_message", "cronjob", "cronjob_manage",
+    "send_message", "message_agent", "react_to_message", "conduit_react", "cronjob", "cronjob_manage",
     "conduit_call_user", "conduit_call_watch", "conduit_settings", "conduit_room",
 })
 

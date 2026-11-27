@@ -2222,6 +2222,22 @@ any of the chat's sessions through its compressions, read-only.
   10 seconds, 429 past 240 reads a minute per profile. Every answer is
   `Cache-Control: no-store`.
 
+## Reactions (plugin 0.206+)
+
+A reaction the user puts on a message in Conduit (React on a reply, on the
+phone or the desktop) reaches the bot at the start of that chat's next turn,
+once: "Reactions the user added in Conduit since your last turn", with the
+emoji and a quote of the message. It works in every chat, Bot Chat and its
+workstreams included, on `hermes dashboard` and the gateway's session
+authority alike, without Hermes' desktop switch for reactions. A reaction
+doesn't start a turn by itself, and one taken back before the next turn is
+never announced.
+
+The bot reacts back with the `conduit_react` tool (an emoji, `messages_back`
+for an earlier message, an empty string to take it back), which Conduit shows
+on the message. Group rooms have neither: a reaction in a room isn't the
+owner's alone.
+
 ## Done chats (plugin 0.183+)
 
 Conduit's Sessions list dims a chat marked done and lists it under the Status
@@ -4781,7 +4797,7 @@ for rooms with none of their own:
   `tool_call` the hooks see as itself is checked by the tools it names.
   Memory and skill writes, delegation, messaging, scheduled jobs, running code
   and Conduit's calls and settings (`memory`, `skill_manage`, `delegate_task`,
-  `kanban_create`, `send_message`, `message_agent`, `react_to_message`,
+  `kanban_create`, `send_message`, `message_agent`, `react_to_message`, `conduit_react`,
   `cronjob`, `cronjob_manage`, `execute_code`, `conduit_call_user`,
   `conduit_call_watch`, `conduit_settings`) are never allowed, and that holds
   for the background memory and skill review too, since its calls carry the
