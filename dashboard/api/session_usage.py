@@ -301,12 +301,18 @@ def _read_reply_speeds(session_id: str) -> Dict[str, Any]:
     path = home / "state.db"
     if not path.exists():
         raise HTTPException(status_code=404, detail="Session not found")
-    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2.0)
     try:
-        conn.row_factory = sqlite3.Row
-        speeds = chat_reply_speeds(conn, home, session_id)
-    finally:
-        conn.close()
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2.0)
+        try:
+            conn.row_factory = sqlite3.Row
+            speeds = chat_reply_speeds(conn, home, session_id)
+        finally:
+            conn.close()
+    except sqlite3.OperationalError as exc:
+        # A Hermes whose sessions table predates the cost columns (_row and _chain read them).
+        if "no such column" in str(exc):
+            raise HTTPException(status_code=501, detail="Reply speed needs a newer Hermes on this host.")
+        raise
     if speeds is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return speeds

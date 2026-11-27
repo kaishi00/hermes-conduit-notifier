@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.204.1 (2026-11-27)
+
+### Fixes
+
+- Reply speed: an older Hermes is told it needs an update instead of failing, one reply no longer gets two speeds, and a long reply keeps its full count when the store trims old entries.
+
 ## 0.204.0 (2026-11-27)
 
 ### New and improved
