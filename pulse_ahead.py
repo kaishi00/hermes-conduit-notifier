@@ -310,7 +310,7 @@ def calendar_section(home: Path, zone: tzinfo, now: float, events: Optional[dict
                     if full:
                         continue  # past the budget: matched by its title only
                     key = f"v{len(events) + 1}" if events is not None and event.get("id") else ""
-                    line = _event_line(event, key)
+                    line = _event_line(event, key, zone)
                     if used + len(line) > CALENDAR_BUDGET:
                         more = full = True
                         continue
@@ -364,15 +364,23 @@ def _due_words(value: Any) -> str:
     return f"{day:%a} {day.day} {day:%b}"
 
 
-def _event_line(event: dict, key: str = "") -> str:
-    """"- v1 Sat 8 Nov, all day, to Sun 16 Nov: Kyoto (Work calendar)", in the phone's local time."""
+def _event_line(event: dict, key: str = "", zone: Optional[tzinfo] = None) -> str:
+    """"- v1 Sat 8 Nov, all day, to Sun 16 Nov: Kyoto (Work calendar)", in ``zone`` (the
+    phone's local time): an event made in another zone is told in this one and says so."""
     title = _clip(event.get("title"), 100) or "Untitled"
     start, end = _moment(event.get("start")), _moment(event.get("end"))
     key = f"{key} " if key else ""
     if start is None:
         return f"- {key}{title}"
     all_day = bool(event.get("all_day"))
+    made_in = ""
+    moved = None if all_day else pulse_dates.in_zone(event.get("start"), zone)  # an all-day entry is a date
+    if moved is not None:
+        start, end = moved, pulse_dates.in_zone(event.get("end"), zone) or end
+        made_in = pulse_dates.elsewhere(event.get("time_zone"), zone)
     when = f"{start:%a} {start.day} {start:%b}" + (", all day" if all_day else f" {start:%H:%M}")
+    if made_in:
+        when += f" (event set in {made_in})"
     if end is not None:
         # An all-day entry ends at midnight after its last day, or just before it.
         last = (end - timedelta(seconds=1)).date() if all_day else end.date()

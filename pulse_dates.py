@@ -345,3 +345,31 @@ def refs_round(found: Yearly | Deadline, today: date) -> list[str]:
 
 def local_today(zone: tzinfo, now: float) -> date:
     return datetime.fromtimestamp(now, zone).date()
+
+
+def in_zone(value: Any, zone: Optional[tzinfo]) -> Optional[datetime]:
+    """An ISO moment that carries an offset, as the same instant in ``zone``.
+
+    The phone keeps an event's start in the zone the event was made in (a
+    booking site's or an organizer's), not the phone's, so printing it as it
+    is reads hours off from what the calendar shows. None when there is no
+    zone, or the value is a date alone or a floating time with no offset:
+    those mean the same wall clock everywhere, so they are left as they are.
+    """
+    text = value.strip() if isinstance(value, str) else ""
+    if zone is None or "T" not in text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+    except ValueError:
+        return None
+    return moment.astimezone(zone) if moment.tzinfo is not None else None
+
+
+def elsewhere(event_zone: Any, zone: Optional[tzinfo]) -> str:
+    """The event's own zone name when it was made in a zone other than ``zone``
+    (so a converted time never leaves its reader guessing), else empty."""
+    name = event_zone.strip() if isinstance(event_zone, str) else ""
+    shown = getattr(zone, "key", None)
+    return name if name and shown and name != shown else ""
+

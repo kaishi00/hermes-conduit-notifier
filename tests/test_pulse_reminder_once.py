@@ -5,6 +5,7 @@ for one cipher-lock reminder moved back each morning)."""
 import sqlite3
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -12,6 +13,7 @@ from test_pulse import SID, report
 from test_pulse_candidates import gathered  # noqa: F401
 from test_pulse_followup import live  # noqa: F401
 from test_pulse_hours import phone_home
+from test_phone import _batch, _event
 from test_pulse_next import UTC, candidate, candidates
 
 REMINDERS = {"r1": {"id": "r_lock", "title": "Call the building manager about the 64D cipher lock"}}
@@ -44,6 +46,24 @@ def test_the_phone_context_names_each_entrys_calendar(live):
     synced = datetime(2026, 10, 14, 7, 0, tzinfo=UTC).timestamp()  # when phone_home's batch was synced
     text = report.phone_context(live.home, synced)[0]
     assert "Bank holiday (" in text and "; UK Holidays calendar)" in text
+
+
+def test_the_phone_context_tells_an_event_made_in_another_zone_in_the_phones_own(live):
+    # A booking made in Tokyo's zone for 17:00 is 09:00 on a London phone's calendar (hermes-conduit-notifier#1138).
+    events = _batch()["events"]
+    tour = _event("e_tour", title="Museum tour", calendar_id="c_personal", start="2026-10-14T17:00:00+09:00",
+                  end="2026-10-14T18:00:00+09:00", time_zone="Asia/Tokyo")
+    phone_home(live.home, events={**events, "upsert": events["upsert"] + [tour]})
+    synced = datetime(2026, 10, 14, 7, 0, tzinfo=UTC).timestamp()
+    text = report.phone_context(live.home, synced)[0]
+    assert "Museum tour (2026-10-14T09:00:00+01:00; event set in Asia/Tokyo; Personal calendar)" in text
+    assert "17:00" not in text
+    # The zone the report's own times use wins over the phone's.
+    text = report.phone_context(live.home, synced, zone=ZoneInfo("America/New_York"))[0]
+    assert "Museum tour (2026-10-14T04:00:00-04:00; event set in Asia/Tokyo; Personal calendar)" in text
+    # An event made in the phone's own zone, and an all-day one, read as they were.
+    assert "Standup (2026-10-14T09:30:00+01:00; Family calendar)" in report.phone_context(live.home, synced)[0]
+    assert "Bank holiday (2026-10-14T00:00:00+01:00, all day; UK Holidays calendar)" in report.phone_context(live.home, synced)[0]
 
 
 @pytest.mark.parametrize("key, ref", [("r1", "reminder:r_lock"), (" R1 ", "reminder:r_lock"), ("r2", None),

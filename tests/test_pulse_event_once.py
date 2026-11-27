@@ -7,6 +7,7 @@ of the one held for a card shop)."""
 import re
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -317,6 +318,24 @@ def test_the_look_ahead_keys_its_reminders_and_a_pick_names_one(live):
 def test_the_look_ahead_lists_entries_unkeyed_where_it_cant_key_them():
     assert ahead._event_line({"title": "Kyoto"}) == "- Kyoto"
     assert ahead._event_line({"title": "Kyoto"}, "v2") == "- v2 Kyoto"
+
+
+def test_the_look_ahead_tells_an_event_in_the_phones_zone_and_says_where_it_was_made():
+    # 17:00 in Tokyo is 09:00 on a Paris phone's calendar (hermes-conduit-notifier#1138).
+    tour = {"title": "Tour", "start": "2026-11-27T17:00:00+09:00", "end": "2026-11-27T18:00:00+09:00",
+            "time_zone": "Asia/Tokyo"}
+    paris = ZoneInfo("Europe/Paris")
+    assert ahead._event_line(tour, "v1", paris) == "- v1 Fri 27 Nov 09:00 (event set in Asia/Tokyo): Tour"
+    # Made in the phone's own zone: nothing to add. Without a zone: as it came.
+    local = {**tour, "start": "2026-11-27T09:00:00+01:00", "end": "2026-11-27T10:00:00+01:00", "time_zone": "Europe/Paris"}
+    assert ahead._event_line(local, "", paris) == "- Fri 27 Nov 09:00: Tour"
+    assert ahead._event_line(tour) == "- Fri 27 Nov 17:00: Tour"
+    # An early hour in Tokyo is the evening before in Paris.
+    late = {**tour, "start": "2026-11-27T01:30:00+09:00", "end": "2026-11-27T02:30:00+09:00"}
+    assert ahead._event_line(late, "", paris).startswith("- Thu 26 Nov 17:30")
+    # An all-day entry is a date, the same day wherever it is read.
+    holiday = {"title": "Holiday", "start": "2026-11-27", "end": "2026-11-28", "all_day": True}
+    assert ahead._event_line(holiday, "", paris) == "- Fri 27 Nov, all day: Holiday"
 
 
 # Remembered items ------------------------------------------------------------------
