@@ -347,3 +347,22 @@ def test_the_hooks_put_a_delegated_child_s_steps_under_its_parent(monkeypatch, t
     finally:
         plugin._subagent_stop(parent_session_id="s-1", child_session_id="child-1", child_status="completed")
     assert "agents" not in steps.read(tmp_path)["s-1"]
+
+
+def test_a_compaction_mid_turn_takes_the_turn_s_agents_along(tmp_path, monkeypatch):
+    monkeypatch.setattr(steps, "lineage", lambda session_id, running: "s-1" if session_id == "s-2" else False)
+    steps.started(tmp_path, "s-1", now=10.0)
+    steps.agent_started("s-1", "child-1", "goal", now=11.0)
+    steps.step("s-2", "tool", "agents", now=12.0)
+    # The agent's own step still finds its turn under the compacted id, and its stop removes it.
+    assert steps.agent_step("child-1", "tool", "web", now=13.0) is True
+    assert steps.read(tmp_path, agents=True)["s-2"]["agents"][0]["tool"] == "web"
+    steps.agent_ended("child-1")
+    assert "agents" not in steps.read(tmp_path)["s-2"]
+
+
+def test_a_turn_s_agents_read_oldest_first(tmp_path):
+    steps.started(tmp_path, "s-1", now=10.0)
+    steps.agent_started("s-1", "z-child", "first", now=11.0)
+    steps.agent_started("s-1", "a-child", "second", now=12.0)
+    assert [a["id"] for a in steps.read(tmp_path, agents=True)["s-1"]["agents"]] == ["z-child", "a-child"]

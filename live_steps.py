@@ -112,6 +112,10 @@ def _moved(session_id: str, recheck: bool = False) -> str | None:
             return None
         steps[session_id] = entry
         _home_of[session_id] = key
+        # Its delegate agents go with it: their steps and stops find the turn under its new id.
+        for child in entry.get("agents") or {}:
+            if _parent_of.get(child) == found:
+                _parent_of[child] = session_id
         return key
 
 
@@ -312,7 +316,7 @@ def _agents(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, dict):
         return []
     found = []
-    for child, agent in list(value.items())[:MAX_AGENTS]:
+    for child, agent in list(value.items()):
         if not isinstance(child, str) or not child or not isinstance(agent, dict):
             continue
         phase = agent.get("phase")
@@ -323,7 +327,9 @@ def _agents(value: Any) -> list[dict[str, Any]]:
         found.append({"id": child, "goal": goal if isinstance(goal, str) else "", "phase": phase,
                       "tool": tool if phase == "tool" and isinstance(tool, str) else None,
                       "since": _number(agent.get("since")), "started": _number(agent.get("started"))})
-    return found
+    # The file keeps them in id order (sort_keys): oldest first by when each started.
+    found.sort(key=lambda agent: agent["started"] if agent["started"] is not None else float("inf"))
+    return found[:MAX_AGENTS]
 
 
 def read(home: Any, *, now: float | None = None, agents: bool = False) -> dict[str, dict[str, Any]]:

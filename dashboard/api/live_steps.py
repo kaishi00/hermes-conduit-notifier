@@ -52,7 +52,8 @@ def live_steps_list() -> Dict[str, Any]:
 async def get_live_steps(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     """``steps``: the profile's running chats by session id, each with its ``phase`` (thinking, tool,
     approval or input), ``tool`` (the tool's category, as the Lock Screen names it, for a tool) and
-    ``since`` (when the step began, Unix seconds)."""
+    ``since`` (when the step began, Unix seconds), and ``agents``, how many delegate agents the
+    turn has running, when it has any."""
     response.headers["Cache-Control"] = "no-store"
     try:
         return {"ok": True, **(await core._run_scoped(profile, core._limited(_live_steps_limiter, profile, live_steps_list)))}
