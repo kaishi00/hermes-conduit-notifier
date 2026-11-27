@@ -144,3 +144,21 @@ def test_a_strict_bot_chat_can_still_react():
     work_tool_source = (ROOT / "work_tool.py").read_text()
     shows = work_tool_source[work_tool_source.index("SHOWS_OR_ASKS = "):].splitlines()[0]
     assert '"conduit_react"' in shows
+
+
+def test_an_older_hermes_without_the_display_fields_still_gets_the_tool():
+    registered = []
+
+    def register_tool(name, toolset, schema, handler):
+        registered.append(name)
+    reactions.register(types.SimpleNamespace(register_tool=register_tool), is_child=lambda s: False)
+    assert registered == ["conduit_react"]
+
+
+def test_every_chat_turn_gets_the_note_but_never_a_room_or_a_subagent():
+    source = (ROOT / "__init__.py").read_text()
+    hook = source[source.index("def _pre_llm_call("):]
+    hook = hook[:hook.index("\ndef ", 1)]
+    # After the room's own framing returns, among the owner's notes, and only for the chat itself.
+    assert hook.index("room_framing = _room_framing(") < hook.index("reactions.note(session_id)")
+    assert "None if child else reactions.note(session_id)" in hook

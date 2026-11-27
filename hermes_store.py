@@ -298,7 +298,10 @@ class _Store:
     def take_unseen_reactions(self, session_id: str, author: str = "user") -> list:
         """The author's reactions not announced yet, stamped seen as they're
         read, as dicts the way the old class gave them (reactions)."""
-        return [{"row_id": int(entry.row_id), "role": entry.role, "emoji": entry.emoji, "text": entry.text}
+        # Read field by field: they're stamped seen already, so one odd entry
+        # mustn't lose the others.
+        return [{"row_id": getattr(entry, "row_id", None), "role": getattr(entry, "role", ""),
+                 "emoji": getattr(entry, "emoji", ""), "text": getattr(entry, "text", "")}
                 for entry in self._handle.messages.take_unseen_reactions(session_id, author=author)]
 
     # -- state_meta ----------------------------------------------------------
