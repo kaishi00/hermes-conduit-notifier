@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.202.10 (2026-11-27)
+
+### Fixes
+
+- A bot could save the Bot Chat's work rules to its memory as if they held everywhere, then treat its other chats (an API chat, a DM) as a coordinator and hand their tasks off instead of doing them. The Bot Chat's tool refusal now says it applies only there, and a refused work tool in another chat says to do the task itself.
+
 ## 0.202.9 (2026-11-27)
 
 ### Fixes
