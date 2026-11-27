@@ -100,23 +100,30 @@ def _held(client: Any) -> tuple[list[str], float]:
         rest = parts[1:] if home is not None and len(parts) > 1 else parts
         if rest and rest[0] == "custom-endpoint" and len(rest) > 1:
             # Only the host: never a key in the URL's userinfo, path or query.
-            name = urlsplit(str(rest[1]) if "://" in str(rest[1]) else f"//{rest[1]}").hostname or ""
+            name = urlsplit(str(rest[1]) if "://" in str(rest[1]) else f"//{rest[1]}").hostname or "a custom endpoint"
         else:
             name = str(rest[0]) if rest else ""
-        if name and name not in names:
+        if not name:
+            continue
+        if name not in names:
             names.append(name)
         soonest = expires - now if not soonest else min(soonest, expires - now)
     return names, soonest
 
 
 def held_warning(names: list[str], seconds: float) -> str:
-    """The warning for a compaction that found its helpers on hold."""
+    """The warning for a compaction that found its helpers on hold; "" for none."""
+    if not names:
+        return ""
     minutes = max(1, round(seconds / 60))
+    unit = f"minute{'s' if minutes != 1 else ''}"
     who = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
-    back = (f"about {minutes} more minute{'s' if minutes != 1 else ''}" if len(names) == 1
-            else f"the first of them is back in about {minutes} minute{'s' if minutes != 1 else ''}")
-    return (f"⚠ Hermes' helper model for summarising long chats ({who}) didn't answer in time and is paused "
-            f"({back}), so until then older messages will be cut without a summary.")
+    if len(names) == 1:
+        return (f"⚠ Hermes' helper model for summarising long chats ({who}) didn't answer in time and is paused "
+                f"(about {minutes} more {unit}), so until then older messages will be cut without a summary.")
+    return (f"⚠ Hermes' helper models for summarising long chats ({who}) didn't answer in time and are paused "
+            f"(the first of them is back in about {minutes} {unit}), so until then older messages will be cut "
+            "without a summary.")
 
 
 def _notice_guard(client: Any, own: Callable[..., Any]) -> Callable[..., Any]:

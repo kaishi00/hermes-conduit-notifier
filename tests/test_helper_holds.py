@@ -84,9 +84,11 @@ def test_the_warning_names_helpers_on_hold(holds):
     until[("home", "custom-endpoint", "https://sk-secret@api.stepfun.ai/step_plan/v1?key=sk-other")] = time.time() + 500
     until[("other-profile", "nous")] = time.time() + 500
     until[("home", "openrouter")] = time.time() - 5
+    until[("home", "")] = time.time() + 60  # nothing to name: it doesn't set the time either
     holds.compression._emit_feasibility_notice(object(), HERMES_SAYS)
     said = holds.warned[-1]
     assert "(zai, api.stepfun.ai)" in said and "the first of them is back in about 5 minutes" in said
+    assert "helper models" in said and "are paused" in said
     assert "sk-" not in said and "nous" not in said and "openrouter" not in said and "hermes setup" not in said
 
 
@@ -105,6 +107,8 @@ def test_one_minute_is_singular():
     spec.loader.exec_module(module)
     assert "(about 1 more minute)" in module.held_warning(["zai"], 20)
     assert "(a, b, c and 2 more)" in module.held_warning(list("abcde"), 300)
+    assert module.held_warning([], 300) == ""
+    assert "(a custom endpoint)" in module.held_warning(["a custom endpoint"], 60)
 
 
 def test_a_hold_table_that_cant_be_read_leaves_hermes_words(holds):
