@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.203.1 (2026-11-27)
+
+### Fixes
+
+- Control from Hermes: an action waiting when you pressed Stop could still run on Windows if its file was busy at that moment, and an answer that came after the bot gave up stayed on the host. Neither happens now.
+
 ## 0.203.0 (2026-11-27)
 
 ### New and improved

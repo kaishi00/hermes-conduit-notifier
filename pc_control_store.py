@@ -155,8 +155,8 @@ class PcControlStore:
 
     def stop(self, computer: str) -> int:
         """The user stopped control on that computer: the grant goes, and
-        every action still waiting is answered as stopped. The number of
-        actions stopped."""
+        every action queued or under way is answered as stopped unless the
+        computer already answered it. The number of actions answered stopped."""
         computer = clean_id(computer, "computer")
         with self._json("grants.json") as grants:
             (grants.get("computers") or {}).pop(computer, None)
@@ -170,13 +170,17 @@ class PcControlStore:
             waiting = folder / f"{request['id']}.json"
             try:
                 os.replace(waiting, waiting.with_suffix(".claimed"))
-            except OSError:
+            except FileNotFoundError:
                 pass  # already claimed
+            except OSError:
+                # Can't move it (Windows holds a file another reader has open):
+                # claim() skips a request that has a result, so it still won't run.
+                pass
             # One the computer already answered keeps its answer: it ran.
             result = self._dir("results") / f"{request['id']}.json"
             if not result.exists():
                 self._write_file(result, {"ok": False, "code": "stopped"})
-            stopped += 1
+                stopped += 1
         return stopped
 
     # --- requests -------------------------------------------------------------
@@ -200,6 +204,8 @@ class PcControlStore:
         for request in self._requests(include_claimed=False):
             if request.get("computer") != computer:
                 continue
+            if (self._dir("results") / f"{request['id']}.json").exists():
+                continue  # answered already (stopped): never run it
             path = self._dir("requests") / f"{request['id']}.json"
             try:
                 os.replace(path, path.with_suffix(".claimed"))
@@ -225,7 +231,16 @@ class PcControlStore:
                 break
         if request is None or request.get("computer") != computer:
             return False
-        self._write_file(self._dir("results") / f"{request_id}.json", result)
+        path = self._dir("results") / f"{request_id}.json"
+        self._write_file(path, result)
+        # The tool may have given up and dropped the request meanwhile: then
+        # nothing would read or sweep this answer.
+        if not any((folder / f"{request_id}{suffix}").exists() for suffix in (".claimed", ".json")):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return False
         return True
 
     def take_result(self, request_id: str) -> dict[str, Any] | None:
