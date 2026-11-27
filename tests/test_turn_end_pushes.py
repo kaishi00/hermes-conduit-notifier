@@ -1201,21 +1201,41 @@ def test_a_mute_carried_through_compaction_in_the_chats_profile_holds_off_turn(h
     ambient["home"] = launch
     _subagent()
     assert pushed == [], "the lineage is in Yelan's state.db"
+    plugin.chat_mute.ChatMuteStore(yelan).set_mute(["old"], 0)
+    _subagent(child="c2")
+    assert _types(pushed) == ["background_task.finished"]
 
 
-def test_a_reply_sent_after_the_grace_is_sealed_under_the_chats_profile(homes, pushed, monkeypatch):
+def test_a_held_reply_sent_to_make_room_is_sealed_under_its_chats_profile(homes, pushed, monkeypatch):
+    # Another chat's turn, in another profile, sends the oldest held reply (notifier issue 1109).
     ambient, yelan, launch, seen = homes
-    later = []
-    monkeypatch.setattr(plugin, "_later", lambda delay, work: later.append(work))
+    monkeypatch.setattr(plugin, "MAX_TURN_STARTS", 1)
     ambient["home"] = yelan
     plugin._pre_llm_call(session_id="p", turn_id="t")
     plugin._post_llm_call(session_id="p", turn_id="t", assistant_response="Done.")
-    ambient["home"] = launch  # the plugin's timer thread
-    [work] = later
-    work()
+    ambient["home"] = launch
+    plugin._pre_llm_call(session_id="other", turn_id="t2")
+    plugin._post_llm_call(session_id="other", turn_id="t2", assistant_response="Also done.")
     [event] = pushed
-    assert event["type"] == "response.ready" and event["profile"] == "yelan"
-    assert seen == [yelan], "named Yelan, so sealed under Yelan's home"
+    assert event["session_id"] == "p" and event["profile"] == "yelan"
+    assert seen == [yelan], "sent from the launch profile's turn, sealed under Yelan's home"
+
+
+def test_an_unnamed_turn_ended_to_make_room_ends_in_its_chats_profile(homes, monkeypatch):
+    ambient, yelan, launch, _ = homes
+    ended = []
+    monkeypatch.setattr(plugin, "_unnamed_ends", {})
+    monkeypatch.setattr(plugin, "MAX_TURN_STARTS", 1)
+    monkeypatch.setattr(plugin, "_later", lambda delay, work: object())
+    monkeypatch.setattr(plugin.live_activity.reporter, "turn_ended",
+                        lambda session_id, outcome: ended.append((session_id, plugin.get_hermes_home())))
+    ambient["home"] = yelan
+    plugin._pre_llm_call(session_id="p")
+    plugin._post_llm_call(session_id="p", assistant_response="One.")
+    ambient["home"] = launch
+    plugin._pre_llm_call(session_id="other")
+    plugin._post_llm_call(session_id="other", assistant_response="Two.")
+    assert ("p", yelan) in ended and ("p", launch) not in ended
 
 
 def test_a_chat_with_no_turn_seen_keeps_the_ambient_home(homes, pushed):

@@ -197,7 +197,7 @@ def test_a_reply_held_for_its_turns_end_is_dropped_with_its_timer(unloaded_plugi
     monkeypatch.setattr(plugin, "_session_title", lambda session_id: "")
     monkeypatch.setattr(plugin, "_source_notifies", lambda *args: True)
     plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="Done.")
-    [(_ready, _send, timer)] = plugin._pending_ready.values()
+    [(_ready, _send, timer, _home)] = plugin._pending_ready.values()
 
     unloaded_plugin()
 
