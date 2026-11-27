@@ -2707,16 +2707,38 @@ def test_a_chats_summary_is_not_the_users_words(db, tmp_path):
     assert [r["chars"] for r in hermes.chat_activity(tmp_path, exclude_chat=SID, since=0, max_chars=5)] == [20]
     asked = hermes.user_row_before(tmp_path, chat_id="work", before_id=rows[2]["id"], max_chars=10)
     assert asked["content"] == "What does "
+    # Hermes' older standalone handoff too, and what the user wrote after a Pulse row reads their words.
+    db.message("user", "[CONTEXT SUMMARY]: Earlier they talked.", sid="work", at=DAY + 17)
+    db.message("user", "[CONTEXT SUMMARY]: Earlier.\n\n--- END OF CONTEXT SUMMARY — respond to the message below, not the "
+               "summary above ---\n\nWhat about j3?", sid="work", at=DAY + 18)
+    assert [r["content"] for r in hermes.chat_messages(tmp_path, chat_id="work", after_id=0, since=0, max_chars=40,
+                                                       limit=10)][-1:] == ["What about j3?"]
+    db.message("user", "pulse-tag-7 hidden ask", sid="work", at=DAY + 19, display_kind="hidden")
+    db.message("user", lcm, sid="work", at=DAY + 20)
+    db.message("user", "[PRIOR CONTEXT — for reference only; not a new message]\n5 stars\n\n[END OF PRIOR CONTEXT — "
+               "COMPACTION SUMMARY BELOW]\n\nEarlier they talked.", sid="work", at=DAY + 21)
+    assert hermes.user_text_after(tmp_path, session_id="work", tag="pulse-tag-7") == ["5 stars"]
+
+
+def test_pulses_merged_row_markers_are_hermes_own():
+    # upstream/test_cron_bot_chat.py holds artifacts_index's copies equal to Hermes' compressor.
+    index = _load("conduit_push.artifacts_index", ROOT / "artifacts_index.py")
+    assert hermes._MERGED_PRIOR_HEADER == index.MERGED_PRIOR_HEADER
+    assert hermes._MERGED_SUMMARY_DELIMITER == index.MERGED_SUMMARY_DELIMITER
+    assert hermes._SUMMARY_END_MARKER == index.SUMMARY_END_MARKER
+    assert hermes._SUMMARY_END in hermes._SUMMARY_END_MARKER
 
 
 def test_pulse_tells_a_summary_by_the_same_header_as_the_other_readers():
     # Pulse matches LCM-X's header in SQL; work_coord and artifacts_index by
-    # its regex. Both agree on every shape.
+    # its regex. Both agree on every header LCM-X writes.
     pattern = re.search(r'LCM_SUMMARY_HEADER = re\.compile\(r"(.*)"\)', (ROOT / "work_coord.py").read_text()).group(1)
     samples = ["[Recent Summary (d0, node 342)]\nx", "[Session Arc Summary (d1, node 22)]\nx",
                "[Durable Summary (d2, node 7)]\nx", "[Depth-12 Summary (d12, node 9001)]\nx",
                "[Session Arc Summary quoted]\nx", "[Recent Summary (dx, node 1)]\nx",
                "[Durable Summary (d2, notes)]\nx", "hello"]
+    # Pulse's SQL is looser at the edges (no digit required, no newline), reading less, never more:
+    # nothing LCM-X writes. Every real shape above agrees.
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE messages (role, content)")
     conn.executemany("INSERT INTO messages VALUES ('user', ?)", [(text,) for text in samples])
