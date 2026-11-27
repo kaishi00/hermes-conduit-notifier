@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.202.12 (2026-11-27)
+
+### Fixes
+
+- A subagent that compacted its conversation partway through kept showing its old step in Conduit until it finished, on hosts with a recent Hermes. Its step now keeps updating.
+
 ## 0.202.11 (2026-11-27)
 
 ### Fixes
