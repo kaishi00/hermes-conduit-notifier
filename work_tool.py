@@ -192,8 +192,13 @@ TELL_KIND = "tell"
 # A workstream's settled states that carry its last report.
 _REPORTED = ("ready", "done", "failed", "interrupted", "stopped")
 
+# Said plainly, since a bot may keep what a refusal says in its memory: a
+# chat that isn't the Bot Chat is no coordinator, and does its work itself
+# (Eric 2026-11-27: an API chat of Nahida's read an old "coordinator mode"
+# memory, met this refusal and handed the task to a subagent).
 NOT_BOT_CHAT = ("Work tools only work in this bot's Bot Chat, which coordinates its work. This conversation isn't "
-                "it, so nothing was started or changed.")
+                "it, so nothing was started or changed. It isn't a coordinator either: do the task here yourself "
+                "with your own tools.")
 IN_WORKSTREAM = ("Only the Bot Chat coordinating this work can start work or ask other bots, so nothing was sent. If "
                  "you need another bot's help, say in your report which bot and what you need, and end your turn: "
                  "your coordinator asks it for you, and the answer comes back here.")
@@ -214,8 +219,11 @@ SHOW_RULE = ("Draw cards yourself with conduit_show, never through a workstream:
 # Chat, not the workstream's (Eric 2026-11-08: W14's map never reached it).
 _SHOWN = "shown:"
 SHOWN_CARDS = 12
-POLICY_BLOCK = ("As this bot's coordinator you don't run {tool} yourself here. Start a workstream for it with "
-                "work_start, or send it to one that's already on it with work_send.")
+# Scoped to the Bot Chat and its setting, so a bot that keeps it in memory
+# doesn't hold its other chats to it.
+POLICY_BLOCK = ("As this bot's coordinator you don't run {tool} yourself in the Bot Chat, under the user's work "
+                "setting for it (Edit Bot > Work); the bot's other chats run their tools themselves. Start a "
+                "workstream for it with work_start, or send it to one that's already on it with work_send.")
 # The step after a quick turn's budget: the rest is longer work.
 STEP_BLOCK = ("This is turning into longer work than the Bot Chat should hold up, so {tool} didn't run. "
               "Start a workstream for the rest with work_start, saying in its instructions what you've "
