@@ -103,13 +103,13 @@ def _not_summary(alias: str = "") -> str:
     head = f"ltrim(substr({content}, 1, 80), ' ' || char(9, 10, 13))"
     lcm = " OR ".join(f"{head} GLOB '{glob}'" for glob in _SUMMARY_HEADS)
     hermes = " OR ".join(f"{head} GLOB '{glob}'" for glob in _HERMES_SUMMARY_HEADS)
-    return (f"NOT ({role} = 'user' AND ({lcm} OR (({hermes}) AND instr({content}, '{_SUMMARY_END}') = 0)))")
+    return (f"NOT ({role} IN ('user', 'assistant') AND ({lcm} OR (({hermes}) AND instr({content}, '{_SUMMARY_END}') = 0)))")
 
 
 # Hermes' compaction folds its summary into the first row it keeps when no
-# role alternates (agent/context_compressor.py, _merge_summary_into_tail_row):
-# the user's words between a header and a delimiter with the summary after,
-# or the summary, an end marker and the user's words (artifacts_index reads
+# role alternates (agent/context_compressor.py, _merge_summary_into_tail_row),
+# a user row or a reply: the row's words between a header and a delimiter
+# with the summary after, or the summary, an end marker and the row's words (artifacts_index reads
 # the same shapes, held equal by upstream/test_cron_bot_chat.py).
 _MERGED_PRIOR_HEADER = "[PRIOR CONTEXT \u2014 for reference only; not a new message]"
 _MERGED_SUMMARY_DELIMITER = "[END OF PRIOR CONTEXT \u2014 COMPACTION SUMMARY BELOW]"
@@ -117,15 +117,15 @@ _SUMMARY_END_MARKER = "--- END OF CONTEXT SUMMARY \u2014 respond to the message 
 
 
 def _shown(alias: str = "") -> str:
-    """SQL: the row's ``content`` (``alias``-qualified), a user row's without
-    the summary a compaction folded into it, so a cut from its head reads the
-    user's words."""
+    """SQL: the row's ``content`` (``alias``-qualified), a user row's or a
+    reply's without the summary a compaction folded into it, so a cut from
+    its head reads the row's own words."""
     content, role, blank = f"{alias}content", f"{alias}role", "' ' || char(9, 10, 13)"
     header, delimiter, end = len(_MERGED_PRIOR_HEADER), _MERGED_SUMMARY_DELIMITER, _SUMMARY_END_MARKER
-    return (f"(CASE WHEN {role} = 'user' AND substr({content}, 1, {header}) = '{_MERGED_PRIOR_HEADER}' "
+    return (f"(CASE WHEN {role} IN ('user', 'assistant') AND substr({content}, 1, {header}) = '{_MERGED_PRIOR_HEADER}' "
             f"AND instr({content}, '{delimiter}') > 0 "
             f"THEN trim(substr({content}, {header + 1}, instr({content}, '{delimiter}') - {header + 1}), {blank}) "
-            f"WHEN {role} = 'user' AND instr({content}, '{end}') > 0 "
+            f"WHEN {role} IN ('user', 'assistant') AND instr({content}, '{end}') > 0 "
             f"THEN ltrim(substr({content}, instr({content}, '{end}') + {len(end)}), {blank}) "
             f"ELSE {content} END)")
 

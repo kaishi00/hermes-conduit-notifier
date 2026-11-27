@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.205.1 (2026-11-27)
+
+### Fixes
+
+- Pulse and the files list: a chat's summary after a compaction that Hermes kept as a bot's reply no longer reads as the bot speaking, and the files it recalls no longer show as new.
+
 ## 0.205.0 (2026-11-27)
 
 ### New and improved
