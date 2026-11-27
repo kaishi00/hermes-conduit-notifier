@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.205.2 (2026-11-27)
+
+### Fixes
+
+- Long chats: when summarising a very long chat ran out of time, Hermes stopped using its helper models for ten minutes and warned that none was set up, so older messages were cut without a summary. One slow summary no longer pauses them, and a helper that is paused is named as paused, not missing.
+
 ## 0.205.1 (2026-11-27)
 
 ### Fixes
