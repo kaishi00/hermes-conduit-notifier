@@ -400,9 +400,17 @@ def resolve_file(name: str, session_ids: Optional[List[str]], profile: Optional[
         return {"path": None}
     try:
         exists = _host_file_check(profile)
-        return index.resolve_name(conn, ids, name, exists=exists, default_folder=_terminal_folder())
+        found = index.resolve_name(conn, ids, name, exists=exists, default_folder=_terminal_folder())
     finally:
         conn.close()
+    if found.get("path"):
+        # A folder opens on its entries (desktop issue 686). A profile whose
+        # files are on its SSH machine can't check: a name written with its
+        # trailing slash is a folder there.
+        is_folder = getattr(exists, "is_folder", None)
+        found["isDirectory"] = (bool(is_folder(os.path.expanduser(found["path"]))) if is_folder is not None
+                                else name.strip().endswith(("/", "\\")))
+    return found
 
 
 def _terminal_folder() -> Optional[str]:
@@ -429,7 +437,8 @@ def _terminal_folder() -> Optional[str]:
 def _host_file_check(profile: Optional[str]) -> Callable[[str], bool]:
     """Whether a path the chat named is one the Folder would open: not a
     secret file, inside a hosted install's folder, and (on this host, through
-    Hermes' own mapping of a Docker profile's paths) a file. A profile whose
+    Hermes' own mapping of a Docker profile's paths) a file or a folder
+    (desktop issue 686; ``is_folder`` tells which). A profile whose
     files are on its SSH machine checks only the first, and the folder's
     join, else the newest path, is taken."""
     # Without the plugin's own denylist, refuse as the Folder's routes do.
@@ -460,6 +469,9 @@ def _host_file_check(profile: Optional[str]) -> Callable[[str], bool]:
             unknown.checks_host = True  # type: ignore[attr-defined]
             return unknown
 
+    def host_path(path: str) -> str:
+        return str(_agent_fs_path(path, profile_home=home)) if _agent_fs_path is not None else path
+
     def exists(path: str) -> bool:
         try:
             if sensitive_default is not None and sensitive_default(path):
@@ -468,14 +480,23 @@ def _host_file_check(profile: Optional[str]) -> Callable[[str], bool]:
                 return False
             if remote:
                 return True
-            target = str(_agent_fs_path(path, profile_home=home)) if _agent_fs_path is not None else path
+            target = host_path(path)
             if boundary is not None:
                 real = os.path.realpath(target)
                 if real != boundary and not real.startswith(boundary.rstrip(os.sep) + os.sep):
                     return False
-            return os.path.isfile(target)
+            return os.path.isfile(target) or os.path.isdir(target)
         except Exception:
             return False
+
+    if not remote:
+        def is_folder(path: str) -> bool:
+            try:
+                return os.path.isdir(host_path(path))
+            except Exception:
+                return False
+
+        exists.is_folder = is_folder  # type: ignore[attr-defined]
 
     # An SSH profile's answer isn't a check of the file, so quoted prose
     # ending in a name can't be told from a quoted path there.

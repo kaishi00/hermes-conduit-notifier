@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.205.5 (2026-11-27)
+
+### Fixes
+
+- A folder a reply names (`.agents/skills/my-skill/`) used to say it wasn't on the server when tapped, even though it was there. Conduit now finds folders as it finds files, in the chat's folder or where the chat's own tools wrote inside it.
+
 ## 0.205.4 (2026-11-27)
 
 ### Fixes

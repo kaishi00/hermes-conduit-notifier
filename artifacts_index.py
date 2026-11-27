@@ -689,6 +689,13 @@ def _path_candidate(path: str, suffix: str, *, strip: str) -> Optional[str]:
         return None
     if path.endswith("/" + suffix) and len(path) <= MAX_PATH_CHARS:
         return path
+    # A folder, named with its trailing slash or by a path inside it
+    # (/proj/.agents/skills/x/SKILL.md for .agents/skills/x, desktop issue
+    # 686): the path up to the name, its outermost match. The host's check
+    # tells a folder from a file that only shares the name.
+    cut = path.find("/" + suffix + "/")
+    if cut >= 0 and cut + 1 + len(suffix) <= MAX_PATH_CHARS:
+        return path[:cut + 1 + len(suffix)]
     return None
 
 
@@ -784,14 +791,15 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
                  exists: Optional[Callable[[str], bool]] = None,
                  default_folder: Optional[str] = None,
                  max_rows: int = RESOLVE_MAX_ROWS) -> dict:
-    """Where the file a chat's reply names as ``name`` (a bare name or a
-    relative path) is: joined to the chat's working folder, then to its git
+    """Where the file or folder a chat's reply names as ``name`` (a bare
+    name or a relative path) is: joined to the chat's working folder, then to its git
     repository's top (a project chat often works in a subfolder while its
     replies name files from the top, hermes-conduit#1809), then, for a chat
     with no folder recorded, to ``default_folder`` (the profile's configured
     terminal folder, which Hermes' file tools resolve such a chat's relative
-    paths against); else the newest absolute path ending in it that the
-    chat's own messages (tool calls, tool results, replies) carry. Hidden sessions in the lineage (a room
+    paths against); else the newest absolute path ending in it (or, for a
+    folder, holding it: desktop issue 686) that the chat's own messages
+    (tool calls, tool results, replies) carry. Hidden sessions in the lineage (a room
     the chat was branched from) are left out, as the Artifacts list leaves
     them out, except the ids asked for and the Bot Chat's. ``exists`` checks
     a candidate on the host (and refuses one it won't show); without it (a
