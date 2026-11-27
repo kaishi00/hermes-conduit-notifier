@@ -316,3 +316,144 @@ def test_stop_and_turning_off(client):
 def test_a_bad_computer_id_is_a_400(client):
     response = client.get(f"{BASE}/pc/next", params={"computer": "../x", "wait": 0})
     assert response.status_code == 400
+
+
+# --- The ask on the phone (stage 2) -------------------------------------------------
+
+present_mod = _load("conduit_push.present_store", ROOT / "present_store.py")
+PHONE = "phone-install-1"
+
+
+def _phone(present, features=("pc-asks",), results=()):
+    return present.exchange({"installation_id": PHONE, "features": list(features), "results": list(results)})
+
+
+def test_the_ask_goes_to_a_phone_that_shows_them_and_its_allow_lets_the_chat_in(store, tmp_path):
+    present = present_mod.PresentStore(tmp_path)
+    _phone(present)
+    store.note_computer(PC, "Asuka", "windows")
+    pushed = []
+
+    def desktop_answer(request):
+        # The computer follows the phone's copy: the phone answers first.
+        prompt = _phone(present)["prompts"][0]
+        assert prompt["pc"] == {"computer": PC, "name": "Asuka", "bot": ""}
+        assert prompt["title"] == "Allow Hermes to control Asuka?" and "Tidy my downloads" in prompt["preview"]
+        assert "session_id" not in prompt or not prompt["session_id"]
+        _phone(present, results=[{"id": prompt["id"], "outcome": "confirmed"}])
+        assert present.pc_ask(request["ask"])["status"] == "confirmed"
+        # Its own dialog's late answer can't overturn it.
+        assert present.settle_pc(request["ask"], False, computer=PC) == "confirmed"
+        return {"ok": True, "grant": "allowed"}
+
+    result, desktop = run_tool(store, {"action": "capture"}, answer=desktop_answer, present=present,
+                               push=pushed.append)
+    assert json.loads(result)["ok"] is True
+    assert desktop.seen[0]["ask"] and pushed[0]["type"] == "phone.changes" and pushed[0]["mode"] == "alert"
+    assert store.grant(PC)["state"] == "allowed"
+    # Nothing waits on the phone afterwards, and the chat's next action doesn't ask.
+    assert _phone(present)["prompts"] == []
+    _, desktop = run_tool(store, {"action": "capture"}, answer=lambda r: {"ok": True}, present=present,
+                          push=pushed.append)
+    assert "ask" not in desktop.seen[0] and len(pushed) == 1
+
+
+def test_a_phone_without_the_feature_gets_no_ask_and_the_computer_still_asks(store, tmp_path):
+    present = present_mod.PresentStore(tmp_path)
+    _phone(present, features=())
+    store.note_computer(PC, "Asuka", "windows")
+    pushed = []
+    _, desktop = run_tool(store, {"action": "capture"}, answer=lambda r: {"ok": True, "grant": "allowed"},
+                          present=present, push=pushed.append)
+    assert desktop.seen[0]["needs_ok"] is True and "ask" not in desktop.seen[0] and pushed == []
+
+
+def test_an_ask_nobody_answered_leaves_the_phone_when_the_tool_gives_up(store, tmp_path, monkeypatch):
+    present = present_mod.PresentStore(tmp_path)
+    _phone(present)
+    store.note_computer(PC, "Asuka", "windows")
+    monkeypatch.setattr(tool, "ASK_WAIT_S", 0.05)
+    result, _ = run_tool(store, {"action": "capture"}, present=present, push=lambda e: None)
+    assert json.loads(result)["error"] == "no_answer"
+    assert _phone(present)["prompts"] == []
+
+
+def test_a_phone_edit_or_decline_is_a_no_and_never_an_outcome_for_chats(tmp_path):
+    present = present_mod.PresentStore(tmp_path)
+    _phone(present)
+    prompt = present.ask_pc("Allow?", "Chat: A", pc={"computer": PC, "request": "request-0001", "name": "Asuka"})
+    _phone(present, results=[{"id": prompt["id"], "outcome": "edit", "edit_text": "no"}])
+    assert present.pc_ask(prompt["id"])["status"] == "declined"
+    assert present.status() == [] and present.unreported_outcomes() == []
+    # Another computer can't settle it.
+    other = present.ask_pc("Allow?", "Chat: A", pc={"computer": PC, "request": "request-0002", "name": "Asuka"})
+    assert present.settle_pc(other["id"], True, computer="someone-else-1") == "gone"
+    assert present.settle_pc(other["id"], True, computer=PC) == "confirmed"
+
+
+def test_ask_routes_follow_and_settle_the_phones_copy(client, tmp_path):
+    present = present_mod.PresentStore(tmp_path)
+    _phone(present)
+    prompt = present.ask_pc("Allow?", "Chat: A", pc={"computer": PC, "request": "request-0001", "name": "Asuka"})
+    ask = lambda computer=PC: client.get(f"{BASE}/pc/ask", params={"computer": computer, "id": prompt["id"]}).json()
+    assert ask()["status"] == "waiting"
+    assert ask("someone-else-1")["status"] == "gone"
+    settled = client.post(f"{BASE}/pc/ask", json={"computer": PC, "id": prompt["id"], "answer": "denied"}).json()
+    assert settled["status"] == "denied" and ask()["status"] == "denied"
+    # The first answer stands.
+    again = client.post(f"{BASE}/pc/ask", json={"computer": PC, "id": prompt["id"], "answer": "allowed"}).json()
+    assert again["status"] == "denied"
+    assert client.post(f"{BASE}/pc/ask", json={"computer": PC, "id": prompt["id"], "answer": "maybe"}).status_code == 400
+
+
+def test_state_says_who_is_controlling_and_stop_from_the_phone_reaches_the_computer(client):
+    client.store.note_computer(PC, "Asuka", "windows")
+    assert client.get(f"{BASE}/pc/state").json()["controlling"] == []
+    client.store.record_grant(PC, SESSION, "allowed", "Tidy my downloads")
+    controlling = client.get(f"{BASE}/pc/state").json()["controlling"]
+    assert [(item["computer"], item["name"], item["session"], item["chat"]) for item in controlling] == [
+        (PC, "Asuka", SESSION, "Tidy my downloads")]
+    assert client.get(f"{BASE}/pc/next", params={"computer": PC, "wait": 0}).json()["stopped"] is False
+    started = time.monotonic()
+    threading.Timer(0.3, lambda: client.post(f"{BASE}/pc/stop", json={"computer": PC})).start()
+    polled = client.get(f"{BASE}/pc/next", params={"computer": PC, "wait": 10}).json()
+    # The open poll comes back once Stop is pressed elsewhere, so the computer's bar goes.
+    assert polled["stopped"] is True and time.monotonic() - started < 3
+    assert client.get(f"{BASE}/pc/state").json()["controlling"] == []
+
+
+def test_a_chat_that_stopped_acting_isnt_controlling(tmp_path):
+    now = [1000.0]
+    store = store_mod.PcControlStore(tmp_path, clock=lambda: now[0])
+    store.note_computer(PC, "Asuka", "windows")
+    store.record_grant(PC, SESSION, "allowed", "A")
+    assert len(store.controlling()) == 1
+    now[0] += store_mod.CONTROLLING_S + 1
+    assert store.controlling() == []
+
+
+def test_stop_while_the_first_action_ran_lets_nobody_back_in(store):
+    store.note_computer(PC, "Asuka", "windows")
+
+    def answer(request):
+        store.stop(PC)  # pressed on the phone while the action ran
+        return {"ok": True, "grant": "allowed"}
+
+    run_tool(store, {"action": "capture"}, answer=answer)
+    assert store.grant(PC) is None
+
+
+def test_a_long_name_still_reaches_the_phone_and_a_finished_ask_never_breaks_loads(store, tmp_path):
+    present = present_mod.PresentStore(tmp_path)
+    _phone(present)
+    store.note_computer(PC, "A" * 64, "windows")
+    _, desktop = run_tool(store, {"action": "capture"}, answer=lambda r: {"ok": True, "grant": "allowed"},
+                          present=present, push=lambda e: None)
+    assert desktop.seen[0].get("ask")
+    # A finished computer's ask left unreported (a hand-edited file) loads fine.
+    path = tmp_path / present_mod.FILE_NAME
+    state = json.loads(path.read_text())
+    for prompt in state["prompts"]:
+        prompt["reported"] = False
+    path.write_text(json.dumps(state))
+    assert _phone(present)["prompts"] == []
