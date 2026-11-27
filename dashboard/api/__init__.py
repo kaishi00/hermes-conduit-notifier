@@ -54,6 +54,7 @@ MODULES = (
     "workstreams",
     "waiting",
     "live_steps",
+    "live_work",
     "boards",
     "capabilities",
     "self_update",

@@ -273,3 +273,77 @@ def test_a_home_that_cant_be_resolved_doesnt_cost_the_turn_its_context(monkeypat
     monkeypatch.setattr(plugin, "enqueue", lambda event: True)
     monkeypatch.setattr(plugin.calls, "outcome_note", lambda session_id: None)
     plugin._pre_llm_call(session_id="s-3", turn_id="t-3", conversation_history=[])
+
+
+def test_a_turn_s_delegate_agents_ride_its_step_with_their_own(tmp_path):
+    steps.started(tmp_path, "s-1", now=10.0)
+    steps.step("s-1", "tool", "agents", now=11.0)
+    steps.agent_started("s-1", "child-1", "Generate the office still\nwith full QA", now=12.0)
+    # The bots lists read only how many.
+    assert steps.read(tmp_path)["s-1"]["agents"] == 1
+    steps.step("child-1", "tool", "terminal", now=13.0)
+    # A child's step is its own, never its parent's.
+    assert steps.read(tmp_path)["s-1"]["tool"] == "agents"
+    assert steps.read(tmp_path, agents=True)["s-1"]["agents"] == [
+        {"id": "child-1", "goal": "Generate the office still", "phase": "tool", "tool": "terminal",
+         "since": 13.0, "started": 12.0}]
+    steps.agent_step("child-1", "thinking", now=14.0)
+    assert steps.read(tmp_path, agents=True)["s-1"]["agents"][0]["phase"] == "thinking"
+    steps.agent_ended("child-1")
+    assert "agents" not in steps.read(tmp_path)["s-1"]
+    # A step after it stopped is no one's.
+    steps.step("child-1", "tool", "web", now=15.0)
+    assert steps.read(tmp_path) == {"s-1": {"phase": "tool", "tool": "agents", "since": 11.0}}
+
+
+def test_an_agent_of_a_session_with_no_running_turn_is_left_out(tmp_path):
+    # A background agent that outlives its turn is the chat's roster's, not a step's.
+    steps.agent_started("s-gone", "child-1", "goal", now=1.0)
+    assert steps.agent_step("child-1", "tool", "web") is False
+    assert steps.read(tmp_path) == {}
+
+
+def test_a_turn_s_end_takes_its_agents_with_it(tmp_path):
+    steps.started(tmp_path, "s-1", now=10.0)
+    steps.agent_started("s-1", "child-1", "goal", now=11.0)
+    steps.ended("s-1")
+    assert steps.agent_step("child-1", "tool", "web") is False
+    steps.started(tmp_path, "s-1", now=20.0)
+    assert "agents" not in steps.read(tmp_path)["s-1"]
+
+
+def test_no_more_agents_than_the_cap_per_turn(tmp_path):
+    steps.started(tmp_path, "s-1", now=10.0)
+    for n in range(steps.MAX_AGENTS + 2):
+        steps.agent_started("s-1", f"child-{n}", f"goal {n}", now=11.0 + n)
+    agents = steps.read(tmp_path, agents=True)["s-1"]["agents"]
+    assert [agent["id"] for agent in agents] == [f"child-{n}" for n in range(2, steps.MAX_AGENTS + 2)]
+    assert steps.agent_step("child-0", "tool", "web") is False
+
+
+def test_a_long_goal_is_cut_to_its_first_line_and_the_cap(tmp_path):
+    steps.started(tmp_path, "s-1", now=10.0)
+    steps.agent_started("s-1", "child-1", "  \n" + "x" * 500, now=11.0)
+    goal = steps.read(tmp_path, agents=True)["s-1"]["agents"][0]["goal"]
+    assert len(goal) == steps.GOAL_MAX and goal.endswith("…")
+
+
+def test_the_hooks_put_a_delegated_child_s_steps_under_its_parent(monkeypatch, tmp_path):
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(plugin, "enqueue", lambda event: True)
+    monkeypatch.setattr(plugin.calls, "outcome_note", lambda session_id: None)
+    plugin._pre_llm_call(session_id="s-1", turn_id="t-1", conversation_history=[])
+    plugin._pre_tool_call(session_id="s-1", tool_name="delegate_task")
+    plugin._subagent_start(parent_session_id="s-1", child_session_id="child-1", child_subagent_id="sa-1",
+                           child_goal="Make the picture")
+    try:
+        plugin._pre_api_request(session_id="child-1")
+        assert steps.read(tmp_path, agents=True)["s-1"]["agents"][0]["phase"] == "thinking"
+        plugin._pre_tool_call(session_id="child-1", tool_name="terminal")
+        read = steps.read(tmp_path, agents=True)["s-1"]
+        assert read["tool"] == "agents"
+        assert read["agents"][0]["goal"] == "Make the picture"
+        assert read["agents"][0]["tool"] == "terminal"
+    finally:
+        plugin._subagent_stop(parent_session_id="s-1", child_session_id="child-1", child_status="completed")
+    assert "agents" not in steps.read(tmp_path)["s-1"]

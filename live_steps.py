@@ -16,6 +16,14 @@ step only for a chat the live registry also says is working, so a file left
 behind by a gateway that stopped mid-turn shows nothing; a reader drops a
 file older than STALE_S too.
 
+A turn's delegate agents ride its step (``agents``): each one ``delegate_task``
+started while the turn runs, with its goal and its own step, from the hooks
+of the child's own calls, until it stops. A turn that waits on them shows
+nothing else, and Hermes streams their progress only to the client that
+started the turn, so this is how a chat opened elsewhere (an API chat's turn,
+another app's) sees them working (Eric, 2026-11-27). The bots lists
+read only their count; a chat's own read (GET /sessions/live-work) reads them.
+
 Standalone (no imports from the plugin package): the dashboard loads it from
 its file, the plugin imports it.
 """
@@ -37,6 +45,10 @@ STALE_S = 12 * 60 * 60.0
 # At most this many running chats per home; the oldest step goes first.
 MAX_SESSIONS = 64
 PHASES = ("thinking", "tool", "approval", "input")
+# At most this many delegate agents per turn; the oldest goes first.
+MAX_AGENTS = 8
+# A delegate agent's goal, as the user reads it in their chat: its first line, this long at most.
+GOAL_MAX = 200
 
 _lock = threading.Lock()
 # home -> session id -> {"phase", "tool", "since"}; session id -> home.
@@ -44,6 +56,8 @@ _steps: dict[str, dict[str, dict[str, Any]]] = {}
 _home_of: dict[str, str] = {}
 # What each home's file says now, so an unchanged step writes nothing.
 _written: dict[str, str] = {}
+# A running turn's delegate agent (its child session id) -> the turn's session id.
+_parent_of: dict[str, str] = {}
 
 # Which noted turn a session id continues through compactions: the noted id,
 # False when none, None when it can't tell yet (live_activity.compacted_from,
@@ -112,11 +126,11 @@ def started(home: Any, session_id: str, *, now: float | None = None) -> None:
             _steps.get(old, {}).pop(session_id, None)
         _home_of[session_id] = key
         steps = _steps.setdefault(key, {})
-        steps.pop(session_id, None)
+        _drop_agents(steps.pop(session_id, None))
         steps[session_id] = {"phase": "thinking", "tool": None, "since": time.time() if now is None else now}
         while len(steps) > MAX_SESSIONS:
             oldest = next(iter(steps))
-            steps.pop(oldest)
+            _drop_agents(steps.pop(oldest))
             _home_of.pop(oldest, None)
         homes = {key} | ({old} if old is not None and old != key else set())
     for name in homes:
@@ -125,8 +139,11 @@ def started(home: Any, session_id: str, *, now: float | None = None) -> None:
 
 def step(session_id: str, phase: str, tool: str | None = None, *, now: float | None = None) -> None:
     """A running turn moved on: thinking, a tool (by category), or waiting on an approval or an answer.
-    A session with no turn noted here (a fork, a delegated child) is left out."""
+    A delegate agent's step goes to its turn's ``agents``; any other session with no turn noted here
+    (a fork) is left out."""
     if not session_id or phase not in PHASES:
+        return
+    if agent_step(session_id, phase, tool, now=now):
         return
     moved = _moved(session_id)
     with _lock:
@@ -151,8 +168,83 @@ def ended(session_id: str) -> None:
     _moved(session_id, recheck=True)
     with _lock:
         key = _home_of.pop(session_id, None)
-        if key is None or _steps.get(key, {}).pop(session_id, None) is None:
+        entry = _steps.get(key or "", {}).pop(session_id, None)
+        if key is None or entry is None:
             return
+        _drop_agents(entry)
+    _publish(key)
+
+
+def _drop_agents(entry: dict[str, Any] | None) -> None:
+    """Forgets the parent links of a turn's delegate agents; the caller holds the lock."""
+    for child in (entry or {}).get("agents", {}):
+        _parent_of.pop(child, None)
+
+
+def _goal(value: Any) -> str:
+    lines = [line.strip() for line in str(value or "").splitlines() if line.strip()]
+    text = lines[0] if lines else ""
+    return text if len(text) <= GOAL_MAX else text[:GOAL_MAX - 1].rstrip() + "…"
+
+
+def agent_started(parent_session_id: str, child_session_id: str, goal: Any = None, *,
+                  now: float | None = None) -> None:
+    """``delegate_task`` started a delegate agent for the running turn of ``parent_session_id``.
+    One started for a session with no turn noted here (a background agent outliving its turn,
+    a nested one) is left out: the chat's own roster shows those."""
+    if not parent_session_id or not child_session_id:
+        return
+    _moved(parent_session_id)  # a turn a compaction moved to this id
+    with _lock:
+        key = _home_of.get(parent_session_id)
+        entry = _steps.get(key or "", {}).get(parent_session_id)
+        if entry is None:
+            return
+        at = time.time() if now is None else now
+        agents = entry.setdefault("agents", {})
+        agents.pop(child_session_id, None)
+        agents[child_session_id] = {"goal": _goal(goal), "phase": "thinking", "tool": None,
+                                    "since": at, "started": at}
+        _parent_of[child_session_id] = parent_session_id
+        while len(agents) > MAX_AGENTS:
+            oldest = next(iter(agents))
+            agents.pop(oldest)
+            _parent_of.pop(oldest, None)
+    _publish(key)
+
+
+def agent_step(child_session_id: str, phase: str, tool: str | None = None, *, now: float | None = None) -> bool:
+    """A running turn's delegate agent moved on; False when ``child_session_id`` is none of them."""
+    with _lock:
+        parent = _parent_of.get(child_session_id)
+        if parent is None:
+            return False
+        key = _home_of.get(parent)
+        agent = _steps.get(key or "", {}).get(parent, {}).get("agents", {}).get(child_session_id)
+        if agent is None:
+            _parent_of.pop(child_session_id, None)
+            return False
+        tool = tool if phase == "tool" else None
+        if agent["phase"] == phase and agent["tool"] == tool:
+            return True
+        agent.update(phase=phase, tool=tool, since=time.time() if now is None else now)
+    _publish(key)
+    return True
+
+
+def agent_ended(child_session_id: str) -> None:
+    """A delegate agent stopped, however it ended: it leaves its turn's step."""
+    if not child_session_id:
+        return
+    with _lock:
+        parent = _parent_of.pop(child_session_id, None)
+        key = _home_of.get(parent or "")
+        entry = _steps.get(key or "", {}).get(parent or "")
+        agents = (entry or {}).get("agents", {})
+        if agents.pop(child_session_id, None) is None:
+            return
+        if not agents:
+            entry.pop("agents", None)
     _publish(key)
 
 
@@ -164,6 +256,7 @@ def forget() -> None:
         _written.clear()
         _not_moved.clear()
         _unsettled.clear()
+        _parent_of.clear()
 
 
 def _publish(key: str | None) -> None:
@@ -213,9 +306,31 @@ def _number(value: Any) -> float | None:
         return None
 
 
-def read(home: Any, *, now: float | None = None) -> dict[str, dict[str, Any]]:
+def _agents(value: Any) -> list[dict[str, Any]]:
+    """A step's delegate agents, oldest first: ``id`` (the child's session), ``goal``, ``phase``,
+    ``tool``, ``since`` (when its step began) and ``started``."""
+    if not isinstance(value, dict):
+        return []
+    found = []
+    for child, agent in list(value.items())[:MAX_AGENTS]:
+        if not isinstance(child, str) or not child or not isinstance(agent, dict):
+            continue
+        phase = agent.get("phase")
+        if phase not in PHASES:
+            continue
+        tool = agent.get("tool")
+        goal = agent.get("goal")
+        found.append({"id": child, "goal": goal if isinstance(goal, str) else "", "phase": phase,
+                      "tool": tool if phase == "tool" and isinstance(tool, str) else None,
+                      "since": _number(agent.get("since")), "started": _number(agent.get("started"))})
+    return found
+
+
+def read(home: Any, *, now: float | None = None, agents: bool = False) -> dict[str, dict[str, Any]]:
     """The running chats' steps in ``home`` by session id: ``phase``, ``tool`` (a category, for a
-    tool) and ``since`` (when the step began). Anything unreadable, or a stale file, is none."""
+    tool) and ``since`` (when the step began), and ``agents`` when the turn has delegate agents
+    running: how many, or with ``agents=True`` each one (``_agents``). Anything unreadable, or a
+    stale file, is none."""
     try:
         raw = json.loads((Path(home) / FILE_NAME).read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
@@ -236,4 +351,7 @@ def read(home: Any, *, now: float | None = None) -> dict[str, dict[str, Any]]:
         tool = entry.get("tool")
         answer[session_id] = {"phase": phase, "tool": tool if phase == "tool" and isinstance(tool, str) else None,
                               "since": _number(entry.get("since"))}
+        running = _agents(entry.get("agents"))
+        if running:
+            answer[session_id]["agents"] = running if agents else len(running)
     return answer

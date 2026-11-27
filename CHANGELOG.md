@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.202.11 (2026-11-27)
+
+### Fixes
+
+- A message you sent into a chat while a turn ran in the gateway (an API chat's, or another app's) waited in Hermes' queue, but Conduit couldn't show it there after you left the chat, so it looked like it never went through. Conduit now reads the queue and shows the message waiting, on the phone and on desktop.
+
+### New and improved
+
+- A turn running in the gateway now shows what it's doing in a chat opened from Conduit, and its subagents' own steps, so a chat waiting on a subagent no longer looks finished.
+
 ## 0.202.10 (2026-11-27)
 
 ### Fixes
