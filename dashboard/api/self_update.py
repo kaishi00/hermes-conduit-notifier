@@ -328,6 +328,10 @@ SELF_UPDATE_PULL_STALLED = (f"Hermes' download of the plugin hasn't finished aft
                             f"{int(SELF_UPDATE_PULL_STALL_S // 60)} minutes. Run hermes plugins update "
                             f"{core.PLUGIN_NAME} on the host to see why.")
 _FRESH_PULL_MARK = "conduit-self-update-result:"
+# Pointing the profiles at the new copy after the pull. It only reads and links files, so past
+# this the update goes on without it: a profile also points itself when its plugin loads, and a
+# hold here kept the update slot until the dashboard restarted (issue 1103).
+SELF_UPDATE_POINT_PROFILES_S = 120.0
 # A scan refusal's findings a job keeps for Conduit to show: the worst few, not hundreds.
 SCAN_FINDINGS_KEPT = 5
 SCAN_FORCE_UNSUPPORTED = ("This Hermes can't accept its install scan's verdict from Conduit. Run "
@@ -963,6 +967,27 @@ def _self_update_failed(job: Dict[str, Any], detail: str, code: Optional[str] = 
         job["code"] = code
 
 
+def _bounded(step: Callable[[], Any], limit_s: float, what: str) -> None:
+    """Runs a step that should be quick on a thread of its own and waits at most limit_s for it.
+    Its error is raised here; past the limit the update goes on and the step is left to finish."""
+    failure: List[BaseException] = []
+
+    def run() -> None:
+        try:
+            step()
+        except BaseException as error:  # noqa: BLE001
+            failure.append(error)
+
+    worker = threading.Thread(target=run, name="conduit-self-update-step", daemon=True)
+    worker.start()
+    worker.join(limit_s)
+    if worker.is_alive():
+        logger.warning("Conduit plugin: %s didn't finish in %d s; the update goes on without it", what, int(limit_s))
+        return
+    if failure:
+        raise failure[0]
+
+
 def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[str, Any]],
                      restart_gateway: Callable[..., int], schedule: Callable[[float, Callable[[], None]], Any],
                      homes: Callable[[], List[Path]], notify: Callable[[Dict[str, Any]], None],
@@ -989,9 +1014,12 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
         if job["version"] is None:
             _self_update_failed(job, "The update left a plugin.yaml without a readable version on the host")
             return
+        # Out of "downloading" on disk first: a stall marked on that step can't free the slot of
+        # a pull that came back, so a later step holding the thread must not read as one (issue 1103).
+        _write_self_update(path, job)
         # Before the restart, so the profiles it restarts load the new version with it. A profile
         # running its own gateway loads it when that gateway restarts.
-        point_profiles()
+        _bounded(point_profiles, SELF_UPDATE_POINT_PROFILES_S, "pointing profiles at the update")
         # Until the restart is sent: a dashboard restarted before then (during the wait below)
         # loads the new plugin, but the gateway still runs the old one.
         job["gateway_pending"] = True

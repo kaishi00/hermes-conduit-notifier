@@ -260,3 +260,16 @@ def test_an_end_asks_the_store_again_inside_the_retry_wait(tmp_path, monkeypatch
     settled.append(True)
     steps.ended("s-2")
     assert not (tmp_path / steps.FILE_NAME).exists()
+
+
+
+def test_a_home_that_cant_be_resolved_doesnt_cost_the_turn_its_context(monkeypatch):
+    # Issue 1104: the home was looked up before _quietly was entered, so a lookup that raised
+    # took the whole pre-call context with it.
+    def no_home():
+        raise RuntimeError("no home")
+
+    monkeypatch.setattr(plugin, "get_hermes_home", no_home)
+    monkeypatch.setattr(plugin, "enqueue", lambda event: True)
+    monkeypatch.setattr(plugin.calls, "outcome_note", lambda session_id: None)
+    plugin._pre_llm_call(session_id="s-3", turn_id="t-3", conversation_history=[])

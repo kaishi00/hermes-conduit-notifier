@@ -532,10 +532,12 @@ def test_a_resume_that_cant_write_its_start_ends_the_job_at_once(monkeypatch, tm
 def test_a_failed_write_before_the_restart_isnt_read_as_taken_down(monkeypatch, tmp_path):
     # Review on #554: the write that drops gateway_pending failing left a failed job the next
     # dashboard read as taken down by a restart that was never sent, and called done.
-    write, failed = api.self_update._write_self_update, []
+    write, failed, pending = api.self_update._write_self_update, [], []
 
     def drop_fails_once(target, job):
-        if job["step"] == "restarting_gateway" and "gateway_pending" not in job and not failed:
+        pending.extend([1] if job.get("gateway_pending") else [])
+        # The write after gateway_pending was set, not the step's first one (issue 1103).
+        if job["step"] == "restarting_gateway" and "gateway_pending" not in job and pending and not failed:
             failed.append(1)
             raise OSError("disk full")
         write(target, job)
@@ -915,6 +917,44 @@ def test_an_update_points_every_profile_at_it_before_the_gateway_restarts(monkey
                                      lambda job: None, sleep=lambda s: None,
                                      point_profiles=lambda: order.append("profiles"))
     assert order == ["profiles", "restart"]
+
+
+def test_pointing_profiles_that_never_returns_doesnt_hold_the_update(monkeypatch, tmp_path):
+    # Issue 1103: a pull that came back keeps the slot, so a later step that blocked for good
+    # kept every Update answering with this job until the dashboard restarted.
+    import threading
+    release, seen = threading.Event(), []
+    path = tmp_path / "job.json"
+    monkeypatch.setattr(api.capabilities, "_plugin_version", lambda: "9.9.9")
+    monkeypatch.setattr(api.self_update, "SELF_UPDATE_POINT_PROFILES_S", 0.05)
+
+    def point_profiles():
+        seen.append(json.loads(path.read_text())["step"])
+        release.wait(5)
+
+    job = {"id": "j1", "step": "downloading", "boot_id": api.capabilities.BOOT_ID}
+    try:
+        api.self_update._run_self_update(job, path, lambda: {"ok": True}, lambda draining: 0, lambda *a: None,
+                                         lambda: [tmp_path], lambda job: None, sleep=lambda s: None,
+                                         point_profiles=point_profiles, gateway_work=lambda: 0)
+    finally:
+        release.set()
+    assert seen == ["restarting_gateway"], "the job left downloading before the step could hold it"
+    assert json.loads(path.read_text())["step"] == "restarting_dashboard"
+
+
+def test_a_failure_pointing_profiles_still_fails_the_update(monkeypatch, tmp_path):
+    path = tmp_path / "job.json"
+    monkeypatch.setattr(api.capabilities, "_plugin_version", lambda: "9.9.9")
+
+    def point_profiles():
+        raise RuntimeError("disk gone")
+
+    job = {"id": "j1", "step": "downloading", "boot_id": api.capabilities.BOOT_ID}
+    api.self_update._run_self_update(job, path, lambda: {"ok": True}, lambda draining: 0, lambda *a: None,
+                                     lambda: [tmp_path], lambda job: None, sleep=lambda s: None,
+                                     point_profiles=point_profiles, gateway_work=lambda: 0)
+    assert json.loads(path.read_text())["step"] == "failed"
 
 
 def test_profiles_are_pointed_from_the_main_home(monkeypatch, tmp_path):
