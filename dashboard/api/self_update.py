@@ -1010,19 +1010,22 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
                 job.update(_scan_held(result))
             _self_update_failed(job, str(result.get("error") or "Hermes didn't apply the update"), code)
             return
-        job.update(step="restarting_gateway", version=capabilities._plugin_version())
-        if job["version"] is None:
+        version = capabilities._plugin_version()
+        if version is None:
             _self_update_failed(job, "The update left a plugin.yaml without a readable version on the host")
             return
         # Out of "downloading" on disk first: a stall marked on that step can't free the slot of
         # a pull that came back, so a later step holding the thread must not read as one (issue 1103).
+        # Without the version yet: a dashboard restarted while profiles are pointed would read a
+        # version it loaded as the update done, though the gateway restart was never sent.
+        job["step"] = "restarting_gateway"
         _write_self_update(path, job)
         # Before the restart, so the profiles it restarts load the new version with it. A profile
         # running its own gateway loads it when that gateway restarts.
         _bounded(point_profiles, SELF_UPDATE_POINT_PROFILES_S, "pointing profiles at the update")
         # Until the restart is sent: a dashboard restarted before then (during the wait below)
         # loads the new plugin, but the gateway still runs the old one.
-        job["gateway_pending"] = True
+        job.update(version=version, gateway_pending=True)
         _write_self_update(path, job)
         # The gateway's running work first, while it still serves (issue 546). Past the limit
         # the restart goes ahead: the gateway then waits for the work itself, up to its own cap.
