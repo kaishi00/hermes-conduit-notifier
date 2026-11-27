@@ -203,7 +203,11 @@ def _wait_for(store: PcControlStore, request: dict[str, Any], computer: str, inf
                        note=f"{info['name']} didn't answer in time; it may be busy or asleep. Capture again before "
                             "retrying an action that changes something.")
     grant = result.get("grant")
-    if grant in ("allowed", "denied"):
+    # Stop pressed while this action was under way: its answer stands, but it lets nobody back in.
+    stopped_since = store.stopped_at(computer) >= float(request.get("at") or 0)
+    if stopped_since:
+        pass
+    elif grant in ("allowed", "denied"):
         store.record_grant(computer, session, grant, request["chat"])
     elif result.get("ok") is not False or result.get("code") not in ("stopped", "denied"):
         store.touch_grant(computer, session)
@@ -237,7 +241,8 @@ def _ask_phone(present: PresentStore | None, push: Callable[[dict[str, Any]], An
     computer's asks here (the computer still asks)."""
     bot = session_titles.bot_name()
     name = str(info.get("name") or "Computer")
-    title = f"Allow {bot or 'Hermes'} to control {name}?"
+    # Within the prompt's 80 characters, so a long name never keeps the ask off the phone.
+    title = f"Allow {(bot or 'Hermes')[:30]} to control {name[:30]}?"
     lines = [f"Chat: {chat}"] if chat else []
     if takes_over:
         lines.append(f"This takes over from “{takes_over}”.")

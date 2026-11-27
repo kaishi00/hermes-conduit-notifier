@@ -430,3 +430,30 @@ def test_a_chat_that_stopped_acting_isnt_controlling(tmp_path):
     assert len(store.controlling()) == 1
     now[0] += store_mod.CONTROLLING_S + 1
     assert store.controlling() == []
+
+
+def test_stop_while_the_first_action_ran_lets_nobody_back_in(store):
+    store.note_computer(PC, "Asuka", "windows")
+
+    def answer(request):
+        store.stop(PC)  # pressed on the phone while the action ran
+        return {"ok": True, "grant": "allowed"}
+
+    run_tool(store, {"action": "capture"}, answer=answer)
+    assert store.grant(PC) is None
+
+
+def test_a_long_name_still_reaches_the_phone_and_a_finished_ask_never_breaks_loads(store, tmp_path):
+    present = present_mod.PresentStore(tmp_path)
+    _phone(present)
+    store.note_computer(PC, "A" * 64, "windows")
+    _, desktop = run_tool(store, {"action": "capture"}, answer=lambda r: {"ok": True, "grant": "allowed"},
+                          present=present, push=lambda e: None)
+    assert desktop.seen[0].get("ask")
+    # A finished computer's ask left unreported (a hand-edited file) loads fine.
+    path = tmp_path / present_mod.FILE_NAME
+    state = json.loads(path.read_text())
+    for prompt in state["prompts"]:
+        prompt["reported"] = False
+    path.write_text(json.dumps(state))
+    assert _phone(present)["prompts"] == []

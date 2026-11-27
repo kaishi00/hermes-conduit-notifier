@@ -486,8 +486,9 @@ class PresentStore:
                           pc=kept)[0]
 
     def pc_ask(self, prompt_id: Any) -> dict[str, Any] | None:
-        """A computer's ask as it stands, with its computer and request (``pc``). Only reads."""
-        prompt = _find(self._load(), prompt_id)
+        """A computer's ask as it stands, with its computer and request (``pc``). Only reads, and one that can't be
+        read raises rather than reading as no ask (as room_ask), so the computer's dialog keeps following it."""
+        prompt = _find(self._load(for_write=True), prompt_id)
         if prompt is None or not prompt.get("pc"):
             return None
         return {**_shown(prompt), "pc": prompt["pc"]}
@@ -923,8 +924,9 @@ def _trim_prompts(state: dict[str, Any]) -> None:
 def _trim_unheard(state: dict[str, Any]) -> None:
     """Keeps the newest MAX_ROOM_ANSWERS_KEPT answers a room's agent hasn't heard, and the newest
     MAX_ROOM_ANSWERS_KEPT_ALL across rooms."""
-    unheard = sorted((prompt for prompt in state["prompts"] if _elsewhere(prompt) and prompt["status"] != "waiting"
-                      and not prompt["reported"]),
+    # A computer's ask is read by its tool, never heard.
+    unheard = sorted((prompt for prompt in state["prompts"] if _elsewhere(prompt) and not prompt.get("pc")
+                      and prompt["status"] != "waiting" and not prompt["reported"]),
                      key=lambda prompt: prompt.get("finished_at", prompt["created_at"]), reverse=True)
     kept: dict[str, int] = {}
     dropped = set()

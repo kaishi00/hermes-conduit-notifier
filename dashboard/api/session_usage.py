@@ -1,11 +1,15 @@
 """Chat usage: one chat's tokens and cost, for Conduit's Context sheet and the
-chat list's Usage Details (hermes-conduit#2699)."""
+chat list's Usage Details (hermes-conduit#2699), and each reply's speed for
+the reply row's Show reply speed (reply_speed.py)."""
 
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
+import os
 import sqlite3
+import threading
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException, Request, Response
@@ -239,3 +243,93 @@ async def get_session_usage(request: Request, response: Response, session_id: Op
         raise
     except Exception as exc:
         raise core._unexpected("session-usage", exc, feature="Chat usage")
+
+
+# --- Reply speeds (reply_speed.py) --------------------------------------------
+#
+# The plugin's post_api_request hook (agent process) adds each model call's
+# output tokens and writing time to its turn in the profile's
+# conduit-reply-speeds.db. This ties each kept turn to the reply it ended on:
+# the chat's last assistant row with words between the turn's first call and
+# its end, across the sessions its compactions continued it into, so Conduit
+# shows the speed beside that reply. A turn whose reply isn't saved yet comes
+# with row_id null: the reply a client is still drawing.
+
+SPEEDS_MAX_ROWS = 20000
+_speeds_limiter = core._MintLimiter(120, 60.0, message="Too many reply speed reads; try again shortly")
+_reply_speed_module: Any = None
+_reply_speed_lock = threading.Lock()
+
+
+def _reply_speed() -> Any:
+    """reply_speed.py in the plugin's folder, loaded once."""
+    global _reply_speed_module
+    with _reply_speed_lock:
+        if _reply_speed_module is None:
+            path = os.path.join(core._plugin_root(), "reply_speed.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_reply_speed", path)
+            if spec is None or spec.loader is None or not os.path.isfile(path):
+                raise core.TokenError(501, "This plugin install is missing reply_speed.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _reply_speed_module = module
+        return _reply_speed_module
+
+
+def chat_reply_speeds(conn: sqlite3.Connection, home: Any, session_id: str) -> Optional[Dict[str, Any]]:
+    """The chat's replies with a kept speed, oldest first, or None when Hermes
+    has no row for ``session_id``."""
+    start = _row(conn, session_id)
+    if start is None:
+        return None
+    module = _reply_speed()
+    ids = [row["id"] for row in _chain(conn, start)]
+    turns = module.ReplySpeedStore(home).turns(ids)
+    rows: List[tuple] = []
+    if turns:
+        marks = ", ".join("?" for _ in ids)
+        rows = [(int(row[0]), float(row[1])) for row in conn.execute(
+            f"SELECT id, timestamp FROM messages WHERE session_id IN ({marks}) AND role = 'assistant' "
+            f"AND timestamp >= ? AND TRIM(COALESCE(content, '')) != '' ORDER BY id DESC LIMIT ?",
+            (*ids, float(turns[0]["started_at"]) - 1.0, SPEEDS_MAX_ROWS)).fetchall()]
+    return {"session_id": start["id"], "replies": module.replies(turns, rows)}
+
+
+def _read_reply_speeds(session_id: str) -> Dict[str, Any]:
+    from hermes_constants import get_hermes_home
+    home = get_hermes_home()
+    path = home / "state.db"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2.0)
+    try:
+        conn.row_factory = sqlite3.Row
+        speeds = chat_reply_speeds(conn, home, session_id)
+    finally:
+        conn.close()
+    if speeds is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return speeds
+
+
+@router.get("/sessions/reply-speeds")
+async def get_reply_speeds(request: Request, response: Response, session_id: Optional[str] = None,
+                           profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    sid = (session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id is required", headers=NO_STORE)
+    try:
+        return await asyncio.wait_for(
+            core._run_scoped(profile, core._limited(_speeds_limiter, profile, lambda: _read_reply_speeds(sid))),
+            USAGE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Reading the chat's reply speeds took too long", headers=NO_STORE)
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=NO_STORE)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **NO_STORE}
+        raise
+    except Exception as exc:
+        raise core._unexpected("reply-speeds", exc, feature="Reply speed")

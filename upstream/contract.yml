@@ -102,6 +102,14 @@ notes:
     Conduit's Context sheet and Usage Details (feature map: "Chat usage"). Compression continuations
     and subagent runs are told apart from branches as hermes_state's _BRANCH_CHILD_SQL and
     _COMPRESSION_CHILD_SQL do. Without the columns the route answers 501.
+  reply speeds: >-
+    __init__.py's post_api_request hook reads each main-loop model call's session_id, turn_id,
+    started_at, ended_at, first_chunk_at (agent/turn_response_intake.py) and usage (output_tokens,
+    reasoning_tokens, the normalized CanonicalUsage) and adds them to the turn in the profile's
+    conduit-reply-speeds.db (reply_speed.py). dashboard/api/session_usage.py's /sessions/reply-speeds
+    ties each turn to the chat's last assistant row with words (messages id, session_id, role, content,
+    timestamp, read-only) between the turn's first call and its end, for Conduit's Show reply speed
+    (feature map: "Reply speed"). A Hermes without first_chunk_at times each call from the request.
   session store: >-
     hermes_store.py opens a profile's sessions through Hermes' storage interface
     (persistence_assembly.open_persistence / open_persistence_reader, the sessions, messages,
@@ -869,6 +877,7 @@ routes:
   - POST /sessions/history-page
   - GET /sessions/kanban-tasks
   - GET /sessions/live-work
+  - GET /sessions/reply-speeds
   - POST /sessions/takeover
   - GET /sessions/usage
   - POST /side-question

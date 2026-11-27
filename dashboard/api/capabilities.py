@@ -56,6 +56,9 @@ ROUTE_CAPABILITIES = (
     # GET /sessions/usage: one chat's tokens and cost, its compressions and
     # subagent runs included (hermes-conduit#2699).
     "session-usage",
+    # GET /sessions/reply-speeds: each reply's tokens per second, measured by
+    # the plugin from Hermes' model calls (reply_speed.py).
+    "reply-speeds",
     # GET /sessions/kanban-tasks: the Kanban tasks a chat handed to the
     # board, on every board (hermes-conduit-desktop#553).
     "chat-kanban-tasks",

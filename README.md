@@ -2176,6 +2176,30 @@ started. A branch is a chat of its own and isn't counted.
   predates the cost columns, 504 past 10 seconds, 429 past 120 reads a minute
   per profile. Every answer is `Cache-Control: no-store`.
 
+## Reply speed (plugin 0.204.0+)
+
+With Show reply speed on, Conduit shows how fast each reply was written, in
+tokens per second, beside it on the phone and the desktop. The plugin's
+`post_api_request` hook adds each model call's output tokens (the provider's
+own count) and writing time to its turn in the profile's
+`conduit-reply-speeds.db`, the newest 20,000 turns kept. A call is timed from
+its first streamed chunk to its end; one with no streamed chunk, or one that
+reports reasoning tokens (hidden thinking can come before the first chunk),
+from the request, so a speed can read low but never high. Hermes' own
+`avg_tps` averages the chat's last ten calls over their whole time, the wait
+for the first token included, and isn't used.
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| GET | `/api/plugins/conduit_push/sessions/reply-speeds?session_id=&profile=` | `{session_id, replies: [{row_id, tokens_per_s, output_tokens, seconds, ended_at}]}` |
+
+- Each turn is tied to the reply it ended on: the chat's last assistant row
+  with words between the turn's first call and its end (or the next turn's
+  start), through the chat's compressions. `row_id` is null for a turn whose
+  reply isn't saved yet.
+- 404 when Hermes has no row for the chat, 504 past 10 seconds, 429 past 120
+  reads a minute per profile. Every answer is `Cache-Control: no-store`.
+
 ## A chat's Kanban tasks (plugin 0.197.0+)
 
 Conduit shows the Kanban cards a chat handed to the board above its composer,
@@ -3916,7 +3940,7 @@ The user is in charge on that computer:
   only the bots they pick there can reach it (Conduit polls only their
   profiles).
 - The first action of each chat asks them there (Allow or Don't Allow) and,
-  from plugin 0.204, on their phone too: a confirm prompt with a notification,
+  from plugin 0.205, on their phone too: a confirm prompt with a notification,
   on a Conduit that says it shows them (`pc-asks` in its present exchange's
   features). The first answer counts; the computer reads the phone's copy
   while its dialog is up and closes it. One chat drives a computer at a time;
@@ -3945,7 +3969,7 @@ typed or seen); requests and answers are deleted once the tool reads them.
 | GET | `/api/plugins/conduit_push/pc/state?profile=` | | `{ok, controlling: [{computer, name, session, chat, used}]}`: the chats that acted on a computer in the last minute |
 
 `/pc/next`'s requests carry `ask` (the prompt's id) when the phone was asked
-too, and its answer `stopped`. Capabilities `pc-control` and, from 0.204,
+too, and its answer `stopped`. Capabilities `pc-control` and, from 0.205,
 `pc-asks`.
 
 ## Calendar, Reminders, Focus and phone status from Conduit (plugin 0.27+)

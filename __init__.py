@@ -19,7 +19,7 @@ from hermes_constants import get_hermes_home
 from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_done_tool, chat_mute, chat_on_screen, clarify_loop, client, compaction_skip, conduit_first, cron_bot_chat, cron_runs,
                desktop_selected, forks, health_tool, inbox_tool, leaked_calls, link_ask_tool, link_asks, live_activity, live_steps,
                location_tool, maps_tool, memory_scan, notify_tool, pc_control_tool, phone_tool, present_tool, profile_copies, pulse,
-               quiet_turns, reply_sources, review_notices,
+               quiet_turns, reply_sources, reply_speed, review_notices,
                room_asks, room_chats, room_cleanup, room_cutoff, room_free_busy, room_identity, room_invites,
                room_memory, room_planner, room_posts, room_rules, room_tool,
                room_wakeups, screen_lock, session_titles, settings_tool, show_tool, turn_surface, voice_archive, work_tool)
@@ -259,7 +259,8 @@ def register(ctx: Any) -> None:
         try:
             ctx.register_hook(name, hook)
         except Exception:  # noqa: BLE001
-            logger.warning("conduit_push: %s hook unavailable; the Lock Screen shows less detail", name, exc_info=True)
+            logger.warning("conduit_push: %s hook unavailable; the Lock Screen shows less detail and replies "
+                           "have no speed", name, exc_info=True)
     # Wrap clarify execution so a backgrounded device gets an answerable card
     # (plugin-minted id, answered through the relay). Older gateways without
     # middleware support simply keep the original clarify path.
@@ -1402,6 +1403,14 @@ def _post_api_request(**kwargs: Any) -> None:
     if isinstance(usage, dict):
         _quietly(live_activity.reporter.context_used, session_id, usage.get("prompt_tokens"),
                  kwargs.get("context_length"))
+    # The reply's speed (reply_speed.py): this call's tokens and writing time
+    # added to its turn's.
+    try:
+        reply_speed.ReplySpeedStore(get_hermes_home()).add_call(
+            session_id, kwargs.get("turn_id"), kwargs.get("started_at"), kwargs.get("ended_at"),
+            kwargs.get("first_chunk_at"), usage)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: couldn't keep the reply's speed", exc_info=True)
 
 
 def _pulse_note(session_id: str, turn_id: Any, user_message: Any) -> str | None:
