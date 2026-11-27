@@ -620,7 +620,7 @@ def test_the_resolve_route_reads_the_profile_store(tmp_path, monkeypatch):
     app.include_router(api.router, prefix=BASE)
     client = TestClient(app)
     body = client.get(f"{BASE}/workspace/resolve", params={"path": "report.xlsx", "session_id": ["gone", "s1"]}).json()
-    assert body == {"ok": True, "path": str(tmp_path / "out" / "report.xlsx"), "via": "chat"}
+    assert body == {"ok": True, "path": str(tmp_path / "out" / "report.xlsx"), "via": "chat", "isDirectory": False}
     missing = client.get(f"{BASE}/workspace/resolve", params={"path": "nope.xlsx", "session_id": "s1"}).json()
     assert missing == {"ok": True, "path": None}
 
@@ -889,7 +889,7 @@ def test_the_resolve_route_finds_a_link_in_the_terminal_folder(tmp_path, monkeyp
     monkeypatch.setitem(sys.modules, "hermes_cli.config", config)
     client = _resolve_client(tmp_path, monkeypatch, [("s1", "assistant", "Wrote `notes/todo.md`.")])
     body = client.get(f"{BASE}/workspace/resolve", params={"path": "notes/todo.md", "session_id": "s1"}).json()
-    assert body == {"ok": True, "path": str(work / "notes" / "todo.md"), "via": "folder"}
+    assert body == {"ok": True, "path": str(work / "notes" / "todo.md"), "via": "folder", "isDirectory": False}
 
 
 def test_a_cron_reports_files_are_its_deliveries(tmp_path, monkeypatch):
@@ -1001,3 +1001,28 @@ def test_the_summary_header_is_one_pattern_everywhere():
                    "[Durable Summary (d2, node 7)]\n", "[Depth-4 Summary (d4, node 9001)]\n"):
         assert index.LCM_SUMMARY_HEADER.match(header)
     assert not index.LCM_SUMMARY_HEADER.match("[Session Arc Summary quoted]\n")
+
+
+def test_a_folder_link_resolves_from_a_path_inside_it_and_says_its_a_folder(tmp_path, monkeypatch):
+    # Desktop issue 686: a reply named `.agents/skills/link-para-skill/`, a
+    # folder in the project the agent worked in, not in the chat's own
+    # folder; the chat's tool calls wrote a file inside it.
+    skill = tmp_path / "project" / ".agents" / "skills" / "link-para-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("x")
+    client = _resolve_client(tmp_path, monkeypatch, [
+        ("s1", "assistant", "", json.dumps([{"function": {"name": "write_file", "arguments": json.dumps(
+            {"path": str(skill / "SKILL.md")})}}])),
+        ("s1", "assistant", "Created `.agents/skills/link-para-skill/`."),
+    ])
+
+    def resolve(name):
+        return client.get(f"{BASE}/workspace/resolve", params={"path": name, "session_id": "s1"}).json()
+
+    assert resolve(".agents/skills/link-para-skill/") == {
+        "ok": True, "path": str(skill), "via": "chat", "isDirectory": True}
+    assert resolve("link-para-skill/SKILL.md") == {
+        "ok": True, "path": str(skill / "SKILL.md"), "via": "chat", "isDirectory": False}
+    # A folder that only shares the name's start isn't it.
+    assert resolve("skills/link-para")["path"] is None
+

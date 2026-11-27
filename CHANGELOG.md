@@ -13,11 +13,23 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.205.5 (2026-11-27)
+## 0.205.6 (2026-11-27)
 
 ### New and improved
 
 - Reply speed: saving each model call's speed no longer reads every kept turn on a busy host, and a chat's speeds stay on the right replies however the turns are handed over.
+
+## 0.205.5 (2026-11-27)
+
+### Fixes
+
+- A folder a reply names (`.agents/skills/my-skill/`) used to say it wasn't on the server when tapped, even though it was there. Conduit now finds folders as it finds files, in the chat's folder or where the chat's own tools wrote inside it.
+
+## 0.205.4 (2026-11-27)
+
+### Fixes
+
+- Long chats: the warning about paused helper models names every one of them and says when the first is back, and never shows anything from a custom endpoint's address but its host.
 
 ## 0.205.3 (2026-11-27)
 
