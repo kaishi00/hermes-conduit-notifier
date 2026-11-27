@@ -47,12 +47,14 @@ MAX_TURN_STARTS = 256
 # (session id, turn_id) -> (its "response ready" event or None, whether it
 # goes out, the grace timer), held from post_llm_call until on_session_end
 # says the turn finished.
-_pending_ready: dict[tuple[str, str], tuple[Any, bool, Any]] = {}
+# (session id, turn id) -> (its reply, whether it notifies, its grace timer,
+# the Hermes home its turn ran in).
+_pending_ready: dict[tuple[str, str], tuple[Any, bool, Any, Any]] = {}
 _pending_lock = threading.Lock()
 # on_session_end follows post_llm_call in the same finalizer, after only the
 # memory sync; the grace is for a Hermes that never reports the end.
 READY_GRACE_S = 120.0
-# Session id -> (a token, the grace timer) for a turn Hermes named no id for:
+# Session id -> (a token, the grace timer, its turn's Hermes home) for a turn Hermes named no id for:
 # its reply can't wait for the end, but its Live Activity's end still does.
 _unnamed_ends: dict[str, tuple[object, Any]] = {}
 # Parent session -> (its running turn's id, when it started by
@@ -758,19 +760,23 @@ def _post_llm_call(**kwargs: Any) -> None:
     # and its Live Activity ended (a Pulse turn never started one).
     timer = _later(READY_GRACE_S, lambda: _turn_end_missed(session_id, turn_id,
                                                            live=not pulse_turn and not workstream and not automation))
+    home = _turn_home()
     with _pending_lock:
         earlier = _pending_ready.pop(key, None)
-        _pending_ready[key] = (ready, send, timer)
+        _pending_ready[key] = (ready, send, timer, home)
         overflow = []
         while len(_pending_ready) > MAX_TURN_STARTS:
             oldest = next(iter(_pending_ready))
             overflow.append((oldest[0], _pending_ready.pop(oldest)))
     if earlier is not None:
         _cancel(earlier[2])  # the same turn reported twice: the last reply wins
-    # Far more turns than ever end at once: the oldest go out now.
-    for old_session, (old_ready, old_send, old_timer) in overflow:
+    # Far more turns than ever end at once: the oldest go out now, in the
+    # home their turns ran in, not this turn's (notifier issue 1109; the
+    # chat's recorded home may be gone by now, as old as the reply).
+    for old_session, (old_ready, old_send, old_timer, old_home) in overflow:
         _cancel(old_timer)
-        _finish_ready(old_session, old_ready, old_send)
+        with _in_home(old_home):
+            _finish_ready(old_session, old_ready, old_send)
 
 
 def _work_turn_ended(session_id: str, response: Any) -> bool:
@@ -857,10 +863,9 @@ _turn_slots_lock = threading.Lock()
 
 
 def _turn_end_missed(session_id: str, turn_id: str, live: bool = True) -> None:
-    # On the plugin's own timer thread: the chat's home (_in_session_home).
-    with _in_session_home(session_id):
-        if _settle_ready(session_id, turn_id, "done") and live:
-            _quietly(live_activity.reporter.turn_ended, session_id, "done")
+    # The grace timer runs in the turn's own context (_later).
+    if _settle_ready(session_id, turn_id, "done") and live:
+        _quietly(live_activity.reporter.turn_ended, session_id, "done")
 
 
 def _hold_unnamed_end(session_id: str) -> None:
@@ -871,16 +876,16 @@ def _hold_unnamed_end(session_id: str) -> None:
 
     def missed() -> None:
         with _pending_lock:
-            if _unnamed_ends.get(session_id, (None, None))[0] is not token:
+            if _unnamed_ends.get(session_id, (None,))[0] is not token:
                 return
             del _unnamed_ends[session_id]
-        with _in_session_home(session_id):
-            _quietly(live_activity.reporter.turn_ended, session_id, "done")
+        _quietly(live_activity.reporter.turn_ended, session_id, "done")
 
     # Registered before its timer starts, so a drop in between isn't lost.
+    home = _turn_home()
     with _pending_lock:
         earlier = _unnamed_ends.pop(session_id, None)
-        _unnamed_ends[session_id] = (token, None)
+        _unnamed_ends[session_id] = (token, None, home)
         overflow = []
         while len(_unnamed_ends) > MAX_TURN_STARTS:
             oldest = next(iter(_unnamed_ends))
@@ -889,14 +894,15 @@ def _hold_unnamed_end(session_id: str) -> None:
         _cancel(earlier[1])
     timer = _later(READY_GRACE_S, missed)
     with _pending_lock:
-        if _unnamed_ends.get(session_id, (None, None))[0] is token:
-            _unnamed_ends[session_id] = (token, timer)
+        if _unnamed_ends.get(session_id, (None,))[0] is token:
+            _unnamed_ends[session_id] = (token, timer, home)
             timer = None
     _cancel(timer)  # dropped meanwhile
-    # Far more chats than ever end at once: the oldest end now.
-    for old_session, (_, old_timer) in overflow:
+    # Far more chats than ever end at once: the oldest end now, in their own
+    # homes, not the home of the turn that made room (notifier issue 1109).
+    for old_session, (_, old_timer, old_home) in overflow:
         _cancel(old_timer)
-        with _in_session_home(old_session):
+        with _in_home(old_home):
             _quietly(live_activity.reporter.turn_ended, old_session, "done")
 
 
@@ -918,7 +924,7 @@ def _settle_ready(session_id: str, turn_id: Any, outcome: str) -> bool:
             # time, so whatever it holds is that turn's.
             found = [_pending_ready.pop(key) for key in [key for key in _pending_ready if key[0] == session_id]]
     found = [pending for pending in found if pending is not None]
-    for ready, send, timer in found:
+    for ready, send, timer, _home in found:
         _cancel(timer)
         if outcome == "done":
             _finish_ready(session_id, ready, send)
@@ -926,8 +932,9 @@ def _settle_ready(session_id: str, turn_id: Any, outcome: str) -> bool:
 
 
 def _finish_ready(session_id: str, ready: dict[str, Any] | None, send: bool) -> None:
-    # In the chat's home: the grace timer, and another chat's turn sending
-    # the oldest held replies, send it from outside its turn (notifier issue 1109).
+    # In the chat's home: another chat's turn sends the oldest held replies
+    # when too many are held (notifier issue 1109), and Hermes' close of a
+    # chat runs on its own thread.
     with _in_session_home(session_id):
         # A job the user asked to be called about (#449) ends here: the call
         # request takes the place of the ready notification.
@@ -950,9 +957,9 @@ def _unload() -> None:
         _pending_ready.clear()
         unnamed = list(_unnamed_ends.values())
         _unnamed_ends.clear()
-    for _ready, _send, timer in held:
+    for _ready, _send, timer, _home in held:
         _cancel(timer)
-    for _token, timer in unnamed:
+    for _token, timer, _home in unnamed:
         _cancel(timer)
     calls.stop()
     pulse.stop()
@@ -2107,6 +2114,13 @@ def _start_parent_turn(session_id: str, turn_id: Any) -> None:
                 _session_homes.pop(next(iter(_session_homes)))
 
 
+def _turn_home() -> Any:
+    try:
+        return get_hermes_home()
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        return None
+
+
 @contextlib.contextmanager
 def _in_session_home(session_id: str) -> Iterator[None]:
     """Runs what a chat sends outside its turn (a background task's finish,
@@ -2118,6 +2132,13 @@ def _in_session_home(session_id: str) -> Iterator[None]:
     keeps the ambient home, as before."""
     with _parent_turns_lock:
         home = _session_homes.get(session_id) if session_id else None
+    with _in_home(home):
+        yield
+
+
+@contextlib.contextmanager
+def _in_home(home: Any) -> Iterator[None]:
+    """Runs in this Hermes home (None: the ambient one, as is)."""
     reset, token = None, None
     if home is not None:
         try:
