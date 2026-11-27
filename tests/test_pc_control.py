@@ -186,10 +186,34 @@ def test_stop_takes_waiting_actions_off_the_queue_and_keeps_answers(store):
     store.claim(PC)
     store.add_request(PC, SESSION, "A", "type", {"text": "x"})
     store.answer(ran["id"], {"ok": True}, computer=PC)
-    assert store.stop(PC) == 3
+    assert store.stop(PC) == 2
     assert store.claim(PC) == []
     assert store.take_result(ran["id"]) == {"ok": True}
     assert store.take_result(waiting["id"]) == {"ok": False, "code": "stopped"}
+
+
+def test_a_stopped_request_that_couldnt_move_still_never_runs(store, monkeypatch):
+    store.note_computer(PC, "Asuka", "windows")
+    store.add_request(PC, SESSION, "A", "click", {"element": 1})
+    real = store_mod.os.replace
+
+    def held(src, dst, *rest):
+        if str(src).endswith(".json") and str(dst).endswith(".claimed"):
+            raise PermissionError("in use")
+        return real(src, dst, *rest)
+    monkeypatch.setattr(store_mod.os, "replace", held)
+    assert store.stop(PC) == 1
+    monkeypatch.undo()
+    assert store.claim(PC) == []
+
+
+def test_an_answer_after_the_tool_gave_up_is_not_kept(store):
+    store.note_computer(PC, "Asuka", "windows")
+    request = store.add_request(PC, SESSION, "A", "capture", {})
+    store.claim(PC)
+    store.drop(request["id"])
+    assert store.answer(request["id"], {"ok": True}, computer=PC) is False
+    assert not list((store.root / "results").iterdir())
 
 
 def test_no_answer_in_time_drops_the_request(store, monkeypatch):

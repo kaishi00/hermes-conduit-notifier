@@ -73,6 +73,7 @@ def test_tool_names_become_coarse_categories():
     assert live.tool_category("message_agent") == "messages"
     assert live.tool_category("my_secret_project_tool") == "tool"
     assert live.tool_category(None) == "tool"
+    assert live.tool_category("conduit_user_computer") == "tool"
 
 
 def test_the_first_report_waits_a_moment_then_carries_the_turn(reporter, relay, clock):
