@@ -100,7 +100,10 @@ def _held(client: Any) -> tuple[list[str], float]:
         rest = parts[1:] if home is not None and len(parts) > 1 else parts
         if rest and rest[0] == "custom-endpoint" and len(rest) > 1:
             # Only the host: never a key in the URL's userinfo, path or query.
-            name = urlsplit(str(rest[1]) if "://" in str(rest[1]) else f"//{rest[1]}").hostname or "a custom endpoint"
+            host = urlsplit(str(rest[1]) if "://" in str(rest[1]) else f"//{rest[1]}").hostname or ""
+            # A host looks like one (dotted, an IP, localhost); anything else
+            # (a misconfigured value, maybe a key) isn't shown.
+            name = host if ("." in host or ":" in host or host == "localhost") else "a custom endpoint"
         else:
             name = str(rest[0]) if rest else ""
         if not name:
@@ -119,9 +122,9 @@ def held_warning(names: list[str], seconds: float) -> str:
     unit = f"minute{'s' if minutes != 1 else ''}"
     who = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
     if len(names) == 1:
-        return (f"⚠ Hermes' helper model for summarising long chats ({who}) didn't answer in time and is paused "
+        return (f"⚠ Hermes' helper model for summarising long chats ({who}) couldn't be used and is paused "
                 f"(about {minutes} more {unit}), so until then older messages will be cut without a summary.")
-    return (f"⚠ Hermes' helper models for summarising long chats ({who}) didn't answer in time and are paused "
+    return (f"⚠ Hermes' helper models for summarising long chats ({who}) couldn't be used and are paused "
             f"(the first of them is back in about {minutes} {unit}), so until then older messages will be cut "
             "without a summary.")
 

@@ -1643,6 +1643,8 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         _voice_persona_note(kwargs.get("conversation_history")),
         # Subagents can't use the shared data (each tool refuses them).
         None if child else conduit_first.note(),
+        # The user's computers this profile may drive (pc_control_tool), while one is on.
+        None if child else _computer_note(),
         # A room's private chat is told which room it's about (room_chats).
         None if child else _room_chat_note(session_id),
         # A room of only the owner's own Hermes runs as at home, which its turn is told (room_rules.OWN_FRAMING).
@@ -1666,6 +1668,16 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     ]
     context = "\n\n".join(note for note in notes if note)
     return {"context": context} if context else None
+
+
+def _computer_note() -> str | None:
+    try:
+        from . import pc_control_tool
+
+        return pc_control_tool.note()
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: computer note failed", exc_info=True)
+        return None
 
 
 def _watch_run_note(session_id: str, task_id: Any) -> str | None:

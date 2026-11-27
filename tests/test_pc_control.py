@@ -457,3 +457,25 @@ def test_a_long_name_still_reaches_the_phone_and_a_finished_ask_never_breaks_loa
         prompt["reported"] = False
     path.write_text(json.dumps(state))
     assert _phone(present)["prompts"] == []
+
+
+def test_turn_note_names_online_computers_and_the_tool(tmp_path):
+    clock = [1000.0]
+    store = store_mod.PcControlStore(tmp_path, clock=lambda: clock[0])
+    assert tool.note(store) is None
+    store.note_computer(PC, "Asuka", "windows")
+    store.note_computer("mac-computer-1", "Agriass-Air", "mac")
+    text = tool.note(store)
+    assert "Agriass-Air, Asuka" in text and "conduit_user_computer" in text and "computer_use" in text
+    # Offline: no line, though the tool stays listed (known for 30 days).
+    clock[0] += store_mod.ONLINE_S + 1
+    assert tool.note(store) is None
+    assert store.known()
+
+
+def test_turn_note_never_raises(tmp_path):
+    class Broken:
+        def online(self):
+            raise OSError("unreadable")
+
+    assert tool.note(Broken()) is None

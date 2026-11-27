@@ -1956,3 +1956,18 @@ def test_a_computer_never_heard_from_isnt_known_on_a_clock_near_the_epoch(home):
     assert store.computer_listens() is False and store.computer_known() is False
     store.note_computer()
     assert store.computer_listens() is True and store.computer_known() is True
+
+
+def test_the_computer_line_reaches_main_turns_only(home, clock, monkeypatch):
+    from conduit_push import pc_control_tool
+    from conduit_push.pc_control_store import PcControlStore
+
+    monkeypatch.setattr(pc_control_tool, "get_hermes_home", lambda: home)
+    PcControlStore(home).note_computer("asuka-computer-1", "Asuka", "windows")
+    context = plugin._pre_llm_call(session_id="rt-1")["context"]
+    assert "conduit_user_computer" in context and "Asuka" in context
+    plugin._subagent_start(child_session_id="child-2")
+    try:
+        assert "conduit_user_computer" not in ((plugin._pre_llm_call(session_id="child-2") or {}).get("context") or "")
+    finally:
+        plugin._subagent_stop(child_session_id="child-2", parent_session_id="")

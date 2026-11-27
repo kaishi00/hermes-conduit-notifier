@@ -84,10 +84,11 @@ def test_the_warning_names_helpers_on_hold(holds):
     until[("home", "custom-endpoint", "https://sk-secret@api.stepfun.ai/step_plan/v1?key=sk-other")] = time.time() + 500
     until[("other-profile", "nous")] = time.time() + 500
     until[("home", "openrouter")] = time.time() - 5
+    until[("home", "custom-endpoint", "sk-proj-abc")] = time.time() + 400  # not a host: never shown
     until[("home", "")] = time.time() + 60  # nothing to name: it doesn't set the time either
     holds.compression._emit_feasibility_notice(object(), HERMES_SAYS)
     said = holds.warned[-1]
-    assert "(zai, api.stepfun.ai)" in said and "the first of them is back in about 5 minutes" in said
+    assert "(zai, api.stepfun.ai, a custom endpoint)" in said and "the first of them is back in about 5 minutes" in said
     assert "helper models" in said and "are paused" in said
     assert "sk-" not in said and "nous" not in said and "openrouter" not in said and "hermes setup" not in said
 

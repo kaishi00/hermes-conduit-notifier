@@ -54,7 +54,7 @@ ACTIONS = ("capture", "click", "double_click", "right_click", "middle_click", "d
 SCHEMA: dict[str, Any] = {
     "name": TOOL_NAME,
     "description": (
-        "Drive the user's own computer, where they run Conduit. It isn't the Hermes host: computer_use acts "
+        "Drive the user's own computer (their PC or Mac): screenshots, clicks, typing. It's where they run Conduit, not the Hermes host: computer_use acts "
         "there. Use it when the user asks you to do something on their computer or PC: open an app, look at "
         "what's on their screen, click, type. Same actions as computer_use: capture first (mode som gives "
         "numbered elements), then act by element index, and capture again to check. type and key bring the "
@@ -131,6 +131,30 @@ def available() -> bool:
         return _store().known()
     except Exception:  # noqa: BLE001
         return False
+
+
+MAX_NOTE_NAMES = 3
+
+
+def note(store: PcControlStore | None = None) -> str | None:
+    """The turn's line naming the user's computers this profile may drive, so
+    a bot asked to do something on the user's PC reaches for this tool, not
+    Hermes' computer_use or a desktop plugin for another app (a bot that
+    searched for "computer use" found only those, Eric 2026-11-27). Only
+    while one is on now: the tool itself still says when one is offline.
+    Never raises: a hook calls this."""
+    try:
+        online = (store or _store()).online()
+        if not online:
+            return None
+        names = sorted({str(value.get("name") or "Computer") for value in online.values()})
+        shown = ", ".join(names[:MAX_NOTE_NAMES]) + (" and others" if len(names) > MAX_NOTE_NAMES else "")
+        return (f"[Conduit: you can control the user's own computer ({shown}) with {TOOL_NAME}. When they ask you "
+                "to do something on their computer or PC, or to look at their screen, use it, not computer_use "
+                "(which acts on this Hermes host) and not tools made for another desktop app.]")
+    except Exception:  # noqa: BLE001
+        logger.debug("conduit_push: computer note failed", exc_info=True)
+        return None
 
 
 def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool] = lambda _: False,
