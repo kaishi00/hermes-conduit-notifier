@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.204.0 (2026-11-27)
+
+### New and improved
+
+- Reply speed: the plugin measures how fast each reply was written, in tokens per second, from the provider's own token counts and the time the model spent writing. Turn on Show reply speed in Conduit to see it beside each reply.
+
 ## 0.203.1 (2026-11-27)
 
 ### Fixes
