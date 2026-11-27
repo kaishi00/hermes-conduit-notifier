@@ -301,13 +301,6 @@ def _detached_claim_check(server: Any, sid: str, session: Any, wanted: set, stat
     return lease, None
 
 
-def _detached_idle_claim(server: Any, sid: str, session: Any, wanted: set, state_path: Any,
-                         turn_marker: Any, home: Any) -> Any:
-    """The claim of a runtime in this process with no client and nothing running, on this chat, or None."""
-    lease, why = _detached_claim_check(server, sid, session, wanted, state_path, turn_marker, home)
-    return lease if why is None else None
-
-
 def release_detached_claims(session_ids: list, *, registry: Any, turn_marker: Any, home: Any,
                             server: Any = None, abandoned: Optional[threading.Event] = None,
                             kept: Optional[list] = None) -> list:
@@ -319,7 +312,8 @@ def release_detached_claims(session_ids: list, *, registry: Any, turn_marker: An
     server = _gateway() if server is None else server
     if server is None:
         if kept is not None:
-            kept.append((None, None, "Hermes' chat gateway isn't loaded in this process"))
+            kept.append((None, None, "Hermes' chat gateway isn't available here (not loaded, or missing the helpers"
+                                     " this takeover needs)"))
         return []
     wanted = {str(value) for value in session_ids if str(value)}
     state_path = registry._lease_paths(registry_home=home)[0]

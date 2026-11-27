@@ -734,7 +734,7 @@ def test_a_kept_own_claim_without_the_gateway_says_so(tmp_path, caplog):
     assert "tui_gateway.server" not in sys.modules
     with caplog.at_level(logging.INFO):
         assert _take(tmp_path, ["chat"])["status"] == "same_host"
-    assert any("Hermes' chat gateway isn't loaded in this process" in r.getMessage() for r in caplog.records)
+    assert any("Hermes' chat gateway isn't available here" in r.getMessage() for r in caplog.records)
 
 
 def test_a_runtime_that_turns_busy_before_the_release_keeps_its_claim(tmp_path):
@@ -799,3 +799,43 @@ def test_a_kept_own_claim_with_odd_metadata_still_answers(tmp_path, caplog):
     with caplog.at_level(logging.INFO):
         assert _take_with(tmp_path, ["chat"], gateway, registry)["status"] == "same_host"
     assert any("no runtime in this process was seen holding it" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("case, why", [
+    ("no_lock", "the runtime has no history lock to release it under"),
+    ("replaced", "the runtime was replaced while the takeover looked"),
+    ("refused", "Hermes refused to release it"),
+    ("raises", "checking it failed (RuntimeError: boom)"),
+])
+def test_the_release_paths_that_keep_a_claim_say_why(tmp_path, caplog, case, why):
+    import logging
+    registry, gateway = FakeRegistry(tmp_path), FakeGateway()
+    entry = _entry("chat", pid=OWN_PID, lease="lease-own")
+    if case != "raises":
+        entry["metadata"] = {"live_session_id": "sid"}
+    _seed(tmp_path, [entry])
+    _runtime(gateway, registry, tmp_path, "sid", "chat")
+    session = gateway._sessions["sid"]
+    if case == "no_lock":
+        session["history_lock"] = None
+    elif case == "replaced":
+        class Replaced:
+            def __enter__(self):
+                gateway._sessions["sid"] = dict(session)  # a new runtime took its place
+
+            def __exit__(self, *exc):
+                return False
+
+        session["history_lock"] = Replaced()
+    elif case == "refused":
+        gateway._release_active_session_slot = lambda session: False
+    else:
+        def boom(transport):
+            raise RuntimeError("boom")
+
+        gateway._transport_is_dead = boom
+    with caplog.at_level(logging.INFO):
+        assert _take_with(tmp_path, ["chat"], gateway, registry)["status"] == "same_host"
+    assert len(_entries(tmp_path)) == 1
+    lines = [r.getMessage() for r in caplog.records if "kept this process's claim" in r.getMessage()]
+    assert len(lines) == 1 and why in lines[0], lines

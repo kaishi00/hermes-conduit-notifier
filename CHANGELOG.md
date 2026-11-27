@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.202.8 (2026-11-27)
+
+### Fixes
+
+- The log line 0.202.7 added, for a chat Conduit says is open elsewhere, could fail the takeover itself on an unusual Hermes record, and could leave out why a check on the chat failed. It now always answers, and it names the failed check.
+
 ## 0.202.7 (2026-11-27)
 
 ### Fixes
