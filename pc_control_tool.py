@@ -50,8 +50,8 @@ ACTIONS = ("capture", "click", "double_click", "right_click", "middle_click", "d
 SCHEMA: dict[str, Any] = {
     "name": TOOL_NAME,
     "description": (
-        "Drive the user's own computer, the one where they run Conduit (not the Hermes host: computer_use acts "
-        "there). Use it when the user asks you to do something on their computer or PC: open an app, look at "
+        "Drive the user's own computer, where they run Conduit. It isn't the Hermes host: computer_use acts "
+        "there. Use it when the user asks you to do something on their computer or PC: open an app, look at "
         "what's on their screen, click, type. Same actions as computer_use: capture first (mode som gives "
         "numbered elements), then act by element index, and capture again to check. The first action in a chat "
         "asks the user on that computer, so say what you're about to do in your reply before you start. If the "
