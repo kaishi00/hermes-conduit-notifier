@@ -60,10 +60,12 @@ def _store() -> Any:
 
 
 async def _pc_route(profile: Optional[str], response: Response, fn: Callable[[], Dict[str, Any]],
-                    route: str) -> Dict[str, Any]:
+                    route: str, acquired: bool = False) -> Dict[str, Any]:
+    """``acquired``: the route already took its limiter slot, before reading its body."""
     response.headers["Cache-Control"] = "no-store"
     try:
-        return {"ok": True, **(await core._run_scoped(profile, core._limited(_pc_limiter, profile, fn)))}
+        run = fn if acquired else core._limited(_pc_limiter, profile, fn)
+        return {"ok": True, **(await core._run_scoped(profile, run))}
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
@@ -101,6 +103,8 @@ async def get_pc_next(response: Response, computer: str, name: str = "", platfor
 
 @router.post("/pc/result")
 async def post_pc_result(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    # The scope and a limiter slot come before the body: a refused caller costs no 12 MB read.
+    await core._scoped_acquire(_pc_limiter, profile)
     body = await core._read_json_body(request, PC_RESULT_MAX_BYTES)
     if not isinstance(body, dict) or not isinstance(body.get("result"), dict):
         raise HTTPException(status_code=400, detail="Send {computer, id, result}")
@@ -109,14 +113,15 @@ async def post_pc_result(request: Request, response: Response, profile: Optional
         return {"taken": _store().answer(body.get("id"), body["result"],
                                          computer=_pc_store_class().clean_id(body.get("computer"), "computer"))}
 
-    return await _pc_route(profile, response, answer, "result")
+    return await _pc_route(profile, response, answer, "result", acquired=True)
 
 
 @router.post("/pc/stop")
 async def post_pc_stop(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    await core._scoped_acquire(_pc_limiter, profile)
     body = await core._read_json_body(request, PC_SMALL_MAX_BYTES)
     computer = body.get("computer") if isinstance(body, dict) else None
-    return await _pc_route(profile, response, lambda: {"stopped": _store().stop(computer)}, "stop")
+    return await _pc_route(profile, response, lambda: {"stopped": _store().stop(computer)}, "stop", acquired=True)
 
 
 @router.delete("/pc/computer")

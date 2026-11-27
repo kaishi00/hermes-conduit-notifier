@@ -259,7 +259,9 @@ class PcControlStore:
         now = self.clock()
         found = []
         for path in folder.iterdir():
-            if path.suffix not in ((".json", ".claimed") if include_claimed else (".json",)):
+            # Claimed ones are read too, so one whose tool went away (a gateway
+            # restart) is swept with its result, screenshot and all.
+            if path.suffix not in (".json", ".claimed"):
                 continue
             data = _load(path)
             if not isinstance(data, dict) or not isinstance(data.get("id"), str):
@@ -267,7 +269,8 @@ class PcControlStore:
             if now - float(data.get("at") or 0) > STALE_S:
                 self.drop(data["id"])
                 continue
-            found.append(data)
+            if path.suffix == ".json" or include_claimed:
+                found.append(data)
         return found
 
     def _dir(self, name: str) -> Path:

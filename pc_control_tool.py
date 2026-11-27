@@ -219,6 +219,9 @@ def _check_args(action: str, args: dict[str, Any]) -> str:
         return "key needs keys, like 'ctrl+s' or 'enter'."
     if action == "set_value" and (not isinstance(args.get("element"), int) or not isinstance(args.get("value"), str)):
         return "set_value needs element and value."
+    seconds = args.get("seconds")
+    if seconds is not None and (isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not 0 <= seconds <= 30):
+        return "seconds is a number from 0 to 30."
     if action in ("focus_app", "launch_app") and not (isinstance(args.get("app"), str) and args["app"].strip()):
         return f"{action} needs app."
     return ""

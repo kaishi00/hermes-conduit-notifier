@@ -111,6 +111,8 @@ _TOOL_CATEGORIES = {
     "skill_view": "skills",
     "skills_list": "skills",
     "skill_manage": "skills",
+    # The user's own computer, not their iPhone (the conduit_ prefix below).
+    "conduit_user_computer": "tool",
 }
 _TOOL_PREFIXES = (
     ("browser_", "browser"),

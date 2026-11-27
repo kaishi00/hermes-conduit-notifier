@@ -166,6 +166,19 @@ def test_a_computer_quiet_too_long_is_offline(tmp_path):
     assert not store.online() and store.known()
 
 
+def test_a_claimed_request_whose_tool_went_away_is_swept_with_its_result(tmp_path):
+    now = [1000.0]
+    store = store_mod.PcControlStore(tmp_path, clock=lambda: now[0])
+    store.note_computer(PC, "Asuka", "windows")
+    request = store.add_request(PC, SESSION, "A", "capture", {})
+    assert store.claim(PC)
+    assert store.answer(request["id"], {"ok": True, "image": "aGk="}, computer=PC)
+    now[0] += store_mod.STALE_S + 1
+    store.has_waiting(PC)
+    assert not list((store.root / "requests").iterdir())
+    assert not list((store.root / "results").iterdir())
+
+
 def test_no_answer_in_time_drops_the_request(store, monkeypatch):
     store.note_computer(PC, "Asuka", "windows")
     monkeypatch.setattr(tool, "ASK_WAIT_S", 0.05)
@@ -191,6 +204,8 @@ def test_screenshot_comes_back_as_an_image_with_elements(store):
     ({"action": "type", "text": ""}, "needs text"),
     ({"action": "drag", "from_element": 1}, "drag needs"),
     ({"action": "launch_app"}, "needs app"),
+    ({"action": "wait", "seconds": "about 5"}, "seconds is a number"),
+    ({"action": "wait", "seconds": -1}, "seconds is a number"),
     ({"action": "explode"}, "action must be"),
 ])
 def test_bad_args_never_reach_the_computer(store, args, fragment):
