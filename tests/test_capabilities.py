@@ -69,6 +69,7 @@ def test_every_capability_names_a_served_route_family():
         "turn-surface-windows": "/turn-surface",
         "history-page": "/sessions/history-page",
         "session-usage": "/sessions/usage",
+        "reply-speeds": "/sessions/reply-speeds",
         "chat-kanban-tasks": "/sessions/kanban-tasks",
         "chat-live-work": "/sessions/live-work",
         "chat-done": "/chats/done",
