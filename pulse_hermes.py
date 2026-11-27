@@ -91,8 +91,8 @@ def typed(content: Any) -> Any:
 # LCM_SUMMARY_HEADER, the same shape), which a compaction carries forward as
 # a fresh row; a row it merged with keeps its own copy. Read as the user
 # writing, an 88,000-character summary of old arcs passed for today's chat.
-_SUMMARY_HEADS = ("[[]Recent Summary (d[0-9]*", "[[]Session Arc Summary (d[0-9]*", "[[]Durable Summary (d[0-9]*",
-                  "[[]Depth-[0-9]* Summary (d[0-9]*")
+_SUMMARY_HEADS = tuple(f"[[]{label} Summary (d[0-9]*, node [0-9]*)]*"
+                       for label in ("Recent", "Session Arc", "Durable", "Depth-[0-9]*"))
 _HERMES_SUMMARY_HEADS = ("[[]CONTEXT COMPACTION*", "[[]CONTEXT SUMMARY]:*")
 _SUMMARY_END = "END OF CONTEXT SUMMARY"
 
@@ -104,6 +104,30 @@ def _not_summary(alias: str = "") -> str:
     lcm = " OR ".join(f"{head} GLOB '{glob}'" for glob in _SUMMARY_HEADS)
     hermes = " OR ".join(f"{head} GLOB '{glob}'" for glob in _HERMES_SUMMARY_HEADS)
     return (f"NOT ({role} = 'user' AND ({lcm} OR (({hermes}) AND instr({content}, '{_SUMMARY_END}') = 0)))")
+
+
+# Hermes' compaction folds its summary into the first row it keeps when no
+# role alternates (agent/context_compressor.py, _merge_summary_into_tail_row):
+# the user's words between a header and a delimiter with the summary after,
+# or the summary, an end marker and the user's words (artifacts_index reads
+# the same shapes, held equal by upstream/test_cron_bot_chat.py).
+_MERGED_PRIOR_HEADER = "[PRIOR CONTEXT \u2014 for reference only; not a new message]"
+_MERGED_SUMMARY_DELIMITER = "[END OF PRIOR CONTEXT \u2014 COMPACTION SUMMARY BELOW]"
+_SUMMARY_END_MARKER = "--- END OF CONTEXT SUMMARY \u2014 respond to the message below, not the summary above ---"
+
+
+def _shown(alias: str = "") -> str:
+    """SQL: the row's ``content`` (``alias``-qualified), a user row's without
+    the summary a compaction folded into it, so a cut from its head reads the
+    user's words."""
+    content, role, blank = f"{alias}content", f"{alias}role", "' ' || char(9, 10, 13)"
+    header, delimiter, end = len(_MERGED_PRIOR_HEADER), _MERGED_SUMMARY_DELIMITER, _SUMMARY_END_MARKER
+    return (f"(CASE WHEN {role} = 'user' AND substr({content}, 1, {header}) = '{_MERGED_PRIOR_HEADER}' "
+            f"AND instr({content}, '{delimiter}') > 0 "
+            f"THEN trim(substr({content}, {header + 1}, instr({content}, '{delimiter}') - {header + 1}), {blank}) "
+            f"WHEN {role} = 'user' AND instr({content}, '{end}') > 0 "
+            f"THEN ltrim(substr({content}, instr({content}, '{end}') + {len(end)}), {blank}) "
+            f"ELSE {content} END)")
 
 
 def _row(cursor: sqlite3.Cursor, values: tuple) -> sqlite3.Row:
@@ -294,7 +318,7 @@ def recent_messages(home: Path, *, exclude_chat: str, since: float, max_chars: i
     chats, a bot's workstreams or hidden rows. The newest ``limit``, each cut to ``max_chars``,
     oldest first, with the chat's id and title."""
     return _run(home, (
-        _EXCLUDED + "SELECT * FROM (SELECT s.id AS chat_id, s.title, m.role, substr(m.content, 1, ?) AS content, "
+        _EXCLUDED + "SELECT * FROM (SELECT s.id AS chat_id, s.title, m.role, substr(" + _shown("m.") + ", 1, ?) AS content, "
         "m.timestamp, m.id FROM messages m JOIN sessions s ON s.id = m.session_id "
         "WHERE m.timestamp >= ? AND " + _person_rows(home) + " "
         "ORDER BY m.timestamp DESC, m.id DESC LIMIT ?) ORDER BY timestamp, id"
@@ -322,7 +346,7 @@ def chat_messages(home: Path, *, chat_id: str, after_id: int, since: float, max_
     time ``since`` (up to ``until``), oldest first, each cut to ``max_chars``:
     the first ``limit`` of them, or with ``newest`` the last."""
     rows = _run(home, (
-        "SELECT id, role, substr(content, 1, ?) AS content, timestamp FROM messages "
+        "SELECT id, role, substr(" + _shown() + ", 1, ?) AS content, timestamp FROM messages "
         "WHERE session_id = ? AND id > ? AND timestamp > ? AND timestamp <= ? AND role IN ('user', 'assistant') "
         f"AND active = 1 AND display_kind IS NULL AND {_not_summary()} ORDER BY id {'DESC' if newest else ''} LIMIT ?"
     ), (max_chars, chat_id, after_id, since, float("inf") if until is None else until, limit))
@@ -340,7 +364,7 @@ def user_row_before(home: Path, *, chat_id: str, before_id: int, max_chars: int)
     """One chat's last visible user row before row ``before_id``, cut to
     ``max_chars``: the one Hermes's rows from there on answer."""
     rows = _run(home, (
-        "SELECT id, role, substr(content, 1, ?) AS content, timestamp FROM messages "
+        "SELECT id, role, substr(" + _shown() + ", 1, ?) AS content, timestamp FROM messages "
         "WHERE session_id = ? AND id < ? AND role = 'user' AND active = 1 AND display_kind IS NULL "
         "AND " + _not_summary() + " ORDER BY id DESC LIMIT 1"
     ), (max_chars, chat_id, before_id))
@@ -351,7 +375,7 @@ def user_text_after(home: Path, *, session_id: str, tag: str) -> list[str]:
     """What the user wrote after the user row carrying ``tag``, up to the
     next hidden (Pulse) row."""
     rows = _run(home, (
-        "SELECT role, content, display_kind FROM messages WHERE session_id = ? AND role = 'user' AND id > ("
+        "SELECT role, " + _shown() + " AS content, display_kind FROM messages WHERE session_id = ? AND role = 'user' AND id > ("
         "SELECT MAX(id) FROM messages WHERE session_id = ? AND role = 'user' AND instr(content, ?) > 0) "
         "AND " + _not_summary() + " ORDER BY id"
     ), (session_id, session_id, tag))
@@ -372,10 +396,10 @@ _LATER = (
     "UNION SELECT s.id, s.parent_session_id FROM sessions s JOIN up ON s.id = up.parent), "
     "excluded(id) AS (SELECT id FROM seed UNION SELECT id FROM up "
     "UNION SELECT s.id FROM sessions s JOIN excluded e ON s.parent_session_id = e.id) "
-    "SELECT s.id AS chat_id, s.title, s.source, m.role, substr(m.content, 1, ?) AS content, m.timestamp, m.id "
+    "SELECT s.id AS chat_id, s.title, s.source, m.role, substr(" + _shown("m.") + ", 1, ?) AS content, m.timestamp, m.id "
     "FROM messages m JOIN sessions s ON s.id = m.session_id "
     "WHERE m.timestamp > ? AND m.role IN ('user', 'assistant') AND m.active = 1 AND m.display_kind IS NULL "
-    "AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) AND " + _NOT_WORK + " "
+    "AND " + _not_summary("m.") + " AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) AND " + _NOT_WORK + " "
     "ORDER BY m.timestamp DESC, m.id DESC LIMIT ?")
 
 
@@ -470,9 +494,9 @@ def chain_messages(home: Path, *, chat_id: str, after_id: int, max_chars: int, l
     rows = _run(home, (
         "WITH RECURSIVE chain(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN chain c "
         "ON s.parent_session_id = c.id) "
-        "SELECT id, role, substr(content, 1, ?) AS content, timestamp FROM messages "
+        "SELECT id, role, substr(" + _shown() + ", 1, ?) AS content, timestamp FROM messages "
         "WHERE session_id IN (SELECT id FROM chain) AND id > ? AND role IN ('user', 'assistant') "
-        "AND active = 1 AND display_kind IS NULL " + (SAID if said else "") + "ORDER BY id DESC LIMIT ?"
+        "AND active = 1 AND display_kind IS NULL AND " + _not_summary() + " " + (SAID if said else "") + "ORDER BY id DESC LIMIT ?"
     ), (chat_id, max_chars, after_id, limit))
     return rows[::-1]
 
