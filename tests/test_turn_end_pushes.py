@@ -1174,6 +1174,50 @@ def test_a_chats_close_on_hermes_thread_stops_its_turn_in_the_chats_profile(home
     assert ended == [("stopped", "yelan")]
 
 
+def test_a_chat_muted_in_its_own_profile_stays_quiet_when_its_task_reports_off_turn(homes, pushed):
+    # Notifier issue 1109: the mute lives in the chat's home, not the launch profile's.
+    ambient, yelan, launch, seen = homes
+    ambient["home"] = yelan
+    plugin._pre_llm_call(session_id="p", turn_id="t")
+    plugin._on_session_end(session_id="p", turn_id="t", completed=True, failed=False, interrupted=False)
+    plugin.chat_mute.ChatMuteStore(yelan).set_mute(["p"], 3600)
+    pushed.clear(), seen.clear()
+    ambient["home"] = launch
+    _subagent()
+    assert pushed == [], "muted in Yelan's home"
+    plugin.chat_mute.ChatMuteStore(yelan).set_mute(["p"], 0)
+    _subagent(child="c2")
+    assert _types(pushed) == ["background_task.finished"] and seen == [yelan]
+
+
+def test_a_mute_carried_through_compaction_in_the_chats_profile_holds_off_turn(homes, pushed):
+    ambient, yelan, launch, _ = homes
+    _sessions_db(yelan, [("old", None, "compression", {}, "cli", 1, 10), ("p", "old", None, {}, "cli", 10, None)])
+    plugin.chat_mute.ChatMuteStore(yelan).set_mute(["old"], 3600)
+    ambient["home"] = yelan
+    plugin._pre_llm_call(session_id="p", turn_id="t")
+    plugin._on_session_end(session_id="p", turn_id="t", completed=True, failed=False, interrupted=False)
+    pushed.clear()
+    ambient["home"] = launch
+    _subagent()
+    assert pushed == [], "the lineage is in Yelan's state.db"
+
+
+def test_a_reply_sent_after_the_grace_is_sealed_under_the_chats_profile(homes, pushed, monkeypatch):
+    ambient, yelan, launch, seen = homes
+    later = []
+    monkeypatch.setattr(plugin, "_later", lambda delay, work: later.append(work))
+    ambient["home"] = yelan
+    plugin._pre_llm_call(session_id="p", turn_id="t")
+    plugin._post_llm_call(session_id="p", turn_id="t", assistant_response="Done.")
+    ambient["home"] = launch  # the plugin's timer thread
+    [work] = later
+    work()
+    [event] = pushed
+    assert event["type"] == "response.ready" and event["profile"] == "yelan"
+    assert seen == [yelan], "named Yelan, so sealed under Yelan's home"
+
+
 def test_a_chat_with_no_turn_seen_keeps_the_ambient_home(homes, pushed):
     ambient, yelan, launch, seen = homes
     _subagent(parent="never-seen", parent_turn="t9")

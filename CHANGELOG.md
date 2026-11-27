@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.202.5 (2026-11-27)
+
+### Fixes
+
+- On a dashboard with several profiles, a chat you muted in a profile other than the first could still notify you when a background task it started finished after its turn.
+- On a dashboard with several profiles, a reply sent late because Hermes never reported its turn's end could go out under the wrong profile's pairing.
+
 ## 0.202.4 (2026-11-27)
 
 ### Fixes
