@@ -392,4 +392,7 @@ def elsewhere(value: Any, moved: Optional[datetime], event_zone: Any) -> str:
     if original is None or moved is None or original.utcoffset() == moved.utcoffset():
         return ""
     name = event_zone.strip() if isinstance(event_zone, str) else ""
-    return name or "UTC" + original.strftime("%z")[:3] + ":" + original.strftime("%z")[3:]
+    if name:
+        return name
+    minutes = round(original.utcoffset().total_seconds() / 60)  # an offset with seconds rounds to its minute
+    return f"UTC{'-' if minutes < 0 else '+'}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
