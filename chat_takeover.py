@@ -301,6 +301,12 @@ def _detached_claim_check(server: Any, sid: str, session: Any, wanted: set, stat
     return lease, None
 
 
+# The lease id ``kept`` carries for a runtime whose check raised: a deliberate keep
+# names its lease's id (or None when the lease has none), so a failed check is
+# marked rather than read from a missing id.
+CHECK_FAILED = object()
+
+
 def release_detached_claims(session_ids: list, *, registry: Any, turn_marker: Any, home: Any,
                             server: Any = None, abandoned: Optional[threading.Event] = None,
                             kept: Optional[list] = None) -> list:
@@ -308,7 +314,8 @@ def release_detached_claims(session_ids: list, *, registry: Any, turn_marker: An
     attached to; the surfaces it let go of. Hermes' lease release takes the
     registry lock itself, so this runs before take_over_session takes it.
     ``kept``, when given, gets ``(runtime id, lease id, why)`` for each runtime
-    whose claim on the chat stays, for take_over_session's log."""
+    whose claim on the chat stays, for take_over_session's log (the lease id
+    is ``CHECK_FAILED`` when checking the runtime raised)."""
     server = _gateway() if server is None else server
     if server is None:
         if kept is not None:
@@ -355,7 +362,7 @@ def release_detached_claims(session_ids: list, *, registry: Any, turn_marker: An
         except Exception as exc:  # noqa: BLE001 — can't tell, so the claim stays
             logger.debug("Chat takeover: detached claim check failed for %r", sid, exc_info=True)
             if kept is not None:
-                kept.append((sid, None, f"checking it failed ({type(exc).__name__}: {exc})"))
+                kept.append((sid, CHECK_FAILED, f"checking it failed ({type(exc).__name__}: {exc})"))
     return surfaces
 
 
@@ -364,7 +371,7 @@ def _log_own_claims(own: list, kept: list, own_pid: int) -> None:
     answers same_host for it, and Conduit then tells the person the chat is
     open elsewhere (hermes-conduit#3381)."""
     gateway_missing = next((why for sid, _, why in kept if sid is None), None)
-    failed = [f"{sid!r}: {why}" for sid, held, why in kept if sid is not None and held is None]
+    failed = [f"{sid!r}: {why}" for sid, held, why in kept if sid is not None and held is CHECK_FAILED]
     for entry in own:
         metadata = entry.get("metadata")
         live = str((metadata.get("live_session_id") if isinstance(metadata, dict) else None)

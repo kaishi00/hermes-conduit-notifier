@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.205.6 (2026-11-27)
+
+### New and improved
+
+- Reply speed: saving each model call's speed no longer reads every kept turn on a busy host, and a chat's speeds stay on the right replies however the turns are handed over.
+
 ## 0.205.5 (2026-11-27)
 
 ### Fixes

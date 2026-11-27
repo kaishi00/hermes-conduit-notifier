@@ -156,6 +156,21 @@ def test_a_reply_belongs_to_one_turn():
     assert [reply["row_id"] for reply in speeds.replies(turns, [(7, 29.5)])] == [7, None]
 
 
+def test_turns_given_out_of_order_are_read_oldest_first():
+    turns = [{"started_at": 30.0, "ended_at": 40.0, "output_tokens": 100, "seconds": 2.0},
+             {"started_at": 10.0, "ended_at": 20.0, "output_tokens": 100, "seconds": 5.0}]
+    replies = speeds.replies(turns, [(7, 19.0), (8, 39.0)])
+    assert [(reply["row_id"], reply["tokens_per_s"]) for reply in replies] == [(7, 20.0), (8, 50.0)]
+
+
+def test_the_trim_has_an_index_on_the_turns_end(home):
+    store = speeds.ReplySpeedStore(home)
+    store.add_call("s", "a", 10.0, 12.0, None, {"output_tokens": 10})
+    with sqlite3.connect(store.path) as db:
+        names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert "turns_by_end" in names
+
+
 def test_the_turns_that_ended_longest_ago_go_first(home, monkeypatch):
     monkeypatch.setattr(speeds, "MAX_TURNS", 2)
     store = speeds.ReplySpeedStore(home)
