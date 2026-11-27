@@ -857,8 +857,10 @@ _turn_slots_lock = threading.Lock()
 
 
 def _turn_end_missed(session_id: str, turn_id: str, live: bool = True) -> None:
-    if _settle_ready(session_id, turn_id, "done") and live:
-        _quietly(live_activity.reporter.turn_ended, session_id, "done")
+    # On the plugin's own timer thread: the chat's home (_in_session_home).
+    with _in_session_home(session_id):
+        if _settle_ready(session_id, turn_id, "done") and live:
+            _quietly(live_activity.reporter.turn_ended, session_id, "done")
 
 
 def _hold_unnamed_end(session_id: str) -> None:
@@ -872,7 +874,8 @@ def _hold_unnamed_end(session_id: str) -> None:
             if _unnamed_ends.get(session_id, (None, None))[0] is not token:
                 return
             del _unnamed_ends[session_id]
-        _quietly(live_activity.reporter.turn_ended, session_id, "done")
+        with _in_session_home(session_id):
+            _quietly(live_activity.reporter.turn_ended, session_id, "done")
 
     # Registered before its timer starts, so a drop in between isn't lost.
     with _pending_lock:
@@ -893,7 +896,8 @@ def _hold_unnamed_end(session_id: str) -> None:
     # Far more chats than ever end at once: the oldest end now.
     for old_session, (_, old_timer) in overflow:
         _cancel(old_timer)
-        _quietly(live_activity.reporter.turn_ended, old_session, "done")
+        with _in_session_home(old_session):
+            _quietly(live_activity.reporter.turn_ended, old_session, "done")
 
 
 def _drop_unnamed_end(session_id: str) -> None:
@@ -922,12 +926,15 @@ def _settle_ready(session_id: str, turn_id: Any, outcome: str) -> bool:
 
 
 def _finish_ready(session_id: str, ready: dict[str, Any] | None, send: bool) -> None:
-    # A job the user asked to be called about (#449) ends here: the call
-    # request takes the place of the ready notification.
-    if calls.turn_ended(session_id, "done", profile=_current_profile(), fallback=ready):
-        return
-    if ready is not None and send:
-        enqueue(ready)
+    # In the chat's home: the grace timer, and another chat's turn sending
+    # the oldest held replies, send it from outside its turn (notifier issue 1109).
+    with _in_session_home(session_id):
+        # A job the user asked to be called about (#449) ends here: the call
+        # request takes the place of the ready notification.
+        if calls.turn_ended(session_id, "done", profile=_current_profile(), fallback=ready):
+            return
+        if ready is not None and send:
+            enqueue(ready)
 
 
 def _unload() -> None:
@@ -1452,6 +1459,14 @@ def _subagent_stop(**kwargs: Any) -> None:
     # run, where Hermes' delegation flag describes the child.
     # A gateway-owned run's chat (local-…) names its job only through the
     # turn that started the task.
+    # Its parent's home, not the launch profile's: this hook can run outside
+    # the turn's context, and whether it notifies (the chat's or its job's
+    # mute, its room) is read there too (notifier issues 1088, 1109).
+    with _in_session_home(parent):
+        _notify_background_task(parent, child, kwargs)
+
+
+def _notify_background_task(parent: str, child: str, kwargs: dict[str, Any]) -> None:
     slot, job = _started_slot(parent, kwargs.get("parent_turn_id"))
     if (_inside_parent_turn(parent, kwargs.get("parent_turn_id")) or _is_child_session(parent)
             or cron_runs.quiet(parent, None) or (job and cron_runs.muted(job)) or _automation_session(parent)
@@ -1466,21 +1481,19 @@ def _subagent_stop(**kwargs: Any) -> None:
     # One a turn in a room this Hermes hosts started opens the room.
     room = _home_room(parent)
     room_title = room[1] if room else ""
-    # Its parent's home, not the launch profile's: this hook can run outside the turn's context.
-    with _in_session_home(parent):
-        enqueue(push_event(
-            "background_task.finished",
-            identifier=event_id("subagent", kwargs.get("parent_turn_id"), child, status),
-            session_id=parent,
-            profile=_current_profile(),
-            profile_name=_bot_name(),
-            title=f"Task finished · {room_title}" if room_title else _titled("Task finished", parent),
-            title_label="background_task.finished" if finished else "",
-            session_title=room_title or _session_title(parent),
-            body=summary or ("" if finished else f"A delegated task {status}."),
-            room={"id": room[0]} if room else None,
-            slot=slot,
-        ))
+    enqueue(push_event(
+        "background_task.finished",
+        identifier=event_id("subagent", kwargs.get("parent_turn_id"), child, status),
+        session_id=parent,
+        profile=_current_profile(),
+        profile_name=_bot_name(),
+        title=f"Task finished · {room_title}" if room_title else _titled("Task finished", parent),
+        title_label="background_task.finished" if finished else "",
+        session_title=room_title or _session_title(parent),
+        body=summary or ("" if finished else f"A delegated task {status}."),
+        room={"id": room[0]} if room else None,
+        slot=slot,
+    ))
 
 
 # Hermes' voice-live delegation note starts with this; used when the running
