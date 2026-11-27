@@ -345,3 +345,51 @@ def refs_round(found: Yearly | Deadline, today: date) -> list[str]:
 
 def local_today(zone: tzinfo, now: float) -> date:
     return datetime.fromtimestamp(now, zone).date()
+
+
+def _offset_moment(value: Any) -> Optional[datetime]:
+    """An ISO moment with a time and an offset ("Z" too); None for a date
+    alone, a floating time with no offset, or anything else."""
+    text = value.strip() if isinstance(value, str) else ""
+    if "T" not in text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else None
+
+
+def in_zone(value: Any, zone: Optional[tzinfo]) -> Optional[datetime]:
+    """An ISO moment that carries an offset, as the same instant in ``zone``.
+
+    The phone keeps an event's start in the zone the event was made in (a
+    booking site's or an organizer's), not the phone's, so printing it as it
+    is reads hours off from what the calendar shows. None when there is no
+    zone, or the value is a date alone or a floating time with no offset:
+    those mean the same wall clock everywhere, so they are left as they are.
+    """
+    moment = _offset_moment(value) if zone is not None else None
+    return moment.astimezone(zone) if moment is not None else None
+
+
+def event_day(event: dict, zone: Optional[tzinfo]) -> str:
+    """The day ("2026-11-27") a calendar entry starts on in ``zone``: an early
+    hour in Tokyo is the evening before in Paris. An all-day entry is a date,
+    the same day wherever it's read (the phone may keep it as midnight with an
+    offset); so is a floating time, or one read with no zone: as written."""
+    start = event.get("start")
+    moved = None if event.get("all_day") else in_zone(start, zone)
+    return moved.date().isoformat() if moved is not None else str(start or "").strip()[:10]
+
+
+def elsewhere(value: Any, moved: Optional[datetime], event_zone: Any) -> str:
+    """Where an event was made, when its own clock (``value``, as the phone
+    keeps it) differs from ``moved`` (the same instant in the reader's zone),
+    so a converted time never leaves its reader guessing: the event's zone
+    name, else its offset ("UTC+09:00"). Empty when the clocks agree."""
+    original = _offset_moment(value)
+    if original is None or moved is None or original.utcoffset() == moved.utcoffset():
+        return ""
+    name = event_zone.strip() if isinstance(event_zone, str) else ""
+    return name or "UTC" + original.strftime("%z")[:3] + ":" + original.strftime("%z")[3:]

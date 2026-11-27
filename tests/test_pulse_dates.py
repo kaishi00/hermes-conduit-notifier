@@ -274,7 +274,8 @@ def test_the_model_words_the_dates_and_adds_what_needs_getting_ready_for(live):
     assert ("D2 [birthday] Sam's birthday (wife, one of the people the user picked in Conduit): Wednesday 28 "
             "October, in 14 days (turning 40). Bring it up today: two weeks ahead.") in text
     assert re.search(r"\n- v\d+ Sat 24 Oct, all day, to Sat 31 Oct: Kyoto \(\w+ calendar\)\n", text)
-    assert re.search(r"\n- v\d+ Fri 16 Oct 15:00: Dentist \(\w+ calendar\)\n", text)
+    # 15:00 London time, told in the look ahead's own zone (UTC here), as its header and its days are.
+    assert re.search(r"\n- v\d+ Fri 16 Oct 14:00 \(event set in Europe/London\): Dentist \(\w+ calendar\)\n", text)
     assert "- r1 Buy milk (due Thu 15 Oct 09:00)" in text and "File taxes" not in text  # due after the two weeks
     assert f"#{suit} [commitment] The user will pick up the suit before the trip. (due 2026-10-23)" in text
     assert f"#{wedding} " not in text.split("## What Pulse remembers")[-1]  # the dates' own section has it

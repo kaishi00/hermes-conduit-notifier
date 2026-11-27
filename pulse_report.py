@@ -325,9 +325,12 @@ def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
 def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]] = None,
                   events: Optional[dict[str, dict]] = None,
                   upcoming: Optional[list[dict]] = None,
-                  leave_out: Optional[Callable[[str, list[dict]], Collection[int]]] = None) -> tuple[str, Optional[str]]:
+                  leave_out: Optional[Callable[[str, list[dict]], Collection[int]]] = None,
+                  zone: Optional[tzinfo] = None) -> tuple[str, Optional[str]]:
     """Calendar and open reminders from the phone sync, and the phone's time
-    zone. Empty when Conduit shares neither. ``leave_out`` ("event" or
+    zone. Empty when Conduit shares neither. Each entry's start is told in
+    ``zone`` (the zone the report's own times use; the phone's when not given),
+    not in the zone the event was made in.  ``leave_out`` ("event" or
     "reminder", and those read) gives which of them to leave out, by their
     place in that list, as on cards already (ON_CARDS says how many). With ``reminders``, each open
     reminder gets a key ("r1"), and ``reminders`` maps it to the reminder;
@@ -347,6 +350,7 @@ def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]
             if opened is not None:
                 db, device = opened
                 zone_name = device.get("time_zone")
+                into = zone or (zone_for(zone_name) if zone_name else None)
                 found, _ = phone.events(db, device["id"], int(now), int(now + EVENTS_DAYS * 86400),
                                         limit=MAX_EVENTS)
                 if upcoming is not None:
@@ -365,8 +369,12 @@ def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]
                         key = f"v{len(events) + 1} "
                         events[key.strip()] = e
                     calendar = _clip(e.get("calendar"), 60)
-                    lines.append(f"- {key}{_clip(e.get('title'), 100)} ({e.get('start') or ''}"
+                    moment = None if e.get("all_day") else pulse_dates.in_zone(e.get("start"), into)
+                    made_in = pulse_dates.elsewhere(e.get("start"), moment, e.get("time_zone"))
+                    lines.append(f"- {key}{_clip(e.get('title'), 100)} "
+                                 f"({moment.isoformat() if moment else e.get('start') or ''}"
                                  f"{', all day' if e.get('all_day') else ''}"
+                                 f"{f'; event set in {made_in}' if made_in else ''}"
                                  f"{f'; {calendar} calendar' if calendar else ''})")
                 lines += [ON_CARDS.format(count=len(gone))] if gone else []
                 parts.append(f"## Calendar, the next {EVENTS_DAYS} days (phone synced {_ago(synced, now)})\n"
@@ -993,8 +1001,10 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
     upcoming: Optional[list[dict]] = [] if keyed else None
     jobs: Optional[dict[str, str]] = {} if keyed else None
     jobs_health: dict[str, str] = {}
-    phone, zone_name = phone_context(home, now, reminders=reminders, events=events, upcoming=upcoming)
-    zone_name = pulse_store.get("time_zone") or zone_name
+    chosen = pulse_store.get("time_zone")
+    phone, zone_name = phone_context(home, now, reminders=reminders, events=events, upcoming=upcoming,
+                                     zone=zone_for(chosen) if chosen else None)
+    zone_name = chosen or zone_name
     zone = zone_for(zone_name)
     others = read_homes(pulse_store, home)
     header = f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')} ({zone_name or 'host time'})"

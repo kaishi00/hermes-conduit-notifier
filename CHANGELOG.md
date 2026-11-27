@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.205.7 (2026-11-27)
+
+### Fixes
+
+- Pulse: an event made in another time zone (a booking site's, or an invitation from someone elsewhere) showed that zone's clock time in the morning brief and the look-ahead, hours off from your calendar. Its time is now told in your own zone, with where it was made noted beside it, in the follow-up checks too, and a card about it lands on the day it falls on for you.
+
 ## 0.205.6 (2026-11-27)
 
 ### New and improved
