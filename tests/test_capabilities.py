@@ -171,6 +171,7 @@ def test_every_capability_names_a_served_route_family():
         "artifact-pins": "/artifacts/pins",
         "workspace-files": "/workspace/",
         "workspace-resolve": "/workspace/resolve",
+        "workspace-resolve-folders": "/workspace/resolve",
         "workspace-copy": "/workspace/",
         "workspace-git": "/workspace/git/", "terminals": "/terminals",
         "workspace-preview": "/workspace/preview/",

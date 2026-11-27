@@ -2838,25 +2838,28 @@ through Hermes' `/api/fs/*` routes.
   seconds answers 504 and may still finish: read the folder again before
   repeating it, as Conduit does.
 
-- `GET …/workspace/resolve?path=…&session_id=…`: where a file a chat's reply
-  names by its name or a path inside a project (`AppState.swift`,
-  `docs/plan.md`) is. Pass each id the chat goes by. It tries the chat's
+- `GET …/workspace/resolve?path=…&session_id=…`: where a file or folder a
+  chat's reply names by its name or a path inside a project (`AppState.swift`,
+  `docs/plan.md`, `.agents/skills/my-skill/`) is. Pass each id the chat goes by. It tries the chat's
   working folder, then the top of its git repository (a project chat often
   works in a subfolder), then, for a chat with no folder recorded, the
   profile's `terminal.cwd` on a local terminal (where Hermes' file tools put
-  such a chat's relative paths), then the newest full path ending in that name that the
+  such a chat's relative paths), then the newest full path ending in that name (or, for a
+  folder, holding it, as a file written inside it does) that the
   chat's own tool calls, tool output and replies carry (a quoted path is
   read whole, spaces, brackets and apostrophes included, and never in
   pieces; an SSH profile, whose paths aren't checked, leaves such a path
   out), and answers with
   `path` (and `via`: `folder`, `chat`, or `absolute` for a full path
-  checked as it is), or `path: null` when none is a file on this host the
-  Folder would open (secret files and, on a hosted install, files outside
+  checked as it is) and `isDirectory`, or `path: null` when none is a file
+  or folder on this host the Folder would open (secret files and, on a hosted install, files outside
   its folder never are). Hidden sessions the chat came from aren't read. On
   an SSH profile the folder's join, else the newest path, is taken
   unchecked.
   Conduit asks when such a name is tapped, and opens the Folder there
-  (capability `workspace-resolve`, plugin 0.132+).
+  (capability `workspace-resolve`, plugin 0.132+; folders and `isDirectory`,
+  capability `workspace-resolve-folders`, plugin 0.205.4+). On an SSH profile
+  a folder is told by its trailing slash.
 
 Capability `workspace-files`. Conduit's own copy of the scope is a view, not a
 lock: Hermes' `/api/fs/*` routes already reach the home folder.
