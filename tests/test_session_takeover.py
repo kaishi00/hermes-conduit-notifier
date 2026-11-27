@@ -696,6 +696,47 @@ def test_a_claim_with_a_client_or_work_on_it_stays(tmp_path, case):
     assert gateway._sessions["sid"]["active_session_lease"] is lease
 
 
+@pytest.mark.parametrize("case, why", [
+    ("attached", "a client is attached to it"), ("running", "a turn is running on it"),
+    ("building", "its agent is still being built"), ("pending", "it is waiting on an answer (approval)"),
+    ("delegating", "delegated work is running from it"), ("writing", "it is writing its transcript"),
+    ("marked", "a turn marker says a turn is running"), ("closing", "the runtime is closing"),
+    ("gone", "no runtime in this process holds it any more"),
+])
+def test_a_kept_own_claim_says_why_in_the_log(tmp_path, caplog, case, why):
+    """#3381: same_host tells the person the chat is open elsewhere, so the
+    log says what kept this process's claim, and which plugin build said so."""
+    import logging
+    import threading
+    registry = FakeRegistry(tmp_path)
+    gateway = FakeGateway(pending={"sid"} if case == "pending" else (),
+                          delegating={"sid"} if case == "delegating" else (),
+                          writing={"chat"} if case == "writing" else ())
+    entry = _entry("chat", pid=OWN_PID, lease="lease-own")
+    entry["metadata"] = {"live_session_id": "sid"}
+    _seed(tmp_path, [entry])
+    fields = {"attached": {"transport": LIVE}, "running": {"running": True},
+              "building": {"agent_ready": threading.Event()}, "closing": {"_closing": True}}.get(case, {})
+    if case != "gone":
+        _runtime(gateway, registry, tmp_path, "sid", "chat", **fields)
+    marker = FakeTurnMarker({"chat": {"writer_pid": OWN_PID}}) if case == "marked" else None
+    with caplog.at_level(logging.INFO):
+        assert _take_with(tmp_path, ["chat"], gateway, registry, marker)["status"] == "same_host"
+    lines = [r.getMessage() for r in caplog.records if "kept this process's claim" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert f": {why} (plugin " in lines[0] and "'sid'" in lines[0], lines[0]
+    assert "(plugin unknown" not in lines[0]
+
+
+def test_a_kept_own_claim_without_the_gateway_says_so(tmp_path, caplog):
+    import logging
+    _seed(tmp_path, [_entry("chat", pid=OWN_PID, lease="lease-own")])
+    assert "tui_gateway.server" not in sys.modules
+    with caplog.at_level(logging.INFO):
+        assert _take(tmp_path, ["chat"])["status"] == "same_host"
+    assert any("Hermes' chat gateway isn't loaded in this process" in r.getMessage() for r in caplog.records)
+
+
 def test_a_runtime_that_turns_busy_before_the_release_keeps_its_claim(tmp_path):
     registry, gateway = FakeRegistry(tmp_path), FakeGateway()
     _seed(tmp_path, [_entry("chat", pid=OWN_PID, lease="lease-own")])

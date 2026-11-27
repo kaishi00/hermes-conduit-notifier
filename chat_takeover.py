@@ -31,6 +31,23 @@ TURN_MARKER_SURFACES = frozenset({"desktop", "tui"})
 _in_process = sys.__dict__.setdefault("_conduit_chat_takeover_lock", threading.Lock())
 
 
+def _loaded_version() -> str:
+    """plugin.yaml's version as this copy of the module was imported, for the
+    log: a process keeps the code it imported until it restarts."""
+    try:
+        with open(Path(__file__).with_name("plugin.yaml"), encoding="utf-8") as handle:
+            for line in handle:
+                key, _, value = line.partition(":")
+                if key.strip() == "version":
+                    return value.strip().strip("\"'") or "unknown"
+    except (OSError, UnicodeDecodeError):
+        pass
+    return "unknown"
+
+
+LOADED_VERSION = _loaded_version()
+
+
 class TakeoverError(Exception):
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
@@ -243,48 +260,66 @@ def _same_path(a: Any, b: Any) -> bool:
         return False
 
 
+def _detached_claim_check(server: Any, sid: str, session: Any, wanted: set, state_path: Any,
+                          turn_marker: Any, home: Any) -> tuple[Any, Optional[str]]:
+    """A runtime in this process against this chat's claim: ``(None, None)``
+    when it holds no claim on it, ``(lease, None)`` when it holds one with no
+    client and nothing running (it can be let go), and ``(lease, why)`` when
+    it holds one that stays, ``why`` saying what keeps it for the log."""
+    if not isinstance(session, dict):
+        return None, None
+    lease = session.get("active_session_lease")
+    if lease is None or not getattr(lease, "enabled", False) or getattr(lease, "released", True):
+        return None, None
+    key = str(session.get("session_key") or "")
+    if str(getattr(lease, "session_id", "") or "") not in wanted and key not in wanted:
+        return None, None
+    lease_path = getattr(lease, "state_path", None)
+    if lease_path is not None and not _same_path(lease_path, state_path):
+        return None, None  # another profile's registry: not the claim this takeover reads
+    if session.get("_finalized") or session.get("_closing"):
+        return lease, "the runtime is closing"
+    if not server._transport_is_dead(session.get("transport")):
+        return lease, "a client is attached to it"
+    if session.get("running") or session.get("_compute_host_turn_id"):
+        return lease, "a turn is running on it"
+    ready = session.get("agent_ready")
+    if ready is not None and callable(getattr(ready, "is_set", None)) and not ready.is_set():
+        return lease, "its agent is still being built"
+    pending = server._session_pending_kind(sid)
+    if pending:
+        return lease, f"it is waiting on an answer ({pending})"
+    delegations = getattr(server, "_session_has_active_delegations", None)
+    if callable(delegations) and delegations(sid, session):
+        return lease, "delegated work is running from it"
+    writing = getattr(server, "_session_holds_transcript_claim", None)
+    if callable(writing) and writing(session, time.time()):
+        return lease, "it is writing its transcript"
+    root = session.get("profile_home") or home
+    if _owner_turn_running(turn_marker, root, {"session_id": key or getattr(lease, "session_id", "")}, sorted(wanted)):
+        return lease, "a turn marker says a turn is running"
+    return lease, None
+
+
 def _detached_idle_claim(server: Any, sid: str, session: Any, wanted: set, state_path: Any,
                          turn_marker: Any, home: Any) -> Any:
     """The claim of a runtime in this process with no client and nothing running, on this chat, or None."""
-    if not isinstance(session, dict) or session.get("_finalized") or session.get("_closing"):
-        return None
-    lease = session.get("active_session_lease")
-    if lease is None or not getattr(lease, "enabled", False) or getattr(lease, "released", True):
-        return None
-    key = str(session.get("session_key") or "")
-    if str(getattr(lease, "session_id", "") or "") not in wanted and key not in wanted:
-        return None
-    lease_path = getattr(lease, "state_path", None)
-    if lease_path is not None and not _same_path(lease_path, state_path):
-        return None  # another profile's registry: not the claim this takeover reads
-    if not server._transport_is_dead(session.get("transport")):
-        return None
-    if session.get("running") or session.get("_compute_host_turn_id"):
-        return None
-    ready = session.get("agent_ready")
-    if ready is not None and callable(getattr(ready, "is_set", None)) and not ready.is_set():
-        return None
-    if server._session_pending_kind(sid):
-        return None
-    delegations = getattr(server, "_session_has_active_delegations", None)
-    if callable(delegations) and delegations(sid, session):
-        return None
-    writing = getattr(server, "_session_holds_transcript_claim", None)
-    if callable(writing) and writing(session, time.time()):
-        return None
-    root = session.get("profile_home") or home
-    if _owner_turn_running(turn_marker, root, {"session_id": key or getattr(lease, "session_id", "")}, sorted(wanted)):
-        return None
-    return lease
+    lease, why = _detached_claim_check(server, sid, session, wanted, state_path, turn_marker, home)
+    return lease if why is None else None
 
 
 def release_detached_claims(session_ids: list, *, registry: Any, turn_marker: Any, home: Any,
-                            server: Any = None, abandoned: Optional[threading.Event] = None) -> list:
+                            server: Any = None, abandoned: Optional[threading.Event] = None,
+                            kept: Optional[list] = None) -> list:
     """Lets go of this process's claims on the chat held by runtimes nobody is
     attached to; the surfaces it let go of. Hermes' lease release takes the
-    registry lock itself, so this runs before take_over_session takes it."""
+    registry lock itself, so this runs before take_over_session takes it.
+    ``kept``, when given, gets ``(runtime id, lease id, why)`` for each runtime
+    whose claim on the chat stays, for take_over_session's log."""
     server = _gateway() if server is None else server
     if server is None:
+        if kept is not None:
+            kept.append((None, None, "Hermes' chat gateway isn't loaded in this process"))
         return []
     wanted = {str(value) for value in session_ids if str(value)}
     state_path = registry._lease_paths(registry_home=home)[0]
@@ -293,20 +328,29 @@ def release_detached_claims(session_ids: list, *, registry: Any, turn_marker: An
     surfaces = []
     for sid, session in runtimes:
         try:
-            if _detached_idle_claim(server, sid, session, wanted, state_path, turn_marker, home) is None:
+            lease, why = _detached_claim_check(server, sid, session, wanted, state_path, turn_marker, home)
+            if lease is None:
+                continue
+            if why is None and session.get("history_lock") is None:
+                why = "the runtime has no history lock to release it under"
+            if why is not None:
+                if kept is not None:
+                    kept.append((sid, getattr(lease, "lease_id", None), why))
                 continue
             lock = session.get("history_lock")
-            if lock is None:
-                continue
             # _in_process first, as take_over_session takes it before the registry lock: Hermes' file
             # lock may not exclude this process's other takeover threads from the release's write.
             with _in_process, lock:  # a turn's admission and Hermes' own release take history_lock too
                 if abandoned is not None and abandoned.is_set():
                     raise TakeoverError(504, "Chat takeover timed out")
-                lease = _detached_idle_claim(server, sid, session, wanted, state_path, turn_marker, home)
-                if lease is None or server._sessions.get(sid) is not session:
-                    continue
-                if not server._release_active_session_slot(session):
+                lease, why = _detached_claim_check(server, sid, session, wanted, state_path, turn_marker, home)
+                if lease is not None and why is None and server._sessions.get(sid) is not session:
+                    why = "the runtime was replaced while the takeover looked"
+                if lease is not None and why is None and not server._release_active_session_slot(session):
+                    why = "Hermes refused to release it"
+                if lease is None or why is not None:
+                    if lease is not None and kept is not None:
+                        kept.append((sid, getattr(lease, "lease_id", None), why))
                     continue
                 session["_lease_idle_released"] = sid  # off-turn writers re-claim first, as after an idle release
             surfaces.append(str(getattr(lease, "surface", "") or session.get("source") or ""))
@@ -314,9 +358,30 @@ def release_detached_claims(session_ids: list, *, registry: Any, turn_marker: An
                         " (hermes-conduit#3125)", getattr(lease, "session_id", None), sid)
         except TakeoverError:
             raise
-        except Exception:  # noqa: BLE001 — can't tell, so the claim stays
+        except Exception as exc:  # noqa: BLE001 — can't tell, so the claim stays
             logger.debug("Chat takeover: detached claim check failed for %r", sid, exc_info=True)
+            if kept is not None:
+                kept.append((sid, None, f"checking it failed ({type(exc).__name__}: {exc})"))
     return surfaces
+
+
+def _log_own_claims(own: list, kept: list, own_pid: int) -> None:
+    """Says, for each claim this process keeps, what keeps it: the takeover
+    answers same_host for it, and Conduit then tells the person the chat is
+    open elsewhere (hermes-conduit#3381)."""
+    gateway_missing = next((why for sid, _, why in kept if sid is None), None)
+    for entry in own:
+        live = str((entry.get("metadata") or {}).get("live_session_id") or entry.get("live_session_id") or "")
+        lease_id = entry.get("lease_id")
+        if _owner_pid(entry) != own_pid:
+            why = "the claim names no usable pid"
+        else:
+            why = gateway_missing or next(
+                (why for sid, held, why in kept if (live and sid == live) or (lease_id and held == lease_id)),
+                "no runtime in this process holds it any more")
+        logger.info("Chat takeover: kept this process's claim on chat %r (live session %r, surface %r): %s"
+                    " (plugin %s, pid %s; hermes-conduit#3381)", _entry_session_id(entry), live or None,
+                    entry.get("surface"), why, LOADED_VERSION, own_pid)
 
 
 def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, home: Any, by: str = "Conduit",
@@ -356,8 +421,9 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
         logger.info("Chat takeover: Hermes' gateway ledger holds chat %r (surface %r); nothing dropped",
                     session_ids, queued)
         return {"status": "busy", "surface": queued}
+    kept: list = []
     released = release_detached_claims(session_ids, registry=registry, turn_marker=turn_marker, home=home,
-                                       server=server, abandoned=abandoned)
+                                       server=server, abandoned=abandoned, kept=kept)
     state_path, lock_path = registry._lease_paths(registry_home=home)
     def check_abandoned() -> None:
         if abandoned is not None and abandoned.is_set():
@@ -385,6 +451,7 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
             pid = _owner_pid(entry)
             (foreign if pid > 0 and pid != own_pid else own).append(entry)
         if not foreign:
+            _log_own_claims(own, kept, own_pid)
             return {"status": "same_host", "surface": str(own[0].get("surface") or "")}
         # A dead owner is dropped like Hermes' own prune would, unless a
         # live writer is still running its turn; unknown liveness counts as live.
@@ -397,6 +464,7 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
             # This dashboard's own claim would refuse the send anyway, so say
             # that rather than have Conduit wait on a worker it can't outlast.
             if own:
+                _log_own_claims(own, kept, own_pid)
                 return {"status": "same_host", "surface": str(own[0].get("surface") or "")}
             return {"status": "busy", "surface": str(unmarked[0].get("surface") or "")}
         if any(_owner_turn_running(turn_marker, home, entry, session_ids, owner_dead=id(entry) in dead)
@@ -409,5 +477,6 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
                 by, session_ids, len(foreign), sorted({str(entry.get("surface") or "") for entry in foreign}))
     if own:
         # This dashboard still holds one of the ids, so a send can still be refused.
+        _log_own_claims(own, kept, own_pid)
         return {"status": "same_host", "surface": str(own[0].get("surface") or "")}
     return {"status": "taken_over", "surface": surface}

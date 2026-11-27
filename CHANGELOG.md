@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.202.7 (2026-11-27)
+
+### Fixes
+
+- When Conduit says a chat is open on another device but you have it open nowhere else, the Hermes dashboard's log now says what is keeping the chat and which plugin version is running, so the cause can be found.
+
 ## 0.202.6 (2026-11-27)
 
 ### Fixes
