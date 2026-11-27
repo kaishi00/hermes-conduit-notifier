@@ -775,9 +775,12 @@ routes:
   - POST /pair
   - POST /pair/main
   - POST /pair/remove
+  - GET /pc/ask
+  - POST /pc/ask
   - DELETE /pc/computer
   - GET /pc/next
   - POST /pc/result
+  - GET /pc/state
   - POST /pc/stop
   - GET /personality
   - POST /phone/exchange

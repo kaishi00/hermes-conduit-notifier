@@ -376,6 +376,10 @@ ROUTE_CAPABILITIES = (
     # on a computer runs a bot's conduit_user_computer actions there
     # (Control from Hermes).
     "pc-control",
+    # GET/POST /pc/ask, GET /pc/state: a computer's ask goes to the phone as
+    # a confirm prompt too (first answer counts), and the phone shows which
+    # chat is controlling which computer, with Stop (Control from Hermes).
+    "pc-asks",
     # POST /workstreams/call-ended: a call kept with the Bot Chat ended in
     # any voice mode, so the updates its workstreams held go out.
     "work-call-ended",

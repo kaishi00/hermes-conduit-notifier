@@ -95,6 +95,15 @@ MAX_ROOM_NAME_CHARS = 80
 # asks, under their caps; link_asks keeps each Link's budget.
 LINK_ASK_FEATURE = "link-asks"
 MAX_LINK_ID_CHARS = 48
+# A computer's ask (pc_control_tool, Control from Hermes): a chat's first
+# action on the user's computer asks whether that chat may drive it, on the
+# computer and on every Conduit that exchanges here, and the first answer
+# counts (settle_pc). Only a Conduit that says it shows them gets one (Allow,
+# Don't Allow, no Edit); on the computer it's about, Conduit leaves it to its
+# own dialog.
+PC_ASK_FEATURE = "pc-asks"
+PC_ASK_TTL_MINUTES = 3
+MAX_PC_ID_CHARS = 64
 
 MAX_TITLE_CHARS = 80
 MAX_PREVIEW_CHARS = 2000
@@ -226,7 +235,8 @@ class PresentStore:
                      and (not prompt.get("maps") or NAVIGATE_FEATURE in device["features"])
                      and (not prompt.get("room") or ROOM_ASK_FEATURE in device["features"])
                      and (not prompt.get("room", {}).get("work") or ROOM_WORK_FEATURE in device["features"])
-                     and (not prompt.get("link") or LINK_ASK_FEATURE in device["features"])]
+                     and (not prompt.get("link") or LINK_ASK_FEATURE in device["features"])
+                     and (not prompt.get("pc") or PC_ASK_FEATURE in device["features"])]
             # Each the newest within its own cap: a room's or a Link's asks never push the owner's own prompts off
             # the phone.
             kept = {prompt["id"] for prompt in [prompt for prompt in shown if not _elsewhere(prompt)][-MAX_WAITING:]
@@ -285,8 +295,8 @@ class PresentStore:
 
     def _keep(self, title: Any, preview: Any, action_label: Any = None, *, spoken_yes: Any = None,
               session_id: Any = None, ttl_minutes: Any = None, maps: Any = None,
-              room: dict[str, str] | None = None, link: dict[str, Any] | None = None
-              ) -> tuple[dict[str, Any], bool]:
+              room: dict[str, str] | None = None, link: dict[str, Any] | None = None,
+              pc: dict[str, str] | None = None) -> tuple[dict[str, Any], bool]:
         """A prompt kept for the phone, and whether it's new: a room's ask
         whose question is still waiting in that room is returned instead.
         Everything is checked and kept under one lock."""
@@ -352,13 +362,22 @@ class PresentStore:
             elif not state["devices"]:
                 raise PresentError("no_device", "No Conduit that shows confirm prompts has connected to this "
                                                 "Hermes profile yet.")
+            elif pc is not None:
+                if not any(PC_ASK_FEATURE in device.get("features", []) and now - device["seen_at"]
+                           < CARD_DEVICE_RECENT_S for device in state["devices"].values()):
+                    raise PresentError("no_device", "No Conduit that shows a computer's asks has connected to this "
+                                                    "Hermes profile recently.")
+                # Its own cap, with a room's asks: a chat asks once and waits for the answer.
+                if sum(prompt["status"] == "waiting" and _elsewhere(prompt) for prompt in state["prompts"]) \
+                        >= MAX_ROOM_ASKS_SHOWN:
+                    raise PresentError("too_many", f"{MAX_ROOM_ASKS_SHOWN} asks are still waiting.")
             else:
                 recent = [at for at in state["asked"] if now - at < HOUR_S]
                 if len(recent) >= PER_HOUR:
                     raise PresentError("rate_limited", "Too many confirm prompts this hour. Ask the user in chat "
                                                        "instead.")
             # A room's asks have their own caps, so they never crowd out the owner's own prompts.
-            if room is None and link is None and sum(prompt["status"] == "waiting" and not _elsewhere(prompt)
+            if room is None and link is None and pc is None and sum(prompt["status"] == "waiting" and not _elsewhere(prompt)
                                                      for prompt in state["prompts"]) >= MAX_WAITING:
                 raise PresentError("too_many", "Too many prompts are still waiting. Cancel ones you no longer need.")
             created = int(now)
@@ -374,11 +393,13 @@ class PresentStore:
                 prompt["room"] = room
             if link is not None:
                 prompt["link"] = link
+            if pc is not None:
+                prompt["pc"] = pc
             state["prompts"].append(prompt)
             _trim_prompts(state)
             if room is not None:
                 state["room_asked"][room["id"]] = (recent + [now])[-ROOM_ASKS_PER_HOUR:]
-            elif link is None:
+            elif link is None and pc is None:
                 state["asked"] = (recent + [now])[-PER_HOUR:]
             return _shown(prompt), True
 
@@ -453,6 +474,47 @@ class PresentStore:
             if outcome == "edit" and edit_text:
                 prompt["edit_text"] = _text(edit_text, MAX_EDIT_TEXT_CHARS)
             return True
+
+    def ask_pc(self, title: Any, preview: Any, *, pc: Any) -> dict[str, Any]:
+        """Keeps a computer's ask (pc_control_tool) for a Conduit that shows them: whether the chat may control the
+        computer as its title, which chat and what it can do as its preview. Raises PresentError when it won't (no
+        such Conduit connected recently)."""
+        kept = _pc(pc)
+        if kept is None:
+            raise PresentError("invalid", "A computer's ask needs the computer and the request.")
+        return self._keep(title, preview, "Allow", spoken_yes=["allow it"], ttl_minutes=PC_ASK_TTL_MINUTES,
+                          pc=kept)[0]
+
+    def pc_ask(self, prompt_id: Any) -> dict[str, Any] | None:
+        """A computer's ask as it stands, with its computer and request (``pc``). Only reads."""
+        prompt = _find(self._load(), prompt_id)
+        if prompt is None or not prompt.get("pc"):
+            return None
+        return {**_shown(prompt), "pc": prompt["pc"]}
+
+    def settle_pc(self, prompt_id: Any, allowed: bool, computer: str = "") -> str:
+        """The computer answered its own ask (its dialog): the first answer counts. The status after:
+        ``confirmed`` or ``declined`` (whoever answered first), ``expired`` or ``cancelled``, or ``gone``. With
+        ``computer``, only that computer's ask."""
+        with self._locked() as state:
+            prompt = _find(state, prompt_id)
+            if prompt is None or not prompt.get("pc") or (computer and prompt["pc"]["computer"] != computer):
+                return "gone"
+            if prompt["status"] == "waiting":
+                prompt.update(status="confirmed" if allowed else "declined", via="tap", finished_at=int(self.clock()),
+                              reported=True)
+            return _pc_status(prompt)
+
+    def withdraw_pc(self, prompt_id: Any) -> str:
+        """The chat's action was answered or given up on: its ask leaves every Conduit. The status after."""
+        with self._locked() as state:
+            prompt = _find(state, prompt_id)
+            if prompt is None or not prompt.get("pc"):
+                return "gone"
+            if prompt["status"] == "waiting":
+                prompt.update(status="cancelled", finished_at=int(self.clock()))
+            prompt["reported"] = True
+            return _pc_status(prompt)
 
     def room_answers(self, room_id: Any, work: bool = False) -> list[dict[str, Any]]:
         """The answered (or expired) asks of a room its agent hasn't heard
@@ -700,6 +762,8 @@ def _public(prompt: dict[str, Any]) -> dict[str, Any]:
         public["room"] = prompt["room"]
     if prompt.get("link"):
         public["link"] = prompt["link"]
+    if prompt.get("pc"):
+        public["pc"] = {key: prompt["pc"][key] for key in ("computer", "name", "bot")}
     return public
 
 
@@ -740,8 +804,27 @@ def _link(value: Any) -> dict[str, Any] | None:
 
 
 def _elsewhere(prompt: dict[str, Any]) -> bool:
-    """Whether a prompt is a room's or a Link's ask, which never reaches a private chat."""
-    return bool(prompt.get("room") or prompt.get("link"))
+    """Whether a prompt is a room's, a Link's or a computer's ask, which never reaches a private chat."""
+    return bool(prompt.get("room") or prompt.get("link") or prompt.get("pc"))
+
+
+def _pc(value: Any) -> dict[str, str] | None:
+    """A computer's ask's computer (its id and name), the bot asking and the request it holds up."""
+    if not isinstance(value, dict):
+        return None
+    ids = []
+    for key in ("computer", "request"):
+        item = value.get(key)
+        if not isinstance(item, str) or not item.strip() or len(item) > MAX_PC_ID_CHARS \
+                or _SESSION_KEY_CONTROL.search(item):
+            return None
+        ids.append(item.strip())
+    return {"computer": ids[0], "request": ids[1], "name": _line(value.get("name"), MAX_ROOM_NAME_CHARS) or "Computer",
+            "bot": _line(value.get("bot"), MAX_ROOM_NAME_CHARS)}
+
+
+def _pc_status(prompt: dict[str, Any]) -> str:
+    return prompt["status"] if prompt["status"] in ("waiting", "confirmed", "declined", "expired") else "cancelled"
 
 
 def _maps(value: Any) -> dict[str, str] | None:
@@ -795,11 +878,18 @@ def _take_result(state: dict[str, Any], installation: str, features: list[str], 
         return
     if prompt.get("link") and LINK_ASK_FEATURE not in features:
         return
+    if prompt.get("pc") and PC_ASK_FEATURE not in features:
+        return
     # Nothing to share on a question: only Say instead or Don't share.
     if prompt.get("link") and outcome == "confirmed" and not prompt["link"]["share"]:
         return
     # Conduit opens Maps by itself, and only as a yes to a Go prompt.
     if via == "auto" and (outcome != "confirmed" or not prompt.get("maps")):
+        return
+    if prompt.get("pc"):
+        # Only Allow lets the chat in; anything else is a no. Nobody reads it as an outcome.
+        prompt.update(status="confirmed" if outcome == "confirmed" else "declined", via=via, device=installation,
+                      finished_at=int(now), reported=True)
         return
     prompt.update(status=outcome, via=via, device=installation, finished_at=int(now), reported=False)
     if outcome == "edit":
@@ -887,6 +977,11 @@ def _prompt(raw: Any, now: float) -> dict[str, Any] | None:
         if link is None:
             return None
         prompt["link"] = link
+    if raw.get("pc") is not None:
+        pc = _pc(raw["pc"])
+        if pc is None:
+            return None
+        prompt["pc"] = pc
     if raw.get("via") in VIAS:
         prompt["via"] = raw["via"]
     edit_text = _text(raw.get("edit_text"), MAX_EDIT_TEXT_CHARS)
@@ -900,7 +995,8 @@ def _prompt(raw: Any, now: float) -> dict[str, Any] | None:
         prompt["finished_at"] = finished
     if status == "waiting" and now >= expires:
         # Nobody answered in time: the agent learns it as a no.
-        prompt.update(status="expired", finished_at=expires, reported=False)
+        # A computer's ask is read by its tool, never heard as an outcome.
+        prompt.update(status="expired", finished_at=expires, reported="pc" in prompt)
     if prompt["status"] != "waiting" and now - prompt.get("finished_at", expires) > FINISHED_TTL_S:
         return None
     return prompt

@@ -13,8 +13,10 @@ processes that share only this profile's home, so the queue is files under
 - ``results/<id>.json``: the computer's answer, read once by the waiting tool.
 - ``grants.json``: which chat each computer let in, and when it was last used.
   A computer is driven by one chat at a time: the user allows a chat once
-  (Eric 2026-11-27: ask once per chat), and allowing another chat takes it
-  over. Stop forgets the grant, so the next action asks again.
+  (Eric 2026-11-27: ask once per chat, on the computer or the phone), and
+  allowing another chat takes it over. Stop forgets the grant, so the next
+  action asks again, and notes when (``stopped``), so the computer's bar goes
+  when Stop was pressed elsewhere.
 
 Nothing here holds what was typed or seen beyond the one round trip: the
 request and result files are removed when the tool reads the answer, and the
@@ -56,6 +58,9 @@ ONLINE_S = 45.0
 KNOWN_S = 30 * 86400.0
 # A claimed request whose computer never answered is dropped after this.
 STALE_S = 300.0
+# A chat counts as controlling a computer while it acted this recently: the
+# computer's bar stays a minute after the last action.
+CONTROLLING_S = 60.0
 LOG_MAX_LINES = 500
 MAX_NAME_CHARS = 64
 MAX_TITLE_CHARS = 120
@@ -153,6 +158,29 @@ class PcControlStore:
             if isinstance(entry, dict) and entry.get("session") == session:
                 entry["used"] = self.clock()
 
+    def controlling(self) -> list[dict[str, Any]]:
+        """The computers a chat is controlling now: allowed and acting in the
+        last ``CONTROLLING_S`` seconds, with the computer's name and the chat."""
+        now = self.clock()
+        computers = self.computers()
+        state = self._read("grants.json")
+        found = []
+        for computer, entry in (state.get("computers") or {}).items():
+            if not isinstance(entry, dict) or entry.get("state") != "allowed" or computer not in computers:
+                continue
+            if now - float(entry.get("used") or 0) > CONTROLLING_S:
+                continue
+            found.append({"computer": computer, "name": clean_name(computers[computer].get("name")),
+                          "session": str(entry.get("session") or ""), "chat": str(entry.get("chat") or ""),
+                          "used": float(entry.get("used") or 0)})
+        return found
+
+    def stopped_at(self, computer: str) -> float:
+        """When Stop was last pressed for that computer, anywhere; 0 if never."""
+        stops = self._read("grants.json").get("stopped")
+        value = stops.get(computer) if isinstance(stops, dict) else None
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
     def stop(self, computer: str) -> int:
         """The user stopped control on that computer: the grant goes, and
         every action queued or under way is answered as stopped unless the
@@ -160,6 +188,12 @@ class PcControlStore:
         computer = clean_id(computer, "computer")
         with self._json("grants.json") as grants:
             (grants.get("computers") or {}).pop(computer, None)
+            stops = grants.get("stopped") if isinstance(grants.get("stopped"), dict) else {}
+            # Only computers still listed, so the file can't grow with ones long gone.
+            known = self.computers()
+            stops = {key: value for key, value in stops.items() if key in known}
+            stops[computer] = self.clock()
+            grants["stopped"] = stops
         stopped = 0
         folder = self._dir("requests")
         for request in self._requests(include_claimed=True):
@@ -185,10 +219,18 @@ class PcControlStore:
 
     # --- requests -------------------------------------------------------------
 
-    def add_request(self, computer: str, session: str, chat: str, action: str, args: dict[str, Any]) -> dict[str, Any]:
-        request = {"id": secrets.token_urlsafe(12), "computer": computer, "session": session,
+    @staticmethod
+    def new_id() -> str:
+        return secrets.token_urlsafe(12)
+
+    def add_request(self, computer: str, session: str, chat: str, action: str, args: dict[str, Any],
+                    request_id: str = "", ask: str = "") -> dict[str, Any]:
+        """``ask``: the phone's copy of the ask (present_store.ask_pc), which the computer's dialog follows."""
+        request = {"id": request_id or self.new_id(), "computer": computer, "session": session,
                    "chat": chat[:MAX_TITLE_CHARS], "action": action, "args": args, "at": self.clock(),
                    "needs_ok": self.needs_ok(computer, session)}
+        if ask and request["needs_ok"]:
+            request["ask"] = ask
         current = self.grant(computer)
         if request["needs_ok"] and current and current.get("state") == "allowed" \
                 and current.get("session") != session:

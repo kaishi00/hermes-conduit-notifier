@@ -203,7 +203,7 @@ def register(ctx: Any) -> None:
     # The user's own computer, driven through Conduit for desktop (Control
     # from Hermes): computer_use's actions, run there after the user allows
     # the chat on that computer.
-    pc_control_tool.register(ctx, is_child=_is_child)
+    pc_control_tool.register(ctx, is_child=_is_child, profile=_current_profile)
     # Apple Maps lookups the user's iPhone answers (search, directions,
     # travel times), on top of location sharing.
     maps_tool.register(ctx, is_child=_is_child, profile=_current_profile)

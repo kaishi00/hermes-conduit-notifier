@@ -3915,12 +3915,17 @@ The user is in charge on that computer:
 - Off until they turn on Control from Hermes in Conduit's Settings there, and
   only the bots they pick there can reach it (Conduit polls only their
   profiles).
-- The first action of each chat asks them there (Allow or Don't Allow). One
-  chat drives a computer at a time; allowing another chat takes it over, and
-  turning a chat down leaves the one that has it.
-- While a bot drives it, a bar on the screen says so, with Stop and a hotkey.
-  Stop answers every waiting action as stopped and forgets the chat's
-  permission, so its next action asks again.
+- The first action of each chat asks them there (Allow or Don't Allow) and,
+  from plugin 0.204, on their phone too: a confirm prompt with a notification,
+  on a Conduit that says it shows them (`pc-asks` in its present exchange's
+  features). The first answer counts; the computer reads the phone's copy
+  while its dialog is up and closes it. One chat drives a computer at a time;
+  allowing another chat takes it over, and turning a chat down leaves the one
+  that has it.
+- While a bot drives it, a bar on the screen says so, with Stop and a hotkey,
+  and Conduit on the phone says so in that chat, with Stop. Stop answers
+  every waiting action as stopped and forgets the chat's permission, so its
+  next action asks again; Stop on the phone takes the computer's bar away.
 
 The tool is listed once a computer offered control in the last 30 days, and
 says when none is online, when more than one is (the bot names one with
@@ -3933,10 +3938,15 @@ typed or seen); requests and answers are deleted once the tool reads them.
 | --- | --- | --- | --- |
 | GET | `/api/plugins/conduit_push/pc/next?computer=&name=&platform=&wait=&profile=` | | `{ok, requests: [{id, computer, session, chat, action, args, at, needs_ok, takes_over?}]}`: the actions waiting for this computer, held open up to `wait` seconds (25 at most) until one arrives; each call marks the computer online under `name` for 45 seconds |
 | POST | `/api/plugins/conduit_push/pc/result?profile=` | `{computer, id, result}` | `{ok, taken}`: `result` is `{ok, grant?: allowed\|denied, code?: denied\|stopped\|off\|..., message?, image?, mime?, width?, height?, window_title?, elements?: [{index, role, label, bounds}], apps?, windows?}`; at most 12 MB |
-| POST | `/api/plugins/conduit_push/pc/stop?profile=` | `{computer}` | `{ok, stopped}`: the user pressed Stop on that computer |
+| POST | `/api/plugins/conduit_push/pc/stop?profile=` | `{computer}` | `{ok, stopped}`: the user pressed Stop for that computer, there or on the phone; an open `/pc/next` then answers `stopped: true` |
 | DELETE | `/api/plugins/conduit_push/pc/computer?computer=&profile=` | | `{ok}`: control turned off there |
+| GET | `/api/plugins/conduit_push/pc/ask?computer=&id=&profile=` | | `{ok, status}`: the phone's copy of a request's ask (its `ask`): `waiting`, `allowed`, `denied`, `closed` or `gone` |
+| POST | `/api/plugins/conduit_push/pc/ask?profile=` | `{computer, id, answer: allowed\|denied}` | `{ok, status}`: the computer's own answer; the first answer counts, so the one that stands comes back |
+| GET | `/api/plugins/conduit_push/pc/state?profile=` | | `{ok, controlling: [{computer, name, session, chat, used}]}`: the chats that acted on a computer in the last minute |
 
-Capability `pc-control`.
+`/pc/next`'s requests carry `ask` (the prompt's id) when the phone was asked
+too, and its answer `stopped`. Capabilities `pc-control` and, from 0.204,
+`pc-asks`.
 
 ## Calendar, Reminders, Focus and phone status from Conduit (plugin 0.27+)
 

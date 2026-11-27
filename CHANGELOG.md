@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.204.0 (2026-11-27)
+
+### New and improved
+
+- Control from Hermes: when a bot asks to control your computer, your iPhone asks too, so you can allow it or turn it down from wherever you are; the first answer counts and the computer's own ask closes.
+- Control from Hermes: Conduit on your iPhone says which bot is controlling which computer, with Stop.
+
 ## 0.203.1 (2026-11-27)
 
 ### Fixes
