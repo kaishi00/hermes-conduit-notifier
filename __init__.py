@@ -1558,7 +1558,8 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         _drop_unnamed_end(session_id)
         if not forks.inside():
             # Every chat's turn, a workstream's too, has a step the bots lists can show (live_steps).
-            _quietly(live_steps.started, get_hermes_home(), session_id)
+            # The home lookup inside _quietly too: a hook never breaks the turn (issue 1104).
+            _quietly(lambda: live_steps.started(get_hermes_home(), session_id))
         # A workstream's hidden turn shows no Lock Screen progress, as Pulse's
         # doesn't; one that starts after its row settled (a follow-up queued
         # behind the last turn) puts it back to running.

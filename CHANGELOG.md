@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.202.3 (2026-11-27)
+
+### Fixes
+
+- An update from Conduit that got stuck after its download could keep every later Update answering with it until the dashboard restarted.
+- A turn could lose Conduit's context for the model (voice hints, shared phone data, work updates) when Hermes' home folder couldn't be read for its live step.
+
 ## 0.202.2 (2026-11-26)
 
 ### Fixes
