@@ -18,7 +18,7 @@ from hermes_constants import get_hermes_home
 
 from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_done_tool, chat_mute, chat_on_screen, clarify_loop, client, compaction_skip, conduit_first, cron_bot_chat, cron_runs,
                desktop_selected, forks, health_tool, inbox_tool, leaked_calls, link_ask_tool, link_asks, live_activity, live_steps,
-               location_tool, maps_tool, memory_scan, notify_tool, phone_tool, present_tool, profile_copies, pulse,
+               location_tool, maps_tool, memory_scan, notify_tool, pc_control_tool, phone_tool, present_tool, profile_copies, pulse,
                quiet_turns, reply_sources, review_notices,
                room_asks, room_chats, room_cleanup, room_cutoff, room_free_busy, room_identity, room_invites,
                room_memory, room_planner, room_posts, room_rules, room_tool,
@@ -200,6 +200,10 @@ def register(ctx: Any) -> None:
     # Where the user is, as Conduit shares it, with place rules and its skill.
     location_tool.register(ctx, is_child=_is_child, profile=_current_profile,
                            skill_path=Path(__file__).resolve().parent / "skills" / location_tool.SKILL_NAME / "SKILL.md")
+    # The user's own computer, driven through Conduit for desktop (Control
+    # from Hermes): computer_use's actions, run there after the user allows
+    # the chat on that computer.
+    pc_control_tool.register(ctx, is_child=_is_child)
     # Apple Maps lookups the user's iPhone answers (search, directions,
     # travel times), on top of location sharing.
     maps_tool.register(ctx, is_child=_is_child, profile=_current_profile)

@@ -78,6 +78,7 @@ def test_every_capability_names_a_served_route_family():
         "hermes-call-outcomes": "/calls/outcomes",
         "hermes-call-answers": "/calls/waiting",
         "call-rings": "/calls/rings",
+        "pc-control": "/pc/",
         "conduit-settings": "/conduit-settings",
         "conduit-prefs": "/conduit-prefs",
         "pulse": "/pulse",
