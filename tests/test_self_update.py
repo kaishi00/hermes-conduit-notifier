@@ -943,6 +943,29 @@ def test_pointing_profiles_that_never_returns_doesnt_hold_the_update(monkeypatch
     assert json.loads(path.read_text())["step"] == "restarting_dashboard"
 
 
+def test_a_dashboard_restarted_while_profiles_are_pointed_doesnt_read_the_update_done(monkeypatch, tmp_path):
+    # Review on #1110: the file written before pointing profiles carries no version yet, so a
+    # dashboard restarted in that window (loading the new plugin) fails the job rather than
+    # telling Conduit it's updated while the gateway still runs the old plugin.
+    import threading
+    release, left = threading.Event(), []
+    path = tmp_path / api.self_update.SELF_UPDATE_FILE
+    monkeypatch.setattr(api.capabilities, "_plugin_version", lambda: api.capabilities.LOADED_VERSION)
+
+    def point_profiles():
+        left.append(json.loads(path.read_text()))
+        release.set()
+
+    job = {"id": "j1", "step": "downloading", "boot_id": api.capabilities.BOOT_ID}
+    api.self_update._run_self_update(job, path, lambda: {"ok": True}, lambda draining: 0, lambda *a: None,
+                                     lambda: [tmp_path], lambda job: None, sleep=lambda s: None,
+                                     point_profiles=point_profiles, gateway_work=lambda: 0)
+    assert release.is_set() and left[0]["step"] == "restarting_gateway" and "version" not in left[0]
+    path.write_text(json.dumps({**left[0], "boot_id": "old", "pid": None}))
+    api.self_update.finish_self_update_after_restart(path, lambda job: None, delay=0)
+    assert json.loads(path.read_text())["step"] == "failed"
+
+
 def test_a_failure_pointing_profiles_still_fails_the_update(monkeypatch, tmp_path):
     path = tmp_path / "job.json"
     monkeypatch.setattr(api.capabilities, "_plugin_version", lambda: "9.9.9")

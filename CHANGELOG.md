@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.202.4 (2026-11-27)
+
+### Fixes
+
+- A dashboard restarted while an update pointed profiles at the new plugin could tell Conduit the update was done, though the gateway still ran the old plugin.
+
 ## 0.202.3 (2026-11-27)
 
 ### Fixes
