@@ -338,6 +338,9 @@ def test_only_the_bots_own_bot_chat_may_call_them(on, hermes):
     for session_id in (OTHER_CHAT, "", None):
         assert call("work_start", {"title": "x", "instructions": "y"}, session_id=session_id)["error"] == "not_bot_chat"
     assert on.list() == [] and hermes.calls == []
+    # Said so a bot that keeps it in memory doesn't take its other chats for coordinators (2026-11-27).
+    note = call("work_start", {"title": "x", "instructions": "y"}, session_id=OTHER_CHAT)["note"]
+    assert "isn't a coordinator" in note and "do the task here yourself" in note
 
 
 def test_a_subagent_or_fork_of_the_bot_chat_is_refused(on, hermes, monkeypatch):
@@ -2206,6 +2209,8 @@ def test_quick_hands_subagents_to_a_workstream(on, hermes):
     on.set_policy("lookups")
     block = work.tool_block(BOT_CHAT, "delegate_task", {}, turn_id="t1")
     assert block["message"] == work.POLICY_BLOCK.format(tool="delegate_task")
+    # Scoped to the Bot Chat, so a bot that keeps it in memory doesn't hold its other chats to it.
+    assert "in the Bot Chat" in block["message"] and "other chats run their tools themselves" in block["message"]
     assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t1") is None  # a refusal takes no step
     assert work._steps[(BOT_CHAT, "t1")][1] == 1
 
