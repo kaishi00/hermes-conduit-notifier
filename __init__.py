@@ -1372,6 +1372,12 @@ def _child_root(session_id: Any) -> str:
     its live step is kept under that."""
     value = _text(session_id)
     with _children_lock:
+        learned = value in _child_sessions or value in _compacted_children
+    if not learned:
+        # On a Hermes that says it's inside a delegated child, _is_child never read this id's lineage:
+        # read it now, so a compacted child's new id is learned once and found directly from then on.
+        _is_child_session(value)
+    with _children_lock:
         return _compacted_children.get(value, value)
 
 
