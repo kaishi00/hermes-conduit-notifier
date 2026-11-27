@@ -1403,6 +1403,7 @@ def _post_api_request(**kwargs: Any) -> None:
     if isinstance(usage, dict):
         _quietly(live_activity.reporter.context_used, session_id, usage.get("prompt_tokens"),
                  kwargs.get("context_length"))
+        _quietly(_update_plan_quota, session_id)
     # The reply's speed (reply_speed.py): this call's tokens and writing time
     # added to its turn's.
     try:
@@ -1411,6 +1412,62 @@ def _post_api_request(**kwargs: Any) -> None:
             kwargs.get("first_chunk_at"), usage)
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         logger.debug("conduit_push: couldn't keep the reply's speed", exc_info=True)
+
+
+# Module-level 429 backoff sentinel for _update_plan_quota.
+# Stores a monotonic timestamp before which we skip fetching to avoid hammering the usage endpoint.
+_plan_quota_backoff_until: float = 0.0
+
+
+def _update_plan_quota(session_id: str) -> None:
+    """Read the Anthropic OAuth usage endpoint (cached; at most one fetch per 2 min) and push
+    the 5-hour plan window remaining fraction to the live activity."""
+    global _plan_quota_backoff_until
+    try:
+        from agent.account_usage import fetch_account_usage
+        from agent.account_usage_cache import cached_account_usage, snapshot_is_stale
+
+        # Respect a 429 backoff: skip the fetch until the backoff period has elapsed.
+        if time.monotonic() < _plan_quota_backoff_until:
+            return
+
+        snapshot = cached_account_usage("anthropic")
+        if snapshot_is_stale(snapshot):
+            # Cache miss or stale — fetch now (network call, but fail-open and infrequent).
+            # Catch 429 before the broad handler so we can set the backoff sentinel.
+            import httpx as _httpx
+            try:
+                snapshot = fetch_account_usage("anthropic", read_only=False)
+            except _httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429:
+                    _plan_quota_backoff_until = time.monotonic() + 300
+                    logger.debug("conduit_push: plan quota 429 — backing off 5 min")
+                return
+            # Also handle a snapshot that carries a 429 in its unavailable_reason string.
+            if snapshot is not None and snapshot.unavailable_reason and \
+                    "429" in str(snapshot.unavailable_reason):
+                _plan_quota_backoff_until = time.monotonic() + 300
+                return
+        if snapshot is None or snapshot.unavailable_reason:
+            return
+        # Find the 5-hour (five_hour / "Current session") window.
+        five_hour = next(
+            (w for w in snapshot.windows
+             if "five" in w.label.lower() or "5" in w.label or "session" in w.label.lower()),
+            snapshot.windows[0] if snapshot.windows else None,
+        )
+        if five_hour is None or five_hour.used_percent is None:
+            return
+        left_fraction = max(0.0, min(1.0, 1.0 - five_hour.used_percent / 100.0))
+        resets_at_ms = None
+        if five_hour.reset_at is not None:
+            import calendar
+            resets_at_ms = int(calendar.timegm(five_hour.reset_at.timetuple()) * 1000)
+        live_activity.reporter.plan_quota_updated(session_id, left_fraction)
+        # Also stash the reset time on the turn for the widget to show "resets in Xh".
+        live_activity.reporter.plan_reset_updated(session_id, resets_at_ms)
+    except Exception:  # noqa: BLE001 — never break the turn
+        logger.debug("conduit_push: plan quota update failed", exc_info=True)
 
 
 def _pulse_note(session_id: str, turn_id: Any, user_message: Any) -> str | None:

@@ -136,7 +136,7 @@ def tool_category(name: Any) -> str:
 
 
 class _Turn:
-    __slots__ = ("phase", "tool", "tools", "context", "end", "dirty", "sent_at",
+    __slots__ = ("phase", "tool", "tools", "context", "plan_left", "plan_reset_ms", "end", "dirty", "sent_at",
                  "tracked", "touched_at", "started_at", "retry_at", "ended_at")
 
     def __init__(self, now: float) -> None:
@@ -144,6 +144,8 @@ class _Turn:
         self.tool: str | None = None
         self.tools = 0
         self.context: int | None = None
+        self.plan_left: int | None = None
+        self.plan_reset_ms: int | None = None
         self.end: str | None = None
         self.dirty = True
         self.sent_at = 0.0
@@ -250,6 +252,36 @@ class LiveActivityReporter:
         # Clamped before rounding: a huge ratio overflows to inf.
         ratio = min(used * 100 / limit, 100.0)
         self._update(session_id, context=max(0, round(ratio)))
+
+    def plan_quota_updated(self, session_id: str, left_fraction: Any) -> None:
+        """Update the 5-hour (or other window) plan allowance remaining.
+
+        ``left_fraction`` is 0.0–1.0 (1.0 = full, 0.0 = exhausted).
+        Sent as ``plan_left`` (0–100 int) in the live-activity payload so
+        Conduit can display it next to the context meter.
+        """
+        try:
+            frac = float(left_fraction)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not math.isfinite(frac):
+            return
+        plan_left = max(0, min(100, round(frac * 100)))
+        self._update(session_id, plan_left=plan_left)
+
+    def plan_reset_updated(self, session_id: str, reset_ms: Any) -> None:
+        """Update the epoch-ms timestamp when the plan window resets.
+
+        Sent as ``plan_reset_ms`` in the live-activity payload so Conduit
+        can show "resets in 2h" alongside the quota meter.
+        """
+        if reset_ms is None:
+            return
+        try:
+            ms = int(reset_ms)
+        except (TypeError, ValueError, OverflowError):
+            return
+        self._update(session_id, plan_reset_ms=ms)
 
     def has_running_turn(self, session_id: str) -> bool:
         """Whether a turn started for this session (or the one a compaction
@@ -448,7 +480,8 @@ class LiveActivityReporter:
         return session_id
 
     def _update(self, session_id: str, *, phase: str | None = None, tool: str | None | object = _UNSET,
-                context: int | None = None, count_tool: bool = False) -> None:
+                context: int | None = None, plan_left: int | None = None, plan_reset_ms: int | None = None,
+                count_tool: bool = False) -> None:
         if not session_id:
             return
         session_id = self._turn_id(session_id)
@@ -456,7 +489,7 @@ class LiveActivityReporter:
             turn = self._turns.get(session_id)
             if turn is None or turn.end is not None:
                 return
-            before = (turn.phase, turn.tool, turn.tools, turn.context)
+            before = (turn.phase, turn.tool, turn.tools, turn.context, turn.plan_left, turn.plan_reset_ms)
             if phase is not None:
                 turn.phase = phase
             if tool is not _UNSET:
@@ -465,8 +498,12 @@ class LiveActivityReporter:
                 turn.tools += 1
             if context is not None:
                 turn.context = context
+            if plan_left is not None:
+                turn.plan_left = plan_left
+            if plan_reset_ms is not None:
+                turn.plan_reset_ms = plan_reset_ms
             turn.touched_at = self._clock()
-            if (turn.phase, turn.tool, turn.tools, turn.context) != before:
+            if (turn.phase, turn.tool, turn.tools, turn.context, turn.plan_left, turn.plan_reset_ms) != before:
                 turn.dirty = True
                 self._changed()
 
@@ -539,6 +576,10 @@ def _payload(session_id: str, turn: _Turn, now: float) -> dict[str, Any]:
         state["tool"] = turn.tool
     if turn.context is not None:
         state["context"] = turn.context
+    if turn.plan_left is not None:
+        state["plan_left"] = turn.plan_left
+    if turn.plan_reset_ms is not None:
+        state["plan_reset_ms"] = turn.plan_reset_ms
     payload: dict[str, Any] = {"session_id": session_id, "state": state}
     if turn.end is not None:
         payload["end"] = turn.end

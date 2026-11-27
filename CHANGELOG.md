@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.206.0 (2026-11-27)
+
+### New and improved
+
+- The Live Activity now shows how much of your Claude plan's 5-hour window is left, next to the context meter, with the time it resets.
+
 ## 0.205.0 (2026-11-27)
 
 ### New and improved
