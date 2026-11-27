@@ -244,6 +244,9 @@ ROUTE_CAPABILITIES = (
     # GET /live-steps: each running chat's step (thinking, a tool's category, waiting), for the
     # bots lists (live_steps.py).
     "live-steps",
+    # GET /sessions/live-work: the open chat's turn running in the gateway (an API chat's, another
+    # app's), its step and delegate agents, and the messages queued behind it (live_work.py).
+    "chat-live-work",
     "room-files",
     # GET /room-files/data-url: a picture sent into a room, read back so
     # Conduit draws it instead of its file name.

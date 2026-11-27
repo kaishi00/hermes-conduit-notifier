@@ -312,6 +312,10 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
     child = _is_child(kwargs.get("session_id"))
     fork = forks.inside()
     if child and not fork:
+        # Its step shows under its parent's running turn (live_steps' agents).
+        _quietly(live_steps.agent_step, _child_root(kwargs.get("session_id")),
+                 "input" if kwargs.get("tool_name") == "clarify" else "tool",
+                 live_activity.tool_category(kwargs.get("tool_name")))
         # A delegated child drives the bot's screen as its parent does.
         return _screen_block(kwargs)
     # A Pulse turn may only look things up (pulse_tools). Fails closed:
@@ -1363,11 +1367,21 @@ def _post_approval_response(**kwargs: Any) -> None:
     _quietly(work_tool.answered, _text(kwargs.get("session_id")) or session_key)
 
 
+def _child_root(session_id: Any) -> str:
+    """The id ``subagent_start`` reported for a delegated child that a compaction moved to a new one:
+    its live step is kept under that."""
+    value = _text(session_id)
+    with _children_lock:
+        return _compacted_children.get(value, value)
+
+
 def _pre_api_request(**kwargs: Any) -> None:
     session_id = _text(kwargs.get("session_id"))
     if not _is_child(session_id):
         _quietly(live_activity.reporter.thinking, session_id)
         _quietly(live_steps.step, session_id, "thinking")
+    elif not forks.inside():
+        _quietly(live_steps.agent_step, _child_root(session_id), "thinking")
 
 
 def _post_api_request(**kwargs: Any) -> None:
@@ -1427,6 +1441,8 @@ def _subagent_start(**kwargs: Any) -> None:
     if child:
         with _children_lock:
             _child_sessions.add(child)
+    # It shows under its parent's running turn, for a chat opened in another app (live_steps).
+    _quietly(live_steps.agent_started, _text(kwargs.get("parent_session_id")), child, kwargs.get("child_goal"))
     # One a workstream started keeps it working past its own turn's end.
     _quietly(work_tool.agent_started, child, _text(kwargs.get("parent_session_id")),
              _text(kwargs.get("child_subagent_id")))
@@ -1457,6 +1473,8 @@ def _subagent_stop(**kwargs: Any) -> None:
                 del _compacted_children[learned]
     parent = _text(kwargs.get("parent_session_id"))
     _quietly(work_tool.agent_stopped, reported if child else "", parent)
+    if child:
+        _quietly(live_steps.agent_ended, reported)
     # A subagent that ends inside the turn that started it (delegate_task
     # waits for it) is part of that turn's reply: only one that outlives it,
     # a background task, notifies. Nor does a nested one, or a muted cron job's.
