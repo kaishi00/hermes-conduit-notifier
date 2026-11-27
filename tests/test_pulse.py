@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import socket
 import sqlite3
 import subprocess
@@ -2673,6 +2674,54 @@ def test_a_picture_turns_stored_context_is_not_the_users_words(db, tmp_path):
     assert hermes.typed("Look [screenshot] <memory-context> [System note: cut") == "Look [screenshot]"
     assert hermes.typed("hello\n[screenshot]") == "hello\n[screenshot]"
     assert hermes.typed(None) is None
+
+
+def test_a_chats_summary_is_not_the_users_words(db, tmp_path):
+    # A compaction carries a context engine's summary forward as a fresh
+    # user row (LCM-X's frontier on Furina's Bot Chat, 2026-11-26, 88,000
+    # characters of old arcs), and Hermes' own handoff stands alone as one:
+    # neither is anything the person wrote. A row Hermes merged its summary
+    # into keeps the user's words after the end marker, and a message that
+    # only quotes a header is the user's.
+    db.session()
+    db.session("work", title="Work", pinned=0)
+    lcm = ("[Session Arc Summary (d1, node 22)]\n# Summary: Homelab\n[Expand for details: about: mail]\n\n---\n\n"
+           "[Recent Summary (d0, node 40)]\nThe user asked about j1.\n[Expand for details: about: j1]")
+    db.message("user", lcm, sid="work", at=DAY + 10)
+    db.message("user", "  \n[Depth-3 Summary (d3, node 7)]\nOlder.\n[Expand for details: x]", sid="work", at=DAY + 11)
+    db.message("user", "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted.", sid="work", at=DAY + 12)
+    db.message("user", "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier.\n\n--- END OF CONTEXT SUMMARY — respond to "
+               "the message below, not the summary above ---\n\nWhy did j1 fail?", sid="work", at=DAY + 13)
+    db.message("user", "What does [Session Arc Summary (d1, node 22)] mean?", sid="work", at=DAY + 14)
+    db.message("assistant", "It's LCM-X's summary.", sid="work", at=DAY + 15)
+    db.message("user", "[PRIOR CONTEXT — for reference only; not a new message]\nAnd j2?\n\n[END OF PRIOR CONTEXT — "
+               "COMPACTION SUMMARY BELOW]\n\nEarlier they talked.", sid="work", at=DAY + 16)
+    shown = ["Why did j1 fail?", "What does [Session Arc Summary (d1, node", "It's LCM-X's summary.", "And j2?"]
+    rows = hermes.chat_messages(tmp_path, chat_id="work", after_id=0, since=0, max_chars=40, limit=10)
+    assert [r["content"] for r in rows] == shown
+    assert [r["content"] for r in hermes.chain_messages(tmp_path, chat_id="work", after_id=0, max_chars=40,
+                                                        limit=10)] == shown
+    assert [r["content"] for r in hermes.recent_messages(tmp_path, exclude_chat=SID, since=0, max_chars=40)] == shown
+    assert sorted(r["content"] for r in hermes.later_messages(tmp_path, after=0, exclude=[SID], max_chars=40,
+                                                              limit=10)) == sorted(shown)
+    assert [r["chars"] for r in hermes.chat_activity(tmp_path, exclude_chat=SID, since=0, max_chars=5)] == [20]
+    asked = hermes.user_row_before(tmp_path, chat_id="work", before_id=rows[2]["id"], max_chars=10)
+    assert asked["content"] == "What does "
+
+
+def test_pulse_tells_a_summary_by_the_same_header_as_the_other_readers():
+    # Pulse matches LCM-X's header in SQL; work_coord and artifacts_index by
+    # its regex. Both agree on every shape.
+    pattern = re.search(r'LCM_SUMMARY_HEADER = re\.compile\(r"(.*)"\)', (ROOT / "work_coord.py").read_text()).group(1)
+    samples = ["[Recent Summary (d0, node 342)]\nx", "[Session Arc Summary (d1, node 22)]\nx",
+               "[Durable Summary (d2, node 7)]\nx", "[Depth-12 Summary (d12, node 9001)]\nx",
+               "[Session Arc Summary quoted]\nx", "[Recent Summary (dx, node 1)]\nx",
+               "[Durable Summary (d2, notes)]\nx", "hello"]
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE messages (role, content)")
+    conn.executemany("INSERT INTO messages VALUES ('user', ?)", [(text,) for text in samples])
+    kept = {text for (text,) in conn.execute("SELECT content FROM messages WHERE " + hermes._not_summary())}
+    assert {text for text in samples if not re.match(pattern, text)} == kept
 
 
 @pytest.fixture

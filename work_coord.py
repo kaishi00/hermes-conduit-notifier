@@ -73,6 +73,13 @@ _HERMES_ROWS = ("[CONTEXT COMPACTION", "[CONTEXT SUMMARY]:",
                 "[IMPORTANT: Background process ", "[ASYNC COMPLETE", "[ASYNC DELEGATION", "[ASYNC BATCH",
                 "A background subagent you dispatched earlier has finished.",
                 "A background fan-out of ")
+# The summary a context engine plugin writes in place of Hermes' own: LCM-X
+# (hermes-lcm-x, engine.py _summary_part_text) stores its frontier as a user
+# row of parts headed "[Session Arc Summary (d1, node 22)]", and a
+# compaction carries it forward as a fresh row. Its header as LCM-X matches
+# it (_LCM_SUMMARY_PART_HEADER_RE); artifacts_index holds the same one
+# (tests/test_artifacts.py) and pulse_hermes its shape in SQL.
+LCM_SUMMARY_HEADER = re.compile(r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d\d+, node \d+\)\]\n")
 _WAKE_STARTS = "Work update from "
 # The work updates that carried another bot's ask (their outbox rows):
 # answering it, with a workstream when it takes one, is what that turn is
@@ -241,9 +248,11 @@ def _turn_prompts(home: Path, session_id: Any) -> Optional[list[tuple[str, Any]]
 
 
 def hermes_own(content: str) -> bool:
-    """Whether a saved user row is one Hermes wrote itself (_HERMES_ROWS).
-    Hermes saves those with no display kind, so a steer is never one."""
-    return content.lstrip().startswith(_HERMES_ROWS)
+    """Whether a saved user row is one Hermes wrote itself (_HERMES_ROWS),
+    or its context engine's summary (LCM_SUMMARY_HEADER). Hermes saves
+    those with no display kind, so a steer is never one."""
+    head = content.lstrip()
+    return head.startswith(_HERMES_ROWS) or LCM_SUMMARY_HEADER.match(head) is not None
 
 
 def _users_own(prompt: tuple[str, Any]) -> bool:
