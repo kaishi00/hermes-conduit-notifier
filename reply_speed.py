@@ -101,7 +101,10 @@ class ReplySpeedStore:
                 "output_tokens = output_tokens + excluded.output_tokens, seconds = seconds + excluded.seconds, "
                 "calls = calls + 1",
                 (session, turn, started, ended, tokens, seconds))
-            db.execute("DELETE FROM turns WHERE rowid <= (SELECT MAX(rowid) FROM turns) - ?", (MAX_TURNS,))
+            # The turns that ended longest ago go, never by insertion order: a long turn still reporting
+            # calls keeps its row and its totals.
+            db.execute("DELETE FROM turns WHERE rowid IN (SELECT rowid FROM turns ORDER BY ended_at DESC "
+                       "LIMIT -1 OFFSET ?)", (MAX_TURNS,))
         return True
 
     def turns(self, session_ids: Iterable[Any]) -> list[dict[str, Any]]:
@@ -147,16 +150,28 @@ def replies(turns: list[dict[str, Any]], rows: list[tuple[int, float]]) -> list[
     saved yet has ``row_id`` None (the reply a client is still drawing)."""
     ordered = sorted(rows, key=lambda row: (row[1], row[0]))
     out = []
+    claimed: set = set()
+    first = 0  # turns run oldest first: rows before an earlier turn's window aren't any later turn's
     for index, turn in enumerate(turns):
         rate = speed(turn)
-        if rate is None:
-            continue
         start = float(turn["started_at"]) - 1.0
         end = float(turn["ended_at"]) + REPLY_GRACE_S
         if index + 1 < len(turns):
             end = min(end, float(turns[index + 1]["started_at"]))
-        found = [row_id for row_id, at in ordered if start <= at < end]
-        out.append({"row_id": found[-1] if found else None, "tokens_per_s": rate,
+        while first < len(ordered) and ordered[first][1] < start:
+            first += 1
+        found = None
+        at = first
+        while at < len(ordered) and ordered[at][1] < end:
+            if ordered[at][0] not in claimed:
+                found = ordered[at][0]
+            at += 1
+        if rate is None:
+            continue
+        # A row an earlier turn ended on is that turn's reply, never a second one's.
+        if found is not None:
+            claimed.add(found)
+        out.append({"row_id": found, "tokens_per_s": rate,
                     "output_tokens": int(turn["output_tokens"]), "seconds": round(float(turn["seconds"]), 2),
                     "ended_at": float(turn["ended_at"])})
     return out

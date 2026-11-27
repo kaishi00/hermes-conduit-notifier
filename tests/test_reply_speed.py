@@ -149,6 +149,33 @@ def test_each_turn_lands_on_the_reply_it_ended_on(db, home):
         assert replies[0]["output_tokens"] == 300 and replies[0]["seconds"] == 6.0
 
 
+def test_a_reply_belongs_to_one_turn():
+    turns = [{"started_at": 10.0, "ended_at": 20.0, "output_tokens": 100, "seconds": 5.0},
+             {"started_at": 30.0, "ended_at": 40.0, "output_tokens": 100, "seconds": 2.0}]
+    # Saved in the second before the next turn started: both windows hold it, the older turn keeps it.
+    assert [reply["row_id"] for reply in speeds.replies(turns, [(7, 29.5)])] == [7, None]
+
+
+def test_the_turns_that_ended_longest_ago_go_first(home, monkeypatch):
+    monkeypatch.setattr(speeds, "MAX_TURNS", 2)
+    store = speeds.ReplySpeedStore(home)
+    store.add_call("s", "long", 0.0, 2.0, None, {"output_tokens": 10})
+    store.add_call("s", "a", 10.0, 12.0, None, {"output_tokens": 10})
+    store.add_call("s", "long", 13.0, 15.0, None, {"output_tokens": 10})  # still running: keeps its totals
+    store.add_call("s", "b", 20.0, 22.0, None, {"output_tokens": 10})
+    assert [(turn["started_at"], turn["calls"]) for turn in store.turns(["s"])] == [(0.0, 2), (20.0, 1)]
+
+
+def test_an_old_hermes_without_cost_columns_is_told_so(home):
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL)")
+    conn.execute("INSERT INTO sessions (id) VALUES ('a')")
+    conn.commit()
+    conn.close()
+    assert _get("?session_id=a").status_code == 501
+
+
 def test_a_chat_without_kept_speeds_has_none(db):
     _session(db, "a")
     db.commit()

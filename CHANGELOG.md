@@ -20,6 +20,12 @@ checks it). The format is fixed, because Conduit reads it:
 - Control from Hermes: when a bot asks to control your computer, your iPhone asks too, so you can allow it or turn it down from wherever you are; the first answer counts and the computer's own ask closes.
 - Control from Hermes: Conduit on your iPhone says which bot is controlling which computer, with Stop.
 
+## 0.204.1 (2026-11-27)
+
+### Fixes
+
+- Reply speed: an older Hermes is told it needs an update instead of failing, one reply no longer gets two speeds, and a long reply keeps its full count when the store trims old entries.
+
 ## 0.204.0 (2026-11-27)
 
 ### New and improved
