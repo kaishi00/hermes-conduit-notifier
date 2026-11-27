@@ -57,7 +57,7 @@ def _no_host_managed_plugin(monkeypatch):
 # plugin and never unloads it would leave them on the real modules, where a
 # later test's stand-in finds them already installed (notifier #321).
 _GUARDS = ("room_memory", "room_planner", "room_cutoff", "room_wakeups", "room_cleanup", "cron_bot_chat",
-           "compaction_skip", "review_notices", "forks", "memory_scan")
+           "compaction_skip", "helper_holds", "review_notices", "forks", "memory_scan")
 
 
 def _plugin_copies(names):
