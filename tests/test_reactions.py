@@ -138,3 +138,9 @@ def test_the_tool_registers_and_rooms_never_get_it():
     assert "conduit_react" in (ROOT / "plugin.yaml").read_text()
     room_choices = _load("conduit_push.room_choices", ROOT / "room_choices.py")
     assert "conduit_react" in room_choices.NEVER
+
+
+def test_a_strict_bot_chat_can_still_react():
+    work_tool_source = (ROOT / "work_tool.py").read_text()
+    shows = work_tool_source[work_tool_source.index("SHOWS_OR_ASKS = "):].splitlines()[0]
+    assert '"conduit_react"' in shows

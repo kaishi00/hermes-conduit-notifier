@@ -59,7 +59,7 @@ SCHEMA: dict[str, Any] = {
             },
             "messages_back": {
                 "type": "integer",
-                "description": "Optional. An earlier user message: 1 is the one before the latest, and so on.",
+                "description": "Optional. Which user message: 0 (the default) is the latest, 1 the one before it, and so on.",
             },
         },
         "required": ["emoji"],
