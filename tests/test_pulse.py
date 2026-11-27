@@ -303,6 +303,19 @@ def test_a_turn_compressed_midway_is_followed_into_the_new_session(db, tmp_path)
     assert hermes.user_text_after(tmp_path, session_id="tip", tag="pBBBB-1") == ["1 yes"]
 
 
+def test_a_compactions_summary_is_not_the_turns_reply(db, tmp_path):
+    # A compaction can keep its handoff as a reply after a Pulse attempt, or
+    # fold it into the reply it keeps: the reply is only the bot's own words.
+    db.session()
+    db.message("user", "Pulse delivery check pAAAA-1.", display_kind="hidden")
+    db.message("assistant", "[PRIOR CONTEXT — for reference only; not a new message]\nCheck arrived.\n\n"
+               "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]\n\n[CONTEXT COMPACTION — REFERENCE ONLY] "
+               "Earlier turns.\n\n## Historical Task Snapshot")
+    assert hermes.find_turn(tmp_path, chat_id=SID, tag="pAAAA-1", since=0).reply == "Check arrived."
+    db.message("assistant", "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted.")
+    assert hermes.find_turn(tmp_path, chat_id=SID, tag="pAAAA-1", since=0).reply == "Check arrived."
+
+
 def test_rows_from_before_the_attempt_dont_count(db, tmp_path):
     db.session()
     db.message("user", "Pulse delivery check pAAAA-1.", at=100.0)
@@ -2718,6 +2731,27 @@ def test_a_chats_summary_is_not_the_users_words(db, tmp_path):
     db.message("user", "[PRIOR CONTEXT — for reference only; not a new message]\n5 stars\n\n[END OF PRIOR CONTEXT — "
                "COMPACTION SUMMARY BELOW]\n\nEarlier they talked.", sid="work", at=DAY + 21)
     assert hermes.user_text_after(tmp_path, session_id="work", tag="pulse-tag-7") == ["5 stars"]
+
+
+def test_a_summary_folded_into_a_reply_is_not_the_bots_words(db, tmp_path):
+    # When no role alternates, Hermes folds its handoff into the reply it
+    # keeps, or stores it alone as a reply (Nahida's chat, 2026-11-27): the
+    # reply's own words show, the summary never reads as the bot speaking.
+    db.session()
+    db.session("work", title="Work", pinned=0)
+    db.message("user", "yes please, lets wire those up", sid="work", at=DAY + 10)
+    db.message("assistant", "[PRIOR CONTEXT — for reference only; not a new message]\nWiring all three now.\n\n"
+               "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]\n\n[CONTEXT COMPACTION — REFERENCE ONLY] "
+               "Earlier turns were compacted.\n\n## Historical Task Snapshot", sid="work", at=DAY + 11)
+    db.message("assistant", "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted.", sid="work", at=DAY + 12)
+    db.message("assistant", "[CONTEXT SUMMARY]: Earlier.\n\n--- END OF CONTEXT SUMMARY — respond to the message "
+               "below, not the summary above ---\n\nAll three are wired.", sid="work", at=DAY + 13)
+    shown = ["yes please, lets wire those up", "Wiring all three now.", "All three are wired."]
+    rows = hermes.chat_messages(tmp_path, chat_id="work", after_id=0, since=0, max_chars=40, limit=10)
+    assert [r["content"] for r in rows] == shown
+    assert [r["content"] for r in hermes.chain_messages(tmp_path, chat_id="work", after_id=0, max_chars=40,
+                                                        limit=10)] == shown
+    assert [r["content"] for r in hermes.recent_messages(tmp_path, exclude_chat=SID, since=0, max_chars=40)] == shown
 
 
 def test_pulses_merged_row_markers_are_hermes_own():

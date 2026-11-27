@@ -103,6 +103,9 @@ SUMMARY_END_MARKER = "--- END OF CONTEXT SUMMARY \u2014 respond to the message b
 # 22)]" (work_coord.LCM_SUMMARY_HEADER, the same pattern). A row it merged
 # with keeps its own copy, so the whole carrier is nobody's attachments.
 LCM_SUMMARY_HEADER = re.compile(r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d\d+, node \d+\)\]\n")
+# Hermes' own summary standing alone, as a user row or a reply
+# (work_coord._HERMES_ROWS starts the same way).
+HERMES_SUMMARY_HEADS = ("[CONTEXT COMPACTION", "[CONTEXT SUMMARY]:")
 _MD_LINK_RE = re.compile(r"(!?)\[([^\]\n]{0,300})\]\((https?://[^\s)<>]+)\)")
 _BARE_URL_RE = re.compile(r"(?<![(\[<\"'=])\bhttps?://[^\s<>\"'`)\]]+")
 _FENCE_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
@@ -219,12 +222,16 @@ def assistant_items(text: str) -> Iterable[tuple]:
 
 
 def _own_text(text: str) -> str:
-    """A user row's own text, as far as the scan reads, when a compaction
-    folded its summary into the row: a cron note there is still the run's
-    report, and the summary's words are nobody's attachments. The markers
+    """A user row's or a reply's own text, as far as the scan reads, when a
+    compaction folded its summary into the row: a cron note there is still
+    the run's report, and the summary's words are nobody's attachments or
+    deliveries. A summary standing alone has no text of its own. The markers
     are found in the whole row (a search copies nothing), so a long summary
     or report doesn't hide where the row's own text is."""
-    if LCM_SUMMARY_HEADER.match(text[:400].lstrip()):
+    head = text[:400].lstrip()
+    if LCM_SUMMARY_HEADER.match(head):
+        return ""
+    if head.startswith(HERMES_SUMMARY_HEADS) and SUMMARY_END_MARKER not in text:
         return ""
     if text.startswith(MERGED_PRIOR_HEADER):
         end = text.find(MERGED_SUMMARY_DELIMITER)
@@ -322,7 +329,7 @@ def _json(raw: Any) -> Any:
 def row_items(role: str, content: Any, tool_calls: Any, tool_name: Any) -> list:
     text = content if isinstance(content, str) else ""
     if role == "assistant":
-        return [*assistant_items(text), *tool_call_items(tool_calls)]
+        return [*assistant_items(_own_text(text)), *tool_call_items(tool_calls)]
     if role == "user":
         return list(user_items(text))
     if role == "tool":

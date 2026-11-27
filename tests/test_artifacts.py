@@ -978,6 +978,19 @@ def test_a_context_engines_summary_names_nobodys_files(tmp_path, monkeypatch):
     assert [(i["source"], i["path"]) for i in _list(conn)["items"]] == [("attached", "/root/uploads/mine.txt")]
 
 
+def test_hermes_summary_in_a_reply_delivers_nothing(tmp_path, monkeypatch):
+    # Hermes folds its handoff into the reply it keeps, or stores it alone as
+    # a reply or a user row: what the summary recalls was delivered back then,
+    # and the reply's own words still deliver theirs.
+    _no_gateway(monkeypatch)
+    folded = ("[PRIOR CONTEXT \u2014 for reference only; not a new message]\nHere MEDIA:/root/out/new.png\n\n"
+              "[END OF PRIOR CONTEXT \u2014 COMPACTION SUMMARY BELOW]\n\n[CONTEXT COMPACTION] Sent MEDIA:/root/out/old.png")
+    alone = "[CONTEXT COMPACTION \u2014 REFERENCE ONLY] Earlier, MEDIA:/root/out/older.png"
+    asked = "[CONTEXT SUMMARY]: The user sent @file:/root/uploads/old.pdf"
+    conn = _db(tmp_path, [("s1", "assistant", folded), ("s1", "assistant", alone), ("s1", "user", asked)])
+    assert [(i["source"], i["path"]) for i in _list(conn)["items"]] == [("delivered", "/root/out/new.png")]
+
+
 def test_the_summary_header_is_one_pattern_everywhere():
     # Pulse, the work coordination and the files list tell a context
     # engine's summary by the same header, LCM-X's own
