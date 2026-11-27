@@ -2675,6 +2675,35 @@ def test_a_picture_turns_stored_context_is_not_the_users_words(db, tmp_path):
     assert hermes.typed(None) is None
 
 
+def test_a_chats_summary_is_not_the_users_words(db, tmp_path):
+    # A compaction carries a context engine's summary forward as a fresh
+    # user row (LCM-X's frontier on Furina's Bot Chat, 2026-11-26, 88,000
+    # characters of old arcs), and Hermes' own handoff stands alone as one:
+    # neither is anything the person wrote. A row Hermes merged its summary
+    # into keeps the user's words after the end marker, and a message that
+    # only quotes a header is the user's.
+    db.session()
+    db.session("work", title="Work", pinned=0)
+    lcm = ("[Session Arc Summary (d1, node 22)]\n# Summary: Homelab\n[Expand for details: about: mail]\n\n---\n\n"
+           "[Recent Summary (d0, node 40)]\nThe user asked about j1.\n[Expand for details: about: j1]")
+    db.message("user", lcm, sid="work", at=DAY + 10)
+    db.message("user", "  \n[Depth-3 Summary (d3, node 7)]\nOlder.\n[Expand for details: x]", sid="work", at=DAY + 11)
+    db.message("user", "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted.", sid="work", at=DAY + 12)
+    db.message("user", "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier.\n\n--- END OF CONTEXT SUMMARY — respond to "
+               "the message below, not the summary above ---\n\nWhy did j1 fail?", sid="work", at=DAY + 13)
+    db.message("user", "What does [Session Arc Summary (d1, node 22)] mean?", sid="work", at=DAY + 14)
+    db.message("assistant", "It's LCM-X's summary.", sid="work", at=DAY + 15)
+    rows = hermes.chat_messages(tmp_path, chat_id="work", after_id=0, since=0, max_chars=40, limit=10)
+    assert [r["content"] for r in rows] == ["[CONTEXT COMPACTION — REFERENCE ONLY] Ea",
+                                           "What does [Session Arc Summary (d1, node",
+                                           "It's LCM-X's summary."]
+    assert len(hermes.recent_messages(tmp_path, exclude_chat=SID, since=0)) == 3
+    assert [r["chars"] for r in hermes.chat_activity(tmp_path, exclude_chat=SID, since=0, max_chars=5)] == [15]
+    last = max(r["id"] for r in rows)
+    asked = hermes.user_row_before(tmp_path, chat_id="work", before_id=last, max_chars=10)
+    assert asked["content"] == "What does "
+
+
 @pytest.fixture
 def remembering(live, db, monkeypatch):
     live.store.set("memory_since", DAY)

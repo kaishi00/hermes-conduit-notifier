@@ -98,6 +98,11 @@ _CRON_NOTE_HEADER_RE = re.compile(r'\[Cron job ".*" report: shown in the chat, n
 MERGED_PRIOR_HEADER = "[PRIOR CONTEXT \u2014 for reference only; not a new message]"
 MERGED_SUMMARY_DELIMITER = "[END OF PRIOR CONTEXT \u2014 COMPACTION SUMMARY BELOW]"
 SUMMARY_END_MARKER = "--- END OF CONTEXT SUMMARY \u2014 respond to the message below, not the summary above ---"
+# A context engine's summary in place of Hermes' own: LCM-X stores its
+# frontier as a user row of parts headed "[Session Arc Summary (d1, node
+# 22)]" (work_coord.LCM_SUMMARY_HEADER, the same pattern). A row it merged
+# with keeps its own copy, so the whole carrier is nobody's attachments.
+LCM_SUMMARY_HEADER = re.compile(r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d\d+, node \d+\)\]\n")
 _MD_LINK_RE = re.compile(r"(!?)\[([^\]\n]{0,300})\]\((https?://[^\s)<>]+)\)")
 _BARE_URL_RE = re.compile(r"(?<![(\[<\"'=])\bhttps?://[^\s<>\"'`)\]]+")
 _FENCE_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
@@ -219,6 +224,8 @@ def _own_text(text: str) -> str:
     report, and the summary's words are nobody's attachments. The markers
     are found in the whole row (a search copies nothing), so a long summary
     or report doesn't hide where the row's own text is."""
+    if LCM_SUMMARY_HEADER.match(text[:400].lstrip()):
+        return ""
     if text.startswith(MERGED_PRIOR_HEADER):
         end = text.find(MERGED_SUMMARY_DELIMITER)
         if end >= 0:

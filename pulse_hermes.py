@@ -84,6 +84,28 @@ def typed(content: Any) -> Any:
     return content if text == content else text.strip()
 
 
+# A chat's summary is nobody's message: Hermes' own handoff, standing alone
+# (a row it merged into keeps the user's words after its end marker), and a
+# context engine's in its place, LCM-X's frontier stored as a user row of
+# parts headed "[Session Arc Summary (d1, node 22)]" (work_coord's
+# LCM_SUMMARY_HEADER, the same shape), which a compaction carries forward as
+# a fresh row; a row it merged with keeps its own copy. Read as the user
+# writing, an 88,000-character summary of old arcs passed for today's chat.
+_SUMMARY_HEADS = ("[[]Recent Summary (d[0-9]*", "[[]Session Arc Summary (d[0-9]*", "[[]Durable Summary (d[0-9]*",
+                  "[[]Depth-[0-9]* Summary (d[0-9]*")
+_HERMES_SUMMARY_HEADS = ("[[]CONTEXT COMPACTION*", "[[]CONTEXT SUMMARY]:*")
+_SUMMARY_END = "END OF CONTEXT SUMMARY"
+
+
+def _not_summary(alias: str = "") -> str:
+    """SQL: the row (``alias``-qualified) is not a summary (``_SUMMARY_HEADS``)."""
+    content, role = f"COALESCE({alias}content, '')", f"{alias}role"
+    head = f"ltrim(substr({content}, 1, 80), ' ' || char(9, 10, 13))"
+    lcm = " OR ".join(f"{head} GLOB '{glob}'" for glob in _SUMMARY_HEADS)
+    hermes = " OR ".join(f"{head} GLOB '{glob}'" for glob in _HERMES_SUMMARY_HEADS)
+    return (f"NOT ({role} = 'user' AND ({lcm} OR (({hermes}) AND instr({content}, '{_SUMMARY_END}') = 0)))")
+
+
 def _row(cursor: sqlite3.Cursor, values: tuple) -> sqlite3.Row:
     """A row, a user row's ``content`` as the user typed it (``typed``)."""
     row = sqlite3.Row(cursor, values)
@@ -252,7 +274,7 @@ _EXCLUDED = (
 
 
 def _person_rows(home: Path) -> str:
-    return ("m.role IN ('user', 'assistant') AND m.active = 1 AND m.display_kind IS NULL "
+    return ("m.role IN ('user', 'assistant') AND m.active = 1 AND m.display_kind IS NULL AND " + _not_summary("m.") + " "
             "AND (s.source IS NULL OR s.source != 'cron') AND s.hidden = 0 "
             "AND s.id NOT IN (SELECT id FROM excluded) AND NOT " + _subagent(home) + " AND " + _NOT_WORK)
 
@@ -302,7 +324,7 @@ def chat_messages(home: Path, *, chat_id: str, after_id: int, since: float, max_
     rows = _run(home, (
         "SELECT id, role, substr(content, 1, ?) AS content, timestamp FROM messages "
         "WHERE session_id = ? AND id > ? AND timestamp > ? AND timestamp <= ? AND role IN ('user', 'assistant') "
-        f"AND active = 1 AND display_kind IS NULL ORDER BY id {'DESC' if newest else ''} LIMIT ?"
+        f"AND active = 1 AND display_kind IS NULL AND {_not_summary()} ORDER BY id {'DESC' if newest else ''} LIMIT ?"
     ), (max_chars, chat_id, after_id, since, float("inf") if until is None else until, limit))
     return rows[::-1] if newest else rows
 
@@ -320,7 +342,7 @@ def user_row_before(home: Path, *, chat_id: str, before_id: int, max_chars: int)
     rows = _run(home, (
         "SELECT id, role, substr(content, 1, ?) AS content, timestamp FROM messages "
         "WHERE session_id = ? AND id < ? AND role = 'user' AND active = 1 AND display_kind IS NULL "
-        "ORDER BY id DESC LIMIT 1"
+        "AND " + _not_summary() + " ORDER BY id DESC LIMIT 1"
     ), (max_chars, chat_id, before_id))
     return rows[0] if rows else None
 
@@ -331,7 +353,7 @@ def user_text_after(home: Path, *, session_id: str, tag: str) -> list[str]:
     rows = _run(home, (
         "SELECT role, content, display_kind FROM messages WHERE session_id = ? AND role = 'user' AND id > ("
         "SELECT MAX(id) FROM messages WHERE session_id = ? AND role = 'user' AND instr(content, ?) > 0) "
-        "ORDER BY id"
+        "AND " + _not_summary() + " ORDER BY id"
     ), (session_id, session_id, tag))
     text = []
     for row in rows:

@@ -963,3 +963,28 @@ def test_a_folded_picture_only_report_and_a_long_one_still_list(tmp_path, monkey
         ("delivered", "document", "/var/long.pdf"),
         ("delivered", "image", "/cam/now.jpg"),
     ]
+
+
+def test_a_context_engines_summary_names_nobodys_files(tmp_path, monkeypatch):
+    # LCM-X stores its summary as a user row headed "[Session Arc Summary
+    # (d1, node 22)]", and a compaction carries it forward as a fresh row:
+    # the files it names are nobody's attachments. A row it merged with keeps
+    # its own copy. One that only quotes a header is the user's own.
+    _no_gateway(monkeypatch)
+    carrier = ("[Session Arc Summary (d1, node 22)]\nThe user sent @file:/root/uploads/old.pdf\n"
+               "[Expand for details: about: old.pdf]\n\nread @file:/root/uploads/merged.txt")
+    quoted = "about [Recent Summary (d0, node 3)]\nread @file:/root/uploads/mine.txt"
+    conn = _db(tmp_path, [("s1", "user", carrier), ("s1", "user", quoted)])
+    assert [(i["source"], i["path"]) for i in _list(conn)["items"]] == [("attached", "/root/uploads/mine.txt")]
+
+
+def test_the_summary_header_is_one_pattern_everywhere():
+    # Pulse, the work coordination and the files list tell a context
+    # engine's summary by the same header, LCM-X's own
+    # (engine.py _LCM_SUMMARY_PART_HEADER_RE).
+    assert f'LCM_SUMMARY_HEADER = re.compile(r"{index.LCM_SUMMARY_HEADER.pattern}")' in (
+        ROOT / "work_coord.py").read_text(encoding="utf-8")
+    for header in ("[Recent Summary (d0, node 342)]\n", "[Session Arc Summary (d1, node 22)]\n",
+                   "[Durable Summary (d2, node 7)]\n", "[Depth-4 Summary (d4, node 9001)]\n"):
+        assert index.LCM_SUMMARY_HEADER.match(header)
+    assert not index.LCM_SUMMARY_HEADER.match("[Session Arc Summary quoted]\n")

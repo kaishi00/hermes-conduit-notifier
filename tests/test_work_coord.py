@@ -79,6 +79,9 @@ def test_the_users_words_in_a_workstreams_chat_are_told_from_the_plugins(on, her
         (WORKER, "user", "Use the staging key", None),
         (WORKER, "user", "Work update: hidden scaffolding", "hidden"),
         (WORKER, "user", "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted", None),
+        # A context engine's summary in its place (LCM-X's frontier, carried forward by a compaction).
+        (WORKER, "user", "[Session Arc Summary (d1, node 22)]\n# Summary: the mail pipeline\n[Expand for details: "
+                         "about: mail]\n\nA row it merged with", None),
         # Hermes' own rows (Furina's W21, 2026-11-15: its iteration limit passed for the user writing).
         (WORKER, "user", "You've reached the maximum number of tool-calling iterations allowed. Please provide a "
                          "final response summarizing what you've found and accomplished so far, without calling "
