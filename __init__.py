@@ -313,7 +313,7 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
     fork = forks.inside()
     if child and not fork:
         # Its step shows under its parent's running turn (live_steps' agents).
-        _quietly(live_steps.agent_step, _text(kwargs.get("session_id")),
+        _quietly(live_steps.agent_step, _child_root(kwargs.get("session_id")),
                  "input" if kwargs.get("tool_name") == "clarify" else "tool",
                  live_activity.tool_category(kwargs.get("tool_name")))
         # A delegated child drives the bot's screen as its parent does.
@@ -1367,13 +1367,21 @@ def _post_approval_response(**kwargs: Any) -> None:
     _quietly(work_tool.answered, _text(kwargs.get("session_id")) or session_key)
 
 
+def _child_root(session_id: Any) -> str:
+    """The id ``subagent_start`` reported for a delegated child that a compaction moved to a new one:
+    its live step is kept under that."""
+    value = _text(session_id)
+    with _children_lock:
+        return _compacted_children.get(value, value)
+
+
 def _pre_api_request(**kwargs: Any) -> None:
     session_id = _text(kwargs.get("session_id"))
     if not _is_child(session_id):
         _quietly(live_activity.reporter.thinking, session_id)
         _quietly(live_steps.step, session_id, "thinking")
     elif not forks.inside():
-        _quietly(live_steps.agent_step, session_id, "thinking")
+        _quietly(live_steps.agent_step, _child_root(session_id), "thinking")
 
 
 def _post_api_request(**kwargs: Any) -> None:

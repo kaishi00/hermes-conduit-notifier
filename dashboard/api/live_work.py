@@ -111,18 +111,24 @@ def live_work(state_path: Path, home: Any, session_id: str) -> Dict[str, Any]:
     steps = live_steps._live_steps().read(home, agents=True)
     # The newest of the chat's rows with a running turn: a compaction mid-turn moves it there.
     step = next((steps[sid] for sid in reversed(ids) if sid in steps), None)
-    started = any(row["status"] == "started" for row in admissions or [])
+    started = [row["admission_id"] for row in admissions or [] if row["status"] == "started"]
+    if admissions is not None and not started and any(row["status"] == "unknown" for row in admissions):
+        # A restart cut the chat's turn off: the step it left in the live steps file is stale.
+        step = None
     waiting = [row for row in admissions or [] if row["status"] in ("queued", "unknown")]
     return {
         "session_id": session_id,
         "supported": admissions is not None,
         # A turn runs in the gateway: its admission says so, or its live step does (a Hermes without
         # admissions, or a turn that never went through them).
-        "running": started or step is not None,
+        "running": bool(started) or step is not None,
         "step": None if step is None else {key: step[key] for key in ("phase", "tool", "since")},
         "agents": [] if step is None else step.get("agents", []),
         "queued": [_queue_row(row) for row in waiting[:QUEUE_MAX]],
         "queued_count": len(waiting),
+        # The admissions whose turn runs now: a message that left the queue for one started, any other
+        # was withdrawn (in the Webapp or Hermes Desktop) or its turn already ended.
+        "started": started,
     }
 
 
@@ -144,7 +150,8 @@ async def get_live_work(request: Request, response: Response, session_id: Option
     ``phase``, ``tool``, ``since`` and ``started``; ``queued``: the messages waiting behind it (and
     a turn a restart cut off, ``status: unknown``), each with ``admission_id``, ``input_id`` (the
     submission id it was sent with), ``text``, ``status`` and ``sequence``, oldest first;
-    ``supported``: whether this Hermes keeps a queue to read."""
+    ``started``: the admission ids whose turn runs now; ``supported``: whether this Hermes keeps a
+    queue to read."""
     response.headers["Cache-Control"] = "no-store"
     profile = await core._conduit_route_profile_no_store(request, profile)
     sid = (session_id or "").strip()

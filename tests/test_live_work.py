@@ -99,6 +99,8 @@ def test_a_turn_running_in_the_gateway_shows_its_step_agents_and_the_messages_be
         # Only the words: never the envelope's routing.
         {"admission_id": "adm-3", "input_id": "adm-3", "text": "from the phone", "status": "queued", "sequence": 3}]
     assert body["queued_count"] == 2
+    # The turn running now: a message that left the queue for it started.
+    assert body["started"] == ["adm-1"]
 
 
 def test_an_idle_chat_says_nothing_runs(host):
@@ -107,7 +109,7 @@ def test_an_idle_chat_says_nothing_runs(host):
     _admission(state, "adm-1", "s-1", "terminal", {"text": "done"})
     assert _get("?session_id=s-1").json() == {
         "session_id": "s-1", "supported": True, "running": False, "step": None, "agents": [],
-        "queued": [], "queued_count": 0}
+        "queued": [], "queued_count": 0, "started": []}
 
 
 def test_a_turn_a_restart_cut_off_is_listed_with_the_ones_it_holds(host):
@@ -159,3 +161,14 @@ def test_a_long_message_is_cut(host):
 def test_an_unknown_chat_or_none_named(host):
     assert _get("?session_id=nope").status_code == 404
     assert _get("").status_code == 400
+
+
+def test_a_turn_a_restart_cut_off_is_not_running_whatever_step_it_left(host):
+    state, home = host
+    _session(state, "api-1")
+    _admission(state, "adm-1", "api-1", "unknown", {"text": "cut off"})
+    steps.started(home, "api-1", now=10.0)
+    steps.agent_started("api-1", "child-1", "goal", now=11.0)
+    body = _get("?session_id=api-1").json()
+    assert body["running"] is False and body["step"] is None and body["agents"] == []
+    assert [row["status"] for row in body["queued"]] == ["unknown"]
