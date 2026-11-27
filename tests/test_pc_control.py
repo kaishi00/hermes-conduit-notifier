@@ -179,6 +179,19 @@ def test_a_claimed_request_whose_tool_went_away_is_swept_with_its_result(tmp_pat
     assert not list((store.root / "results").iterdir())
 
 
+def test_stop_takes_waiting_actions_off_the_queue_and_keeps_answers(store):
+    store.note_computer(PC, "Asuka", "windows")
+    waiting = store.add_request(PC, SESSION, "A", "click", {"element": 1})
+    ran = store.add_request(PC, SESSION, "A", "capture", {})
+    store.claim(PC)
+    store.add_request(PC, SESSION, "A", "type", {"text": "x"})
+    store.answer(ran["id"], {"ok": True}, computer=PC)
+    assert store.stop(PC) == 3
+    assert store.claim(PC) == []
+    assert store.take_result(ran["id"]) == {"ok": True}
+    assert store.take_result(waiting["id"]) == {"ok": False, "code": "stopped"}
+
+
 def test_no_answer_in_time_drops_the_request(store, monkeypatch):
     store.note_computer(PC, "Asuka", "windows")
     monkeypatch.setattr(tool, "ASK_WAIT_S", 0.05)

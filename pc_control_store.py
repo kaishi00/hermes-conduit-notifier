@@ -161,10 +161,22 @@ class PcControlStore:
         with self._json("grants.json") as grants:
             (grants.get("computers") or {}).pop(computer, None)
         stopped = 0
+        folder = self._dir("requests")
         for request in self._requests(include_claimed=True):
-            if request.get("computer") == computer:
-                self.answer(request["id"], {"ok": False, "code": "stopped"}, computer=computer)
-                stopped += 1
+            if request.get("computer") != computer:
+                continue
+            # A waiting one is taken off the queue first, so the computer's next
+            # poll can't claim and run it after Stop.
+            waiting = folder / f"{request['id']}.json"
+            try:
+                os.replace(waiting, waiting.with_suffix(".claimed"))
+            except OSError:
+                pass  # already claimed
+            # One the computer already answered keeps its answer: it ran.
+            result = self._dir("results") / f"{request['id']}.json"
+            if not result.exists():
+                self._write_file(result, {"ok": False, "code": "stopped"})
+            stopped += 1
         return stopped
 
     # --- requests -------------------------------------------------------------
