@@ -303,6 +303,19 @@ def test_a_turn_compressed_midway_is_followed_into_the_new_session(db, tmp_path)
     assert hermes.user_text_after(tmp_path, session_id="tip", tag="pBBBB-1") == ["1 yes"]
 
 
+def test_a_compactions_summary_is_not_the_turns_reply(db, tmp_path):
+    # A compaction can keep its handoff as a reply after a Pulse attempt, or
+    # fold it into the reply it keeps: the reply is only the bot's own words.
+    db.session()
+    db.message("user", "Pulse delivery check pAAAA-1.", display_kind="hidden")
+    db.message("assistant", "[PRIOR CONTEXT — for reference only; not a new message]\nCheck arrived.\n\n"
+               "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]\n\n[CONTEXT COMPACTION — REFERENCE ONLY] "
+               "Earlier turns.\n\n## Historical Task Snapshot")
+    assert hermes.find_turn(tmp_path, chat_id=SID, tag="pAAAA-1", since=0).reply == "Check arrived."
+    db.message("assistant", "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted.")
+    assert hermes.find_turn(tmp_path, chat_id=SID, tag="pAAAA-1", since=0).reply == "Check arrived."
+
+
 def test_rows_from_before_the_attempt_dont_count(db, tmp_path):
     db.session()
     db.message("user", "Pulse delivery check pAAAA-1.", at=100.0)

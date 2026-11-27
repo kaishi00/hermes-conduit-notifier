@@ -98,7 +98,9 @@ _SUMMARY_END = "END OF CONTEXT SUMMARY"
 
 
 def _not_summary(alias: str = "") -> str:
-    """SQL: the row (``alias``-qualified) is not a summary (``_SUMMARY_HEADS``)."""
+    """SQL: the row (``alias``-qualified) is not a summary: a context engine's
+    (``_SUMMARY_HEADS``), or Hermes' own standing alone
+    (``_HERMES_SUMMARY_HEADS`` with no end marker)."""
     content, role = f"COALESCE({alias}content, '')", f"{alias}role"
     head = f"ltrim(substr({content}, 1, 80), ' ' || char(9, 10, 13))"
     lcm = " OR ".join(f"{head} GLOB '{glob}'" for glob in _SUMMARY_HEADS)
@@ -219,14 +221,17 @@ def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[T
     user_id, session_id = users[0]["id"], users[0]["session_id"]
     prompt = users[0]["content"] if isinstance(users[0]["content"], str) else ""
     rows = _run(home, (
-        "SELECT id, role, content, display_kind FROM messages WHERE session_id = ? AND id > ? ORDER BY id"
+        "SELECT id, role, " + _shown() + " AS content, display_kind, " + _not_summary() + " AS own "
+        "FROM messages WHERE session_id = ? AND id > ? ORDER BY id"
     ), (session_id, user_id))
     reply, reply_id, failed, closed, skipped = "", None, False, False, ""
     for row in rows:
         if row["role"] == "user":
             closed = True
             break
-        if row["role"] != "assistant":
+        # A compaction's summary kept as a reply is nobody's reply (_not_summary);
+        # one folded into the reply leaves the reply's own words (_shown).
+        if row["role"] != "assistant" or not row["own"]:
             continue
         if row["display_kind"] == FAILED_TURN_KIND:
             failed = True
