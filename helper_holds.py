@@ -28,6 +28,7 @@ import logging
 import threading
 import time
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,8 @@ def _held(client: Any) -> tuple[list[str], float]:
             continue
         rest = parts[1:] if home is not None and len(parts) > 1 else parts
         if rest and rest[0] == "custom-endpoint" and len(rest) > 1:
-            name = str(rest[1]).split("://", 1)[-1].split("/", 1)[0]
+            # Only the host: never a key in the URL's userinfo, path or query.
+            name = urlsplit(str(rest[1]) if "://" in str(rest[1]) else f"//{rest[1]}").hostname or ""
         else:
             name = str(rest[0]) if rest else ""
         if name and name not in names:

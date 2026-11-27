@@ -72,6 +72,8 @@ watch_paths:
   # (principal_subject), both loaded with importlib.
   - gateway/hosted_rooms_gateway_import.py
   - gateway/owner_identity.py
+  # helper_holds.py wraps _emit_feasibility_notice and rewords its no-provider warning, loaded with importlib.
+  - agent/conversation_compression.py
 
 # Words that make a changed hunk worth a closer look.
 keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, session_token, x-hermes,

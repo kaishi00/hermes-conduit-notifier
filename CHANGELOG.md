@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.205.3 (2026-11-27)
+
+### Fixes
+
+- Long chats: the warning about paused helper models names every one of them and says when the first is back, and never shows anything from a custom endpoint's address but its host.
+
 ## 0.205.2 (2026-11-27)
 
 ### Fixes

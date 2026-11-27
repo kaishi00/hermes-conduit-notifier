@@ -81,13 +81,13 @@ def test_the_warning_names_helpers_on_hold(holds):
     assert holds.install()
     until = holds.client._aux_unhealthy_until
     until[("home", "zai")] = time.time() + 290
-    until[("home", "custom-endpoint", "https://api.stepfun.ai/step_plan/v1")] = time.time() + 500
+    until[("home", "custom-endpoint", "https://sk-secret@api.stepfun.ai/step_plan/v1?key=sk-other")] = time.time() + 500
     until[("other-profile", "nous")] = time.time() + 500
     until[("home", "openrouter")] = time.time() - 5
     holds.compression._emit_feasibility_notice(object(), HERMES_SAYS)
     said = holds.warned[-1]
     assert "(zai, api.stepfun.ai)" in said and "the first of them is back in about 5 minutes" in said
-    assert "nous" not in said and "openrouter" not in said and "hermes setup" not in said
+    assert "sk-" not in said and "nous" not in said and "openrouter" not in said and "hermes setup" not in said
 
 
 def test_hermes_words_stand_when_nothing_is_on_hold_or_for_other_warnings(holds):
