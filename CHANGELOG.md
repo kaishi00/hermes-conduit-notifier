@@ -13,11 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.202.8 (2026-11-27)
+## 0.202.9 (2026-11-27)
 
 ### Fixes
 
 - With a context engine such as LCM-X, Pulse read the chat summary a compaction carries forward as something you wrote, a bot could take it for you writing in its chat, and files the summary named could show up as files you sent. The summary is now left out of all three.
+
+## 0.202.8 (2026-11-27)
+
+### Fixes
+
+- The log line 0.202.7 added, for a chat Conduit says is open elsewhere, could fail the takeover itself on an unusual Hermes record, and could leave out why a check on the chat failed. It now always answers, and it names the failed check.
 
 ## 0.202.7 (2026-11-27)
 
