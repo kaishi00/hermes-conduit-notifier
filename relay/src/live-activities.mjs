@@ -329,6 +329,8 @@ export function liveActivityPush(state, end, { topic = undefined, nowSeconds = M
     tools: state.tools ?? 0,
     ...(state.tool && !end ? { tool: state.tool } : {}),
     ...(state.context !== undefined ? { context: state.context } : {}),
+    ...(state.planLeft !== undefined ? { planLeft: state.planLeft } : {}),
+    ...(state.planResetMs !== undefined ? { planResetMs: state.planResetMs } : {}),
     ...(end ? { endedAt: nowSeconds } : {}),
   };
   const aps = end
@@ -367,6 +369,15 @@ export function validateReport(body) {
     const context = boundedInteger(raw.context, 0, 100);
     if (context === undefined) return null;
     state.context = context;
+  }
+  if (raw.plan_left !== undefined && raw.plan_left !== null) {
+    const planLeft = boundedInteger(raw.plan_left, 0, 100);
+    if (planLeft !== undefined) state.planLeft = planLeft;
+  }
+  if (raw.plan_reset_ms !== undefined && raw.plan_reset_ms !== null) {
+    const planResetMs = typeof raw.plan_reset_ms === 'number' && Number.isFinite(raw.plan_reset_ms) && raw.plan_reset_ms > 0
+      ? Math.floor(raw.plan_reset_ms) : undefined;
+    if (planResetMs !== undefined) state.planResetMs = planResetMs;
   }
   return { sessionId, state, end, ...(end && endedAgoS !== undefined ? { endedAgoS } : {}) };
 }

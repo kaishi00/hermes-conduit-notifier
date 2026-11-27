@@ -14,6 +14,37 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import core, voice_calls, watch_tools
 
+# --- Claude plan quota inline in job_news ------------------------------------
+#
+# When the Watch polls job_news it also receives the current Claude plan quota
+# (the same usage-window gauges plan_quota.py's /sessions/plan-quota serves)
+# so it can show the quota state without an extra round-trip.  The quota is
+# cached for CLAUDE_QUOTA_TTL_S: it changes at most once per usage-window
+# period, so reading it on every poll would be wasteful.
+CLAUDE_QUOTA_TTL_S = 60.0
+_claude_quota_lock = threading.Lock()
+_claude_quota_cache: Optional[Dict[str, Any]] = None
+_claude_quota_at: float = 0.0
+
+
+def _read_claude_quota_safe() -> Optional[Dict[str, Any]]:
+    """The current Claude plan quota from plan_quota._read_plan_quota(),
+    or None when it cannot be read (older Hermes, not logged in, etc.)."""
+    global _claude_quota_cache, _claude_quota_at
+    now = time.monotonic()
+    with _claude_quota_lock:
+        if _claude_quota_cache is not None and now - _claude_quota_at < CLAUDE_QUOTA_TTL_S:
+            return _claude_quota_cache
+    try:
+        from . import plan_quota as _pq
+        result = _pq._read_plan_quota()
+    except Exception:  # noqa: BLE001 — quota is best-effort
+        return None
+    with _claude_quota_lock:
+        _claude_quota_cache = result
+        _claude_quota_at = now
+    return result
+
 logger = core.logger
 
 
@@ -1344,6 +1375,13 @@ class _WatchJobs:
         undelivered = watch_tools._watch_undelivered.get()
         if undelivered is not None and marks:
             undelivered.append(lambda: self._untake(marks))
+        # Include the current Claude plan quota so the Watch's live session can
+        # display it alongside the job list without a separate API call.
+        # _read_claude_quota_safe() is cached (CLAUDE_QUOTA_TTL_S) and never
+        # raises; None means the host has no quota data to share.
+        quota = _read_claude_quota_safe()
+        if quota is not None:
+            answer["claude_usage_quota"] = quota
         return answer
 
     def _settle_stale_holds(self) -> list:

@@ -5,6 +5,9 @@
   // (slot sessions:top), beside Hermes' own Connected Platforms card, which
   // lists only the gateway's messaging adapters. It reads /link-status: is
   // the app reaching this host, and do its pushes get through the relay?
+  // It also reads /sessions/plan-quota to show the Claude usage quota (the
+  // same gauges the Watch relay injects into every job_news response since
+  // the job-news-claude-usage-quota capability was added).
   // The tab component stays empty (the manifest hides the tab); registering
   // it keeps the dashboard from reporting the plugin as failing to load.
   var plugins = window.__HERMES_PLUGINS__;
@@ -21,6 +24,7 @@
   var useEffect = SDK.hooks.useEffect;
   var ui = SDK.components || {};
   var POLL_MS = 30000;
+  var QUOTA_POLL_MS = 60000; // matches backend CLAUDE_QUOTA_TTL_S
 
   function ago(seconds) {
     if (typeof seconds !== "number") return null;
@@ -96,10 +100,90 @@
     );
   }
 
+  // Renders a single usage-window gauge as a labeled progress bar.
+  // gauge: { title, short, used_bp, full, resets_at }
+  //   used_bp: 0–10000 (basis points; 10000 = 100%)
+  function QuotaBar(props) {
+    var gauge = props.gauge;
+    var pct = typeof gauge.used_bp === "number" ? Math.min(100, gauge.used_bp / 100) : 0;
+    var full = gauge.full;
+    var barColor = full
+      ? "bg-destructive"
+      : pct >= 80
+        ? "bg-warning"
+        : "bg-success";
+    var resetText = null;
+    if (typeof gauge.resets_at === "number") {
+      var resetAgo = ago(gauge.resets_at);
+      if (resetAgo) resetText = "Resets " + resetAgo;
+    }
+    return h(
+      "div",
+      { className: "flex flex-col gap-1 w-full" },
+      h(
+        "div",
+        { className: "flex items-center justify-between gap-2" },
+        h("span", { className: "font-mondwest normal-case text-xs font-medium truncate" }, gauge.title || gauge.short || gauge.id),
+        h(
+          "span",
+          { className: "font-mondwest normal-case text-xs text-muted-foreground shrink-0 tabular-nums" },
+          pct.toFixed(0) + "%"
+        )
+      ),
+      h(
+        "div",
+        {
+          className: "h-1.5 w-full rounded-full bg-muted overflow-hidden",
+          role: "progressbar",
+          "aria-valuenow": pct,
+          "aria-valuemin": 0,
+          "aria-valuemax": 100,
+        },
+        h("div", {
+          className: "h-full rounded-full transition-all " + barColor,
+          style: { width: pct + "%" },
+        })
+      ),
+      resetText
+        ? h("span", { className: "font-mondwest normal-case text-xs text-muted-foreground" }, resetText)
+        : null
+    );
+  }
+
+  // Renders the Claude usage quota section: a list of gauges.
+  // quota: null (not fetched), false (unavailable/not on usage-window plan),
+  //        or { plan_kind, gauges: [...] }
+  function QuotaSection(props) {
+    var quota = props.quota;
+    if (!quota || quota.plan_kind !== "usage_window" || !Array.isArray(quota.gauges) || quota.gauges.length === 0) {
+      return null;
+    }
+    return h(
+      "div",
+      { className: "flex flex-col gap-2 border border-border p-3 w-full" },
+      h(
+        "div",
+        { className: "flex items-center gap-2 mb-1" },
+        h("span", { className: "font-mondwest normal-case text-xs font-semibold text-foreground" }, "Claude usage")
+      ),
+      h(
+        "div",
+        { className: "flex flex-col gap-2.5" },
+        quota.gauges.map(function (gauge) {
+          return h(QuotaBar, { key: gauge.id, gauge: gauge });
+        })
+      )
+    );
+  }
+
   function ConduitCard() {
     var pair = useState(null);
     var status = pair[0];
     var setStatus = pair[1];
+
+    var quotaPair = useState(null);
+    var quota = quotaPair[0];
+    var setQuota = quotaPair[1];
 
     useEffect(function () {
       var stopped = false;
@@ -120,6 +204,25 @@
       };
     }, []);
 
+    useEffect(function () {
+      var stopped = false;
+      function loadQuota() {
+        SDK.fetchJSON("/api/plugins/conduit_push/sessions/plan-quota")
+          .then(function (body) {
+            if (!stopped) setQuota(body && body.ok ? body : false);
+          })
+          .catch(function () {
+            if (!stopped) setQuota(false);
+          });
+      }
+      loadQuota();
+      var timer = setInterval(loadQuota, QUOTA_POLL_MS);
+      return function () {
+        stopped = true;
+        clearInterval(timer);
+      };
+    }, []);
+
     // Nothing to say on a host no Conduit has used.
     if (!status || (status.app.state === "never" && status.push.state === "not_paired")) return null;
     if (!ui.Card || !ui.CardHeader || !ui.CardTitle || !ui.CardContent) return null;
@@ -132,7 +235,8 @@
         ui.CardContent,
         { className: "grid gap-3" },
         h(Row, { label: "App", row: appRow(status.app) }),
-        h(Row, { label: "Push notifications", row: pushRow(status.push) })
+        h(Row, { label: "Push notifications", row: pushRow(status.push) }),
+        h(QuotaSection, { quota: quota })
       )
     );
   }

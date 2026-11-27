@@ -130,6 +130,14 @@ test('the update push is stale after a while; waiting on the user is urgent', ()
 test('reports carry only known phases, categories and bounded numbers', () => {
   assert.deepEqual(validateReport({ session_id: 's-1', state: { phase: 'tool', tool: 'browser', tools: 4, context: 99 } }),
     { sessionId: 's-1', state: { phase: 'tool', tool: 'browser', tools: 4, context: 99 }, end: undefined });
+  assert.deepEqual(
+    validateReport({ session_id: 's-1', state: { phase: 'thinking', plan_left: 62, plan_reset_ms: 1700000000000 } }),
+    { sessionId: 's-1', state: { phase: 'thinking', tools: 0, planLeft: 62, planResetMs: 1700000000000 }, end: undefined },
+    'plan_left and plan_reset_ms should be accepted and camelCased');
+  assert.equal(validateReport({ session_id: 's-1', state: { phase: 'thinking', plan_left: 101 } }).state.planLeft, undefined,
+    'plan_left out of range should be dropped silently');
+  assert.equal(validateReport({ session_id: 's-1', state: { phase: 'thinking', plan_left: -1 } }).state.planLeft, undefined,
+    'plan_left negative should be dropped silently');
   assert.deepEqual(validateReport({ session_id: 's-1', state: { phase: 'thinking' }, end: 'stopped' }),
     { sessionId: 's-1', state: { phase: 'thinking', tools: 0 }, end: 'stopped' });
   assert.equal(validateReport({ session_id: 's-1', state: { phase: 'thinking' }, end: 'done', ended_ago: 12.5 }).endedAgoS, 12.5);

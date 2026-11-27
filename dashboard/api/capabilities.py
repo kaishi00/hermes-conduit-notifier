@@ -364,6 +364,10 @@ ROUTE_CAPABILITIES = (
     # user, for the Needs you list, the profile strip's counts and the
     # in-app banner (Hermes is waiting on you, issue 1705).
     "waiting-list",
+    # job_news responses include "claude_usage_quota": the current Claude plan
+    # usage-window gauges (same data as /sessions/plan-quota), so the Watch
+    # doesn't need a separate round-trip to show quota alongside live jobs.
+    "job-news-claude-usage-quota",
     # GET/POST /workstreams/settings: the bot's work settings, which Edit Bot
     # > Work shows and changes (on or off, what the Bot Chat does itself, which
     # settings this plugin takes (`policies`), running at once, after a
