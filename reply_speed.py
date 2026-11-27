@@ -133,6 +133,8 @@ class ReplySpeedStore:
                    "started_at REAL NOT NULL, ended_at REAL NOT NULL, output_tokens INTEGER NOT NULL, "
                    "seconds REAL NOT NULL, calls INTEGER NOT NULL, PRIMARY KEY (session_id, turn_id))")
         db.execute("CREATE INDEX IF NOT EXISTS turns_by_session ON turns (session_id, started_at)")
+        # The trim in add_call orders every kept turn by its end on each model call.
+        db.execute("CREATE INDEX IF NOT EXISTS turns_by_end ON turns (ended_at)")
         return db
 
 
@@ -149,6 +151,8 @@ def replies(turns: list[dict[str, Any]], rows: list[tuple[int, float]]) -> list[
     assistant rows with words, as (row id, timestamp). A turn whose reply isn't
     saved yet has ``row_id`` None (the reply a client is still drawing)."""
     ordered = sorted(rows, key=lambda row: (row[1], row[0]))
+    # The row pointer and the next-turn clamp below need the turns oldest first.
+    turns = sorted(turns, key=lambda turn: float(turn["started_at"]))
     out = []
     claimed: set = set()
     first = 0  # turns run oldest first: rows before an earlier turn's window aren't any later turn's

@@ -839,3 +839,26 @@ def test_the_release_paths_that_keep_a_claim_say_why(tmp_path, caplog, case, why
     assert len(_entries(tmp_path)) == 1
     lines = [r.getMessage() for r in caplog.records if "kept this process's claim" in r.getMessage()]
     assert len(lines) == 1 and why in lines[0], lines
+
+
+def test_a_loaded_gateway_without_the_helpers_says_so(tmp_path, monkeypatch, caplog):
+    import logging
+    bare = types.ModuleType("tui_gateway.server")  # loaded, but none of the helpers the release needs
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", bare)
+    _seed(tmp_path, [_entry("chat", pid=OWN_PID, lease="lease-own")])
+    with caplog.at_level(logging.INFO):
+        assert _take(tmp_path, ["chat"])["status"] == "same_host"
+    assert any("missing the helpers" in r.getMessage() for r in caplog.records)
+    assert len(_entries(tmp_path)) == 1
+
+
+def test_a_deliberate_keep_without_a_lease_id_is_not_a_failed_check(caplog):
+    import logging
+    takeover = api.chats._takeover()
+    entry = _entry("chat", pid=OWN_PID, lease="lease-own")
+    kept = [("sid", None, "a client is attached to it"),
+            ("other", takeover.CHECK_FAILED, "checking it failed (RuntimeError: boom)")]
+    with caplog.at_level(logging.INFO):
+        takeover._log_own_claims([entry], kept, OWN_PID)
+    line = next(r.getMessage() for r in caplog.records if "kept this process's claim" in r.getMessage())
+    assert "checks failed on 'other'" in line and "'sid'" not in line, line
