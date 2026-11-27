@@ -2182,7 +2182,7 @@ With Show reply speed on, Conduit shows how fast each reply was written, in
 tokens per second, beside it on the phone and the desktop. The plugin's
 `post_api_request` hook adds each model call's output tokens (the provider's
 own count) and writing time to its turn in the profile's
-`conduit-reply-speeds.db`, the newest 20,000 turns kept. A call is timed from
+`conduit-reply-speeds.db`, the 20,000 most recently ended turns kept. A call is timed from
 its first streamed chunk to its end; one with no streamed chunk, or one that
 reports reasoning tokens (hidden thinking can come before the first chunk),
 from the request, so a speed can read low but never high. Hermes' own
@@ -2195,9 +2195,11 @@ for the first token included, and isn't used.
 
 - Each turn is tied to the reply it ended on: the chat's last assistant row
   with words between the turn's first call and its end (or the next turn's
-  start), through the chat's compressions. `row_id` is null for a turn whose
+  start), through the chat's compressions. A row belongs to one turn, the
+  older one when two windows hold it. `row_id` is null for a turn whose
   reply isn't saved yet.
-- 404 when Hermes has no row for the chat, 504 past 10 seconds, 429 past 120
+- 404 when Hermes has no row for the chat, 501 on a Hermes whose sessions
+  table predates the cost columns, 504 past 10 seconds, 429 past 120
   reads a minute per profile. Every answer is `Cache-Control: no-store`.
 
 ## A chat's Kanban tasks (plugin 0.197.0+)
