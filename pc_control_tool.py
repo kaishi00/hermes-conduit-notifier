@@ -54,7 +54,7 @@ ACTIONS = ("capture", "click", "double_click", "right_click", "middle_click", "d
 SCHEMA: dict[str, Any] = {
     "name": TOOL_NAME,
     "description": (
-        "Drive the user's own computer (their PC or Mac), where they run Conduit: screenshots, clicks, typing. It isn't the Hermes host: computer_use acts "
+        "Drive the user's own computer (their PC or Mac): screenshots, clicks, typing. It's where they run Conduit, not the Hermes host: computer_use acts "
         "there. Use it when the user asks you to do something on their computer or PC: open an app, look at "
         "what's on their screen, click, type. Same actions as computer_use: capture first (mode som gives "
         "numbered elements), then act by element index, and capture again to check. type and key bring the "
