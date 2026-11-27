@@ -94,6 +94,8 @@ they run:
     media_models          Image and video generation models: the active
                           backend's models, and a pick saved where the
                           backend reads it
+    pc_control            Control from Hermes: Conduit on the user's computer
+                          runs a bot's conduit_user_computer actions
 
 A module takes what it uses from another by module (``core.TokenError``), never
 by name, so a test that replaces ``plugin_api.core._calls_home`` replaces it

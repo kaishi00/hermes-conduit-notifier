@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.203.0 (2026-11-27)
+
+### New and improved
+
+- Control from Hermes: a bot can drive the computer where you run Conduit for desktop (open apps, read the screen, click and type), wherever Hermes runs. It's off until you turn it on in Conduit's Settings on that computer, only the bots you pick can use it, each chat asks you first, and a bar on the screen with Stop shows while a bot is in control.
+
 ## 0.202.10 (2026-11-27)
 
 ### Fixes

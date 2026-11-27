@@ -3899,6 +3899,45 @@ asking for an hour. Self-hosted relays enable it with a key that has "Maps"
 enabled for a Maps ID: put it at `deploy/secrets/maps/maps.p8` and set
 `MAPS_KEY_ID` in `.env`.
 
+## Control from Hermes: the user's own computer (plugin 0.203+)
+
+Hermes' `computer_use` drives the machine Hermes runs on. `conduit_user_computer`
+drives the computer where the user runs Conduit for desktop, wherever Hermes
+is, so a bot on a server can open an app on the user's PC, read its screen and
+click and type there. Its actions are `computer_use`'s (`capture` with `som`,
+`vision` or `ax`, `click`, `double_click`, `right_click`, `middle_click`,
+`drag`, `scroll`, `type`, `key`, `set_value`, `wait`, `list_apps`,
+`list_windows`, `focus_app`, plus `launch_app`), and Conduit runs each with
+trycua's cua-driver, which it downloads when the user turns the feature on.
+
+The user is in charge on that computer:
+
+- Off until they turn on Control from Hermes in Conduit's Settings there, and
+  only the bots they pick there can reach it (Conduit polls only their
+  profiles).
+- The first action of each chat asks them there (Allow or Don't Allow). One
+  chat drives a computer at a time; allowing another chat takes it over, and
+  turning a chat down leaves the one that has it.
+- While a bot drives it, a bar on the screen says so, with Stop and a hotkey.
+  Stop answers every waiting action as stopped and forgets the chat's
+  permission, so its next action asks again.
+
+The tool is listed once a computer offered control in the last 30 days, and
+says when none is online, when more than one is (the bot names one with
+`computer`), when the user didn't answer the ask in two minutes, or when they
+turned it down or stopped it. Subagents can't use it. The plugin logs each
+action's time, chat and outcome in `conduit-pc/log.jsonl` (never what was
+typed or seen); requests and answers are deleted once the tool reads them.
+
+| Method | Path | Body | Answer |
+| --- | --- | --- | --- |
+| GET | `/api/plugins/conduit_push/pc/next?computer=&name=&platform=&wait=&profile=` | | `{ok, requests: [{id, computer, session, chat, action, args, at, needs_ok, takes_over?}]}`: the actions waiting for this computer, held open up to `wait` seconds (25 at most) until one arrives; each call marks the computer online under `name` for 45 seconds |
+| POST | `/api/plugins/conduit_push/pc/result?profile=` | `{computer, id, result}` | `{ok, taken}`: `result` is `{ok, grant?: allowed\|denied, code?: denied\|stopped\|off\|..., message?, image?, mime?, width?, height?, window_title?, elements?: [{index, role, label, bounds}], apps?, windows?}`; at most 12 MB |
+| POST | `/api/plugins/conduit_push/pc/stop?profile=` | `{computer}` | `{ok, stopped}`: the user pressed Stop on that computer |
+| DELETE | `/api/plugins/conduit_push/pc/computer?computer=&profile=` | | `{ok}`: control turned off there |
+
+Capability `pc-control`.
+
 ## Calendar, Reminders, Focus and phone status from Conduit (plugin 0.27+)
 
 Conduit can share the user's iPhone calendars (every account on the phone),

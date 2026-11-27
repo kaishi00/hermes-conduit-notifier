@@ -369,6 +369,10 @@ ROUTE_CAPABILITIES = (
     # GET /calls/rings: the calls that just went out, so Conduit on a
     # computer rings for them beside the iPhone (Calls from Hermes).
     "call-rings",
+    # GET /pc/next, POST /pc/result, /pc/stop, DELETE /pc/computer: Conduit
+    # on a computer runs a bot's conduit_user_computer actions there
+    # (Control from Hermes).
+    "pc-control",
     # POST /workstreams/call-ended: a call kept with the Bot Chat ended in
     # any voice mode, so the updates its workstreams held go out.
     "work-call-ended",
