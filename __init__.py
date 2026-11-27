@@ -44,11 +44,9 @@ _turn_started_lock = threading.Lock()
 _routing_turns: dict[str, None] = {}
 _MISSING = object()
 MAX_TURN_STARTS = 256
-# (session id, turn_id) -> (its "response ready" event or None, whether it
-# goes out, the grace timer), held from post_llm_call until on_session_end
-# says the turn finished.
-# (session id, turn id) -> (its reply, whether it notifies, its grace timer,
-# the Hermes home its turn ran in).
+# (session id, turn id) -> (its "response ready" event or None, whether it
+# goes out, the grace timer, the Hermes home its turn ran in), held from
+# post_llm_call until on_session_end says the turn finished.
 _pending_ready: dict[tuple[str, str], tuple[Any, bool, Any, Any]] = {}
 _pending_lock = threading.Lock()
 # on_session_end follows post_llm_call in the same finalizer, after only the
@@ -56,7 +54,7 @@ _pending_lock = threading.Lock()
 READY_GRACE_S = 120.0
 # Session id -> (a token, the grace timer, its turn's Hermes home) for a turn Hermes named no id for:
 # its reply can't wait for the end, but its Live Activity's end still does.
-_unnamed_ends: dict[str, tuple[object, Any]] = {}
+_unnamed_ends: dict[str, tuple[object, Any, Any]] = {}
 # Parent session -> (its running turn's id, when it started by
 # time.monotonic()): a subagent that finishes inside it is part of its reply.
 _parent_turns: dict[str, tuple[str, float]] = {}
