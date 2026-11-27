@@ -442,7 +442,7 @@ def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzi
                                  entry.get("why"))
         if event is not None:
             ref = event_ref(event)
-            on = _due(str(event.get("start") or "")[:10], zone)
+            on = _due(dates.event_day(event, zone), zone)
     # An entry's day, as its ref says; a reminder's due as the phone has it.
     due = on if ref.startswith(EVENT) or on is not None else _due(entry.get("due"), zone)
     row = {"origin": MODEL, "item_id": None, "kind": kind if kind in report.LIST_KINDS else "other",
@@ -481,7 +481,7 @@ def _event_named(events: Sequence[dict], due: Optional[float], zone: Optional[tz
         if len(title) >= 2 and sum(map(len, title)) >= 6 and set(title) <= words and event.get("id"):
             named.setdefault(str(event["id"]), []).append(event)
     if day:
-        named = {key: [event for event in found if str(event.get("start") or "")[:10] == day]
+        named = {key: [event for event in found if dates.event_day(event, zone or timezone.utc) == day]
                  for key, found in named.items()}
         named = {key: found for key, found in named.items() if found}
     else:
@@ -911,7 +911,7 @@ def on_cards(pulse_store: store.PulseStore, now: float, zone: Optional[tzinfo], 
             + [{"origin": MODEL, "item_id": None, "ref": reminder_ref(reminder), "kind": "reminder",
                 "due_at": _phone_due(reminder.get("due"), zone)} for reminder in reminders if reminder.get("id")]
             + [{"origin": MODEL, "item_id": None, "ref": event_ref(event), "kind": "date",
-                "due_at": _due(str(event.get("start") or "")[:10], zone)} for event in events if event.get("id")])
+                "due_at": _due(dates.event_day(event, zone), zone)} for event in events if event.get("id")])
     for row, entry in zip(rows[len(items):], [*[r for r in reminders if r.get("id")], *[e for e in events if e.get("id")]]):
         row["text"] = _said_as(entry.get("title"), row["due_at"], zone)
     said = {row["item_id"] if row["origin"] == MEMORY else row["ref"] for row in still_open(pulse_store, rows, now)}

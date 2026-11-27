@@ -910,11 +910,13 @@ def test_without_hermes_redactor_a_background_command_isnt_shown(live, monkeypat
 
 def test_a_check_reads_the_phones_calendar_and_reminders(live, monkeypatch):
     commitment(live, "The user will call the florist.", words="I need to call the florist", said_at=time.time() - 2 * 86400)
-    monkeypatch.setattr(followup.report, "phone_context",
-                        lambda home, now: ("## Open reminders\n- Call the florist (due tomorrow)", None))
+    zones = []
+    monkeypatch.setattr(followup.report, "phone_context", lambda home, now, zone: (
+        zones.append(zone) or "## Open reminders\n- Call the florist (due tomorrow)", None))
     llm = llm_saying(decision="done", why="a phone reminder covers it")
     check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
     assert "## Open reminders\n- Call the florist" in llm.calls[0]
+    assert zones and all(zone is not None for zone in zones)  # told in the check's own zone, as its times are
 
 
 def test_a_check_without_a_background_checkpoint_says_nothing_of_it(live):

@@ -370,7 +370,7 @@ def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]
                         events[key.strip()] = e
                     calendar = _clip(e.get("calendar"), 60)
                     moment = None if e.get("all_day") else pulse_dates.in_zone(e.get("start"), into)
-                    made_in = pulse_dates.elsewhere(e.get("time_zone"), into) if moment else ""
+                    made_in = pulse_dates.elsewhere(e.get("start"), moment, e.get("time_zone"))
                     lines.append(f"- {key}{_clip(e.get('title'), 100)} "
                                  f"({moment.isoformat() if moment else e.get('start') or ''}"
                                  f"{', all day' if e.get('all_day') else ''}"

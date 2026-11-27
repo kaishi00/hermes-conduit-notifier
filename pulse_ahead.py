@@ -377,7 +377,7 @@ def _event_line(event: dict, key: str = "", zone: Optional[tzinfo] = None) -> st
     moved = None if all_day else pulse_dates.in_zone(event.get("start"), zone)  # an all-day entry is a date
     if moved is not None:
         start, end = moved, pulse_dates.in_zone(event.get("end"), zone) or end
-        made_in = pulse_dates.elsewhere(event.get("time_zone"), zone)
+        made_in = pulse_dates.elsewhere(event.get("start"), moved, event.get("time_zone"))
     when = f"{start:%a} {start.day} {start:%b}" + (", all day" if all_day else f" {start:%H:%M}")
     if made_in:
         when += f" (event set in {made_in})"
