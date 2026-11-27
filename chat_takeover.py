@@ -370,15 +370,22 @@ def _log_own_claims(own: list, kept: list, own_pid: int) -> None:
     answers same_host for it, and Conduit then tells the person the chat is
     open elsewhere (hermes-conduit#3381)."""
     gateway_missing = next((why for sid, _, why in kept if sid is None), None)
+    failed = [f"{sid!r}: {why}" for sid, held, why in kept if sid is not None and held is None]
     for entry in own:
-        live = str((entry.get("metadata") or {}).get("live_session_id") or entry.get("live_session_id") or "")
+        metadata = entry.get("metadata")
+        live = str((metadata.get("live_session_id") if isinstance(metadata, dict) else None)
+                   or entry.get("live_session_id") or "")
         lease_id = entry.get("lease_id")
         if _owner_pid(entry) != own_pid:
             why = "the claim names no usable pid"
         else:
             why = gateway_missing or next(
                 (why for sid, held, why in kept if (live and sid == live) or (lease_id and held == lease_id)),
-                "no runtime in this process holds it any more")
+                None)
+            if why is None:
+                # A runtime whose check failed can't be tied to the claim without its live id.
+                why = ("no runtime in this process was seen holding it"
+                       + (f"; checks failed on {', '.join(failed)}" if failed else ""))
         logger.info("Chat takeover: kept this process's claim on chat %r (live session %r, surface %r): %s"
                     " (plugin %s, pid %s; hermes-conduit#3381)", _entry_session_id(entry), live or None,
                     entry.get("surface"), why, LOADED_VERSION, own_pid)

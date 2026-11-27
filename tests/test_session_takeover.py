@@ -701,7 +701,7 @@ def test_a_claim_with_a_client_or_work_on_it_stays(tmp_path, case):
     ("building", "its agent is still being built"), ("pending", "it is waiting on an answer (approval)"),
     ("delegating", "delegated work is running from it"), ("writing", "it is writing its transcript"),
     ("marked", "a turn marker says a turn is running"), ("closing", "the runtime is closing"),
-    ("gone", "no runtime in this process holds it any more"),
+    ("gone", "no runtime in this process was seen holding it"),
 ])
 def test_a_kept_own_claim_says_why_in_the_log(tmp_path, caplog, case, why):
     """#3381: same_host tells the person the chat is open elsewhere, so the
@@ -788,3 +788,14 @@ def test_the_release_holds_the_in_process_takeover_lock(tmp_path):
     gateway._release_active_session_slot = checked
     assert _take_with(tmp_path, ["chat"], gateway, registry)["status"] == "taken_over"
     assert held == [True]  # another takeover thread can't interleave its registry write
+
+
+def test_a_kept_own_claim_with_odd_metadata_still_answers(tmp_path, caplog):
+    import logging
+    entry = _entry("chat", pid=OWN_PID, lease="lease-own")
+    entry["metadata"] = ["not", "a", "dict"]
+    _seed(tmp_path, [entry])
+    registry, gateway = FakeRegistry(tmp_path), FakeGateway()
+    with caplog.at_level(logging.INFO):
+        assert _take_with(tmp_path, ["chat"], gateway, registry)["status"] == "same_host"
+    assert any("no runtime in this process was seen holding it" in r.getMessage() for r in caplog.records)
