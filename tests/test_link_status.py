@@ -56,6 +56,7 @@ def fresh(monkeypatch, tmp_path):
     # The dashboard's own copy of link_status.py, loaded afresh per test.
     monkeypatch.setattr(api.link_status, "_link_status_module", None)
     api.link_status._link_app_noted.clear()
+    api.link_status._link_client_noted.clear()
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
 
 
@@ -76,6 +77,15 @@ def test_an_older_sighting_never_replaces_a_newer_one(tmp_path):
     link._written.clear()  # another process, with its own throttle
     assert not link.app_seen(tmp_path, now=1500.0)
     assert link.read(tmp_path)["app_seen_at"] == 2000.0
+
+
+def test_each_app_is_noted_by_its_platform_once_a_minute(tmp_path):
+    assert link.client_seen(tmp_path, "desktop", now=1000.0)
+    assert not link.client_seen(tmp_path, "desktop", now=1030.0)
+    assert link.client_seen(tmp_path, " IOS ", now=1030.0)
+    assert not link.client_seen(tmp_path, "android", now=1040.0)
+    assert not link.client_seen(tmp_path, None, now=1040.0)
+    assert link.read(tmp_path) == {"desktop_seen_at": 1000.0, "ios_seen_at": 1030.0}
 
 
 def test_a_push_that_starts_or_stops_failing_writes_at_once(tmp_path):
@@ -218,6 +228,33 @@ def test_sightings_stay_bounded_whatever_profiles_callers_send(monkeypatch):
     assert api.core._limiter_key("d") in api.link_status._link_app_noted and api.core._limiter_key("a") not in api.link_status._link_app_noted
 
 
+def test_requests_name_the_app_that_reached_the_host(route, tmp_path):
+    assert _status(route)["clients"] == {"ios": {"seen_at": None, "open_sockets": 0},
+                                         "desktop": {"seen_at": None, "open_sockets": 0}}
+    # An app that doesn't say which it is (an older build) names neither.
+    route.get(f"{BASE}/sessions/desktop-views", headers={"user-agent": "node", "x-conduit-client": "conduit"})
+    assert _status(route)["clients"]["desktop"]["seen_at"] is None
+    # The platform counts only beside X-Conduit-Client.
+    route.get(f"{BASE}/sessions/desktop-views", headers={"user-agent": CHROME, "x-conduit-platform": "desktop"})
+    assert _status(route)["clients"]["desktop"]["seen_at"] is None
+    route.get(f"{BASE}/sessions/desktop-views",
+              headers={"user-agent": "node", "x-conduit-client": "conduit", "x-conduit-platform": "desktop"})
+    clients = _status(route)["clients"]
+    assert clients["desktop"]["seen_at"] is not None and clients["ios"]["seen_at"] is None
+    # Saved for the next dashboard start.
+    assert "desktop_seen_at" in link.read(tmp_path)
+
+
+def test_sightings_of_each_app_are_kept_for_the_whole_host(monkeypatch, route, tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_default_hermes_root", lambda: root, raising=False)
+    route.get(f"{BASE}/sessions/desktop-views?profile=work",
+              headers={"user-agent": CONDUIT, "x-conduit-client": "conduit", "x-conduit-platform": "ios"})
+    assert _status(route)["clients"]["ios"]["seen_at"] is not None
+    assert "ios_seen_at" in link.read(root) and "ios_seen_at" not in link.read(tmp_path)
+
+
 def test_an_old_sighting_reads_as_idle(route, tmp_path):
     link.app_seen(tmp_path, now=1.0)
     body = _status(route)
@@ -253,6 +290,34 @@ def test_an_open_conduit_socket_counts_until_it_closes(monkeypatch, route, tmp_p
     socket.closed = True
     route.hook.sweep()
     assert _status(route)["app"]["open_sockets"] == 0
+
+
+def test_an_open_socket_names_its_app(monkeypatch, route, tmp_path):
+    socket = WSTransport({"user-agent": CONDUIT, "x-conduit-client": "conduit", "x-conduit-platform": "ios"})
+    server = types.ModuleType("tui_gateway.server")
+    server._sessions = {"rt-1": {"profile_home": str(tmp_path)}}
+    server._session_home = lambda session: Path(session["profile_home"])
+
+    def handler(rid, params):
+        return {"jsonrpc": "2.0", "id": rid, "result": {"session_id": "rt-1", "session_key": "stored-1"}}
+
+    server._methods = {"session.activate": handler, "session.resume": handler}
+    transports = types.ModuleType("tui_gateway.transport")
+    transports.current_transport = lambda: socket
+    ws = types.ModuleType("tui_gateway.ws")
+    ws.WSTransport = WSTransport
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", server)
+    monkeypatch.setitem(sys.modules, "tui_gateway.transport", transports)
+    monkeypatch.setitem(sys.modules, "tui_gateway.ws", ws)
+    assert route.hook.try_install()
+
+    server._methods["session.resume"](1, {})
+    clients = _status(route)["clients"]
+    assert clients["ios"]["open_sockets"] == 1 and clients["ios"]["seen_at"] is not None
+    assert clients["desktop"] == {"seen_at": None, "open_sockets": 0}
+    socket.closed = True
+    route.hook.sweep()
+    assert _status(route)["clients"]["ios"]["open_sockets"] == 0
 
 
 @pytest.mark.parametrize("extra, recorded, state", [

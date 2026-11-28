@@ -35,6 +35,10 @@ _link_status_lock = threading.Lock()
 # Profile (as _limiter_key names it) -> when a request from Conduit last
 # reached a route here.
 _link_app_noted: Dict[str, float] = {}
+# Platform ("ios" or "desktop", as X-Conduit-Platform names it) -> when a
+# request from that app last reached a route here, on any profile.
+_link_client_noted: Dict[str, float] = {}
+CLIENT_PLATFORMS = ("ios", "desktop")  # link_status.py's CLIENT_PLATFORMS
 
 
 def _link_status() -> Any:
@@ -62,6 +66,25 @@ def _from_conduit(headers: Any) -> bool:
     return not str(headers.get("user-agent") or "").startswith("Mozilla/")
 
 
+def _platform(headers: Any) -> Optional[str]:
+    """The app a Conduit request names in X-Conduit-Platform, or None (an
+    older app, or one that doesn't say). Read only with X-Conduit-Client."""
+    if headers.get("x-conduit-client") is None:
+        return None
+    platform = str(headers.get("x-conduit-platform") or "").strip().lower()
+    return platform if platform in CLIENT_PLATFORMS else None
+
+
+def _host_root() -> Any:
+    """The root Hermes home, which keeps the host's per-app sightings."""
+    try:
+        from hermes_constants import get_default_hermes_root
+    except (ImportError, AttributeError):  # an older Hermes: one home
+        from hermes_constants import get_hermes_home
+        return get_hermes_home()
+    return get_default_hermes_root()
+
+
 def _note_app_request(connection: Any) -> None:
     """Memory only (no I/O, no profile scope on every request): the link
     status route folds it in and saves it for the profile it reads."""
@@ -79,13 +102,17 @@ def _note_app_request(connection: Any) -> None:
                 if len(_link_app_noted) >= core.LIMITER_MAX_KEYS:
                     return
             _link_app_noted[key] = now
+            platform = _platform(connection.headers)
+            if platform is not None:
+                _link_client_noted[platform] = now
     except Exception:  # noqa: BLE001 — never fails Conduit's request
         logger.debug("Conduit: request not noted for the link status", exc_info=True)
 
 
 def link_status_summary(home: Any, pairing: Optional[Dict[str, Any]], open_sockets: int,
                         observing: bool, *, requested_at: Optional[float] = None,
-                        now: Optional[float] = None) -> Dict[str, Any]:
+                        now: Optional[float] = None, root: Any = None,
+                        client_sockets: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     """What the card shows for ``home``: the app's state and the push state.
     ``requested_at`` is this process's newest Conduit request, which the
     file may not have yet (its writes are throttled)."""
@@ -99,6 +126,11 @@ def link_status_summary(home: Any, pairing: Optional[Dict[str, Any]], open_socke
         app_state = "idle"
     else:
         app_state = "never"
+    # Which apps reached this host, on any profile: the root home's record.
+    host = recorded if root is None else _link_status().read(root)
+    clients = {platform: {"seen_at": host.get(f"{platform}_seen_at"),
+                          "open_sockets": (client_sockets or {}).get(platform, 0)}
+               for platform in CLIENT_PLATFORMS}
     ok_at, failed_at = recorded.get("push_ok_at"), recorded.get("push_failed_at")
     if pairing is None:
         push_state = "not_paired"
@@ -118,6 +150,7 @@ def link_status_summary(home: Any, pairing: Optional[Dict[str, Any]], open_socke
         "push": {"state": push_state, "ok_at": ok_at, "failed_at": failed_at,
                  "failed_reason": recorded.get("push_failed_reason") if push_state == "failing" else None,
                  "gateway_name": (pairing or {}).get("gateway_name") or None},
+        "clients": clients,
         "now": now,
     }
 
@@ -137,12 +170,18 @@ async def get_link_status(response: Response, profile: Optional[str] = None) -> 
         home = get_hermes_home()
         with _link_status_lock:
             requested_at = _link_app_noted.get(core._limiter_key(profile))
+            client_noted = dict(_link_client_noted)
         if requested_at is not None:
             _link_status().app_seen(home, now=requested_at)  # throttled there
-        observing, _ = desktop_views._desktop_view_hook.status()
+        root = _host_root()
+        for platform, noted_at in client_noted.items():
+            _link_status().client_seen(root, platform, now=noted_at)  # throttled there
+        hook = desktop_views._desktop_view_hook
+        observing, _ = hook.status()
         return link_status_summary(home, core._load_pairing_state(core._pairing_state_path()),
-                                   desktop_views._desktop_view_hook.conduit_sockets(home), observing,
-                                   requested_at=requested_at)
+                                   hook.conduit_sockets(home), observing,
+                                   requested_at=requested_at, root=root,
+                                   client_sockets=hook.conduit_sockets_by_platform())
 
     try:
         summary = await core._run_scoped(profile, read)

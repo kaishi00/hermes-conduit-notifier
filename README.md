@@ -178,10 +178,17 @@ the dashboard instead, so it gets its own card:
   (with a short reason: the relay unreachable, its answer, a certificate),
   Refused or Blocked (the same marks `status` reports), Paired with nothing
   sent yet, or Not paired.
+- **Conduit on iPhone** and **Conduit for desktop** (plugin 0.207+): whether
+  each app has reached this host, on any profile, with a link to get the one
+  that hasn't. Listed once an app that names itself (`X-Conduit-Platform:
+  ios` or `desktop`, beside `X-Conduit-Client`) has connected, since older
+  builds don't say which they are. Each app reads the same record to point
+  you to the other once, only when the other has never reached this host.
 
 It reads `GET /api/plugins/conduit_push/link-status` every 30 seconds. The
 times live in `conduit-link-status.json` in the profile's Hermes home, written
-at most once a minute each; it holds no credential or relay address.
+at most once a minute each; which apps reached the host is kept in the root
+Hermes home's copy. It holds no credential, relay address or device name.
 
 ## Events
 
