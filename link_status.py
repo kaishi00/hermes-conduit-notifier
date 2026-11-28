@@ -7,7 +7,12 @@ gateway's messaging adapters, and Conduit is a dashboard client, not one.
 Two processes write it, per Hermes home, in ``conduit-link-status.json``:
 the dashboard notes Conduit's requests and sockets (``app_seen_at``), and the
 hooks note each relay delivery (``push_ok_at``, or ``push_failed_at`` with a
-short reason). Times are seconds since the epoch. Writes are throttled, so a
+short reason). Times are seconds since the epoch.
+
+Which Conduit apps reached the host (``ios_seen_at``, ``desktop_seen_at``)
+is kept once per host, in the root Hermes home's file, whichever profile
+they used: each app offers the other only when it has never been seen here
+(``client_seen``). Only the kind of app and the time, never a device's name. Writes are throttled, so a
 busy app or a long turn costs one small write a minute; a push that starts or
 stops failing always writes at once. Anything unreadable reads as nothing
 recorded, so a fault here only makes the card say less.
@@ -37,6 +42,9 @@ FILE_NAME = "conduit-link-status.json"
 # One write a minute per home and kind at most; the card counts in minutes.
 WRITE_EVERY_S = 60.0
 MAX_REASON_CHARS = 200
+# The apps that name themselves in X-Conduit-Platform: the iPhone app
+# (iPhone, iPad, Watch and CarPlay run through it) and Conduit for desktop.
+CLIENT_PLATFORMS = ("ios", "desktop")
 
 _lock = threading.Lock()
 # (home, kind) -> when this process last wrote it.
@@ -67,6 +75,25 @@ def app_seen(home: Any, *, now: float | None = None) -> bool:
     return _merge(key, {"app_seen_at": now}, ("app",))
 
 
+def client_platform(value: Any) -> str | None:
+    """The platform an X-Conduit-Platform value names, or None."""
+    platform = str(value or "").strip().lower()
+    return platform if platform in CLIENT_PLATFORMS else None
+
+
+def client_seen(root: Any, platform: Any, *, now: float | None = None) -> bool:
+    """Notes that Conduit on ``platform`` reached this host, in the root
+    home ``root``. True when it was written."""
+    platform = client_platform(platform)
+    if platform is None:
+        return False
+    now = time.time() if now is None else now
+    key = _key(root)
+    if not _due(key, f"client:{platform}", now):
+        return False
+    return _merge(key, {f"{platform}_seen_at": now}, (f"client:{platform}",))
+
+
 def push_result(home: Any, ok: bool, reason: str = "", *, now: float | None = None) -> bool:
     """Notes how a relay delivery went. True when it was written."""
     now = time.time() if now is None else now
@@ -86,7 +113,8 @@ def read(home: Any) -> dict[str, Any]:
     """The recorded times (and the last failure's reason), each only when valid."""
     raw = _load(Path(_key(home)) / FILE_NAME)
     clean: dict[str, Any] = {}
-    for field in ("app_seen_at", "push_ok_at", "push_failed_at"):
+    for field in ("app_seen_at", "push_ok_at", "push_failed_at",
+                  *(f"{platform}_seen_at" for platform in CLIENT_PLATFORMS)):
         if _valid_time(raw.get(field)):
             clean[field] = float(raw[field])
     reason = raw.get("push_failed_reason")

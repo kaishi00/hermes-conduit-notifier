@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.207.0 (2026-11-28)
+
+### New and improved
+
+- The host notes which Conduit apps reach it, iPhone or desktop (only the kind of app and when), so each app can point you to the other once, and Hermes' Conduit card lists both.
+
 ## 0.206.4 (2026-11-28)
 
 ### Fixes

@@ -501,7 +501,7 @@ class _DesktopViewHook:
         if home is None:
             return
         if conduit:
-            self._note_conduit(transport, home)
+            self._note_conduit(transport, home, link_status._platform(headers))
             return
         now = time.time()
         self.store.record(home, stored_id, client, now, opened_at=now)
@@ -520,16 +520,31 @@ class _DesktopViewHook:
                                           "client": client, "alive_at": now}
         self._wake.set()
 
-    def _note_conduit(self, transport: Any, home: Any) -> None:
-        """Follows a Conduit socket for the link status; it is seen now."""
+    def _note_conduit(self, transport: Any, home: Any, platform: Optional[str] = None) -> None:
+        """Follows a Conduit socket for the link status; it is seen now.
+        ``platform`` is the app it named (X-Conduit-Platform), if any."""
         try:
             ref = weakref.ref(transport)
         except TypeError:
             ref = None  # can't follow this socket's life: the open alone counts
         if ref is not None:
             with self._focus_lock:
-                self._conduit[id(transport)] = {"ref": ref, "home": _desktop_views_key(home)}
+                self._conduit[id(transport)] = {"ref": ref, "home": _desktop_views_key(home),
+                                                "platform": platform}
         link_status._link_status().app_seen(home)
+        if platform is not None:
+            link_status._link_status().client_seen(link_status._host_root(), platform)
+
+    def conduit_sockets_by_platform(self) -> Dict[str, int]:
+        """Conduit's open gateway sockets on this host, by the app that named
+        itself; sockets from apps that didn't aren't counted."""
+        counts: Dict[str, int] = {}
+        with self._focus_lock:
+            for entry in self._conduit.values():
+                platform = entry.get("platform")
+                if platform is not None and _conduit_socket_open(entry):
+                    counts[platform] = counts.get(platform, 0) + 1
+        return counts
 
     def conduit_sockets(self, home: Any) -> int:
         """Conduit's open gateway sockets in ``home`` (those that opened a chat)."""
@@ -544,12 +559,20 @@ class _DesktopViewHook:
                 if not _conduit_socket_open(entry):
                     del self._conduit[key]
             homes = {entry["home"] for entry in self._conduit.values()}
+            platforms = {entry.get("platform") for entry in self._conduit.values()} - {None}
         for home in homes:
             try:
                 # Throttled there: one write a minute while the app stays connected.
                 link_status._link_status().app_seen(home, now=now)
             except Exception:  # noqa: BLE001 — the card then says less
                 logger.debug("Conduit: link status not recorded", exc_info=True)
+        if platforms:
+            try:
+                root = link_status._host_root()
+                for platform in platforms:
+                    link_status._link_status().client_seen(root, platform, now=now)
+            except Exception:  # noqa: BLE001 — the apps then offer each other more
+                logger.debug("Conduit: app platform not recorded", exc_info=True)
 
     def sweep(self, now: Optional[float] = None) -> None:
         """Ends the selection of connections that closed, at their last check."""

@@ -5,6 +5,8 @@
   // (slot sessions:top), beside Hermes' own Connected Platforms card, which
   // lists only the gateway's messaging adapters. It reads /link-status: is
   // the app reaching this host, and do its pushes get through the relay?
+  // Once an app that names itself has connected, it also lists Conduit on
+  // iPhone and Conduit for desktop, with where to get the one not seen here.
   // The tab component stays empty (the manifest hides the tab); registering
   // it keeps the dashboard from reporting the plugin as failing to load.
   var plugins = window.__HERMES_PLUGINS__;
@@ -42,6 +44,20 @@
     }
     if (app.state === "idle") return { tone: "warning", badge: "Idle", detail: "Last seen " + seen };
     return { tone: "outline", badge: "Not seen", detail: "The app hasn't reached this host yet" };
+  }
+
+  var GET_APP = {
+    ios: { label: "Conduit on iPhone", url: "https://apps.apple.com/us/app/hermes-conduit/id6790977764", where: "the App Store" },
+    desktop: { label: "Conduit for desktop", url: "https://hermesconduit.app/desktop/", where: "hermesconduit.app" },
+  };
+
+  function clientRow(platform, client) {
+    if (client.open_sockets > 0) return { tone: "success", badge: "Connected", detail: "Open on this host" };
+    if (typeof client.seen_at === "number") {
+      return { tone: "outline", badge: "Seen", detail: "Last seen " + (ago(client.seen_at) || "just now") };
+    }
+    var app = GET_APP[platform];
+    return { tone: "outline", badge: "Not seen", detail: "Not used on this host yet. Get it from " + app.where + ".", url: app.url };
   }
 
   function pushRow(push) {
@@ -89,11 +105,26 @@
           "div",
           { className: "flex flex-col gap-0.5 min-w-0" },
           h("span", { className: "font-mondwest normal-case text-sm font-medium truncate" }, props.label),
-          h("span", { className: "font-mondwest normal-case text-xs text-muted-foreground" }, row.detail)
+          h("span", { className: "font-mondwest normal-case text-xs text-muted-foreground" }, row.detail,
+            row.url ? " " : null,
+            row.url ? h("a", { href: row.url, target: "_blank", rel: "noopener noreferrer", className: "underline" }, "Get it") : null)
         )
       ),
       ui.Badge ? h(ui.Badge, { tone: row.tone, className: "shrink-0 self-start sm:self-center" }, row.badge) : null
     );
+  }
+
+  // Only once an app that names itself has been seen: before that, every
+  // Conduit here may be an older build that doesn't say which it is.
+  function clientRows(clients) {
+    if (!clients || !clients.ios || !clients.desktop) return [];
+    var named = ["ios", "desktop"].some(function (platform) {
+      return clients[platform].open_sockets > 0 || typeof clients[platform].seen_at === "number";
+    });
+    if (!named) return [];
+    return ["ios", "desktop"].map(function (platform) {
+      return h(Row, { key: platform, label: GET_APP[platform].label, row: clientRow(platform, clients[platform]) });
+    });
   }
 
   function ConduitCard() {
@@ -128,12 +159,13 @@
       ui.Card,
       null,
       h(ui.CardHeader, null, h(ui.CardTitle, { className: "text-base" }, title)),
-      h(
+      h.apply(null, [
         ui.CardContent,
         { className: "grid gap-3" },
-        h(Row, { label: "App", row: appRow(status.app) }),
-        h(Row, { label: "Push notifications", row: pushRow(status.push) })
-      )
+        h(Row, { key: "app", label: "App", row: appRow(status.app) })
+      ].concat(clientRows(status.clients), [
+        h(Row, { key: "push", label: "Push notifications", row: pushRow(status.push) })
+      ]))
     );
   }
 
