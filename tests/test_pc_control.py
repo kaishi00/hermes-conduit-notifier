@@ -259,6 +259,33 @@ def test_stop_waits_for_a_poll_taking_requests_under_the_queues_lock(store, monk
     assert stopped.is_set()
 
 
+def test_stop_waits_for_an_answer_being_written_so_the_answer_stands(store, monkeypatch):
+    # notifier#1146 review: Stop's check and its stopped write can't fall either side of an answer.
+    import threading
+    import time
+    store.note_computer(PC, "Asuka", "windows")
+    request = store.add_request(PC, SESSION, "A", "click", {"element": 1})
+    store.claim(PC)
+    real = store._write_file
+    stopper = None
+    stopped = threading.Event()
+
+    def stop_during_answer(path, data):
+        nonlocal stopper
+        if stopper is None and "results" in str(path) and data.get("ok") is True:
+            stopper = threading.Thread(target=lambda: (store.stop(PC), stopped.set()))
+            stopper.start()
+            time.sleep(0.2)
+            assert not stopped.is_set(), "Stop ran while the answer was being written"
+        real(path, data)
+    monkeypatch.setattr(store, "_write_file", stop_during_answer)
+    assert store.answer(request["id"], {"ok": True}, computer=PC) is True
+    stopper.join(5)
+    monkeypatch.undo()
+    assert stopped.is_set()
+    assert store.take_result(request["id"]) == {"ok": True}
+
+
 def test_an_answer_the_tool_read_at_once_counts_as_taken(store, monkeypatch):
     store.note_computer(PC, "Asuka", "windows")
     request = store.add_request(PC, SESSION, "A", "capture", {})

@@ -56,9 +56,10 @@ MAX_ENTRIES = 2000
 DUPLICATE_NAMES_TRIED = 100
 # A single SSH step (not a walk) that takes longer is given up on.
 SSH_STEP_TIMEOUT_S = 25
-# A folder check for a reply's link: well inside the resolve request's own
-# limit, so a machine that doesn't answer falls back to the name's slash.
-SSH_FOLDER_CHECK_TIMEOUT_S = 6
+# A folder check for a reply's link: long enough for a slow machine to
+# answer, and with room inside the resolve request's own 25 s limit, so one
+# that doesn't answer falls back to the name's slash rather than a 504.
+SSH_FOLDER_CHECK_TIMEOUT_S = 15
 SEARCH_MAX_RESULTS = 200
 SEARCH_MAX_MATCHES_PER_FILE = 5
 SEARCH_MAX_FILES = 20000

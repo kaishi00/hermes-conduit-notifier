@@ -1083,4 +1083,4 @@ def test_the_ssh_folder_check_ends_well_inside_the_resolve_requests_limit(tmp_pa
     body = client.get(f"{BASE}/workspace/resolve", params={"path": "skills/x/", "session_id": "s1"}).json()
     assert body["isDirectory"] is True
     assert asked and asked[-1] == workspace_files.SSH_FOLDER_CHECK_TIMEOUT_S
-    assert workspace_files.SSH_FOLDER_CHECK_TIMEOUT_S * 3 <= workspace_files.SSH_STEP_TIMEOUT_S
+    assert workspace_files.SSH_FOLDER_CHECK_TIMEOUT_S + 5 <= workspace_files.SSH_STEP_TIMEOUT_S

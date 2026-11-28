@@ -275,17 +275,21 @@ class PcControlStore:
         that isn't (or is no longer) waiting for that computer."""
         request_id = clean_id(request_id, "request id")
         folder = self._dir("requests")
-        request = None
-        for suffix in (".claimed", ".json"):
-            path = folder / f"{request_id}{suffix}"
-            data = _load(path)
-            if isinstance(data, dict):
-                request = data
-                break
-        if request is None or request.get("computer") != computer:
-            return False
-        path = self._dir("results") / f"{request_id}.json"
-        self._write_file(path, result)
+        # Under the queue's lock, which stop() takes too: Stop's check for an
+        # answer and its stopped write can't fall either side of this one, so
+        # an action that ran keeps its answer (notifier#1146 review).
+        with _file_lock(self.root / "requests"):
+            request = None
+            for suffix in (".claimed", ".json"):
+                path = folder / f"{request_id}{suffix}"
+                data = _load(path)
+                if isinstance(data, dict):
+                    request = data
+                    break
+            if request is None or request.get("computer") != computer:
+                return False
+            path = self._dir("results") / f"{request_id}.json"
+            self._write_file(path, result)
         # The tool may have given up and dropped the request meanwhile: then
         # nothing would read or sweep this answer. Unless the tool already
         # read it: then the answer is gone with the request, and it was taken.
