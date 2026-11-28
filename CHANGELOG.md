@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.205.8 (2026-11-27)
+
+### Fixes
+
+- Pulse: an event whose time zone has no name, set at an offset to the second, now reads its offset as hours and minutes beside its time.
+
 ## 0.205.7 (2026-11-27)
 
 ### Fixes
