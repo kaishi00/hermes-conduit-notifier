@@ -383,7 +383,17 @@ def _log_own_claims(own: list, kept: list, own_pid: int) -> None:
             why = gateway_missing or next(
                 (why for sid, held, why in kept if (live and sid == live) or (lease_id and held == lease_id)),
                 None)
-            if why is None:
+            deliberate = [held for sid, held, _ in kept if sid is not None and held is not CHECK_FAILED]
+            if why is None and deliberate:
+                # A runtime was kept on purpose, but nothing ties it to this claim (notifier#1141).
+                missing = [] if live else ["the claim names no live session"]
+                if not lease_id:
+                    missing.append("the claim names no lease id")
+                elif all(held is None for held in deliberate):
+                    missing.append("the kept runtime's lease names no id")
+                why = ("a runtime in this process was kept on purpose, but it can't be tied to this claim: "
+                       + (" and ".join(missing) or "neither its live session nor its lease matches"))
+            elif why is None:
                 # A runtime whose check failed can't be tied to the claim without its live id.
                 why = ("no runtime in this process was seen holding it"
                        + (f"; checks failed on {', '.join(failed)}" if failed else ""))

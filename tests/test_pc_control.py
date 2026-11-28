@@ -216,6 +216,36 @@ def test_an_answer_after_the_tool_gave_up_is_not_kept(store):
     assert not list((store.root / "results").iterdir())
 
 
+def test_a_poll_that_takes_a_request_as_stop_answers_it_never_runs_it(store, monkeypatch):
+    # The poll checked for an answer before Stop wrote one, then took the request.
+    store.note_computer(PC, "Asuka", "windows")
+    request = store.add_request(PC, SESSION, "A", "click", {"element": 1})
+    real = store_mod.os.replace
+
+    def stop_lands_first(src, dst, *rest):
+        if str(src).endswith(f"{request['id']}.json") and str(dst).endswith(".claimed"):
+            store._write_file(store.root / "results" / f"{request['id']}.json", {"ok": False, "code": "stopped"})
+        return real(src, dst, *rest)
+    monkeypatch.setattr(store_mod.os, "replace", stop_lands_first)
+    assert store.claim(PC) == []
+    monkeypatch.undo()
+    assert store.take_result(request["id"]) == {"ok": False, "code": "stopped"}
+
+
+def test_an_answer_the_tool_read_at_once_counts_as_taken(store, monkeypatch):
+    store.note_computer(PC, "Asuka", "windows")
+    request = store.add_request(PC, SESSION, "A", "capture", {})
+    store.claim(PC)
+    real = store._write_file
+
+    def read_at_once(path, data):
+        real(path, data)
+        if "results" in str(path):
+            assert store.take_result(request["id"]) == {"ok": True}
+    monkeypatch.setattr(store, "_write_file", read_at_once)
+    assert store.answer(request["id"], {"ok": True}, computer=PC) is True
+
+
 def test_no_answer_in_time_drops_the_request(store, monkeypatch):
     store.note_computer(PC, "Asuka", "windows")
     monkeypatch.setattr(tool, "ASK_WAIT_S", 0.05)
@@ -479,3 +509,24 @@ def test_turn_note_never_raises(tmp_path):
             raise OSError("unreadable")
 
     assert tool.note(Broken()) is None
+
+
+def test_a_computers_ask_that_cant_be_read_raises_rather_than_reading_as_gone(tmp_path, monkeypatch):
+    # The computer's dialog keeps following an ask it can't read for a moment
+    # (hermes-conduit#3424): it must not close as if the ask were gone.
+    present = present_mod.PresentStore(tmp_path)
+    _phone(present)
+    prompt = present.ask_pc("Allow Hermes to control Asuka?", "Chat: A",
+                            pc={"computer": PC, "request": "req-1", "name": "Asuka", "bot": ""})
+    real = type(present.path).read_text
+
+    def busy(path, *args, **kwargs):
+        if path == present.path:
+            raise PermissionError("busy")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(present.path), "read_text", busy)
+    with pytest.raises(OSError):
+        present.pc_ask(prompt["id"])
+    monkeypatch.undo()
+    assert present.pc_ask(prompt["id"])["status"] == "waiting"

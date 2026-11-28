@@ -405,12 +405,25 @@ def resolve_file(name: str, session_ids: Optional[List[str]], profile: Optional[
         conn.close()
     if found.get("path"):
         # A folder opens on its entries (desktop issue 686). A profile whose
-        # files are on its SSH machine can't check: a name written with its
-        # trailing slash is a folder there.
+        # files are on its SSH machine asks that machine (notifier#1139); if
+        # it can't, a name written with its trailing slash is a folder there.
         is_folder = getattr(exists, "is_folder", None)
-        found["isDirectory"] = (bool(is_folder(os.path.expanduser(found["path"]))) if is_folder is not None
-                                else name.strip().endswith(("/", "\\")))
+        if is_folder is not None:
+            found["isDirectory"] = bool(is_folder(os.path.expanduser(found["path"])))
+        else:
+            found["isDirectory"] = _remote_is_folder(profile, found["path"], name)
     return found
+
+
+def _remote_is_folder(profile: Optional[str], path: str, name: str) -> bool:
+    guess = name.strip().endswith(("/", "\\"))
+    try:
+        workspace = _workspace(profile)
+        check = getattr(workspace, "is_folder", None)
+        return bool(check(path)) if check is not None else guess
+    except Exception:  # the SSH machine didn't answer: the name's own slash says
+        logger.debug("Conduit workspace resolve: couldn't ask the SSH machine about %s", path, exc_info=True)
+        return guess
 
 
 def _terminal_folder() -> Optional[str]:

@@ -797,6 +797,13 @@ class SshWorkspace:
         real = next((line for line in lines if line.startswith("/")), path)
         return posixpath.normpath(real)
 
+    def is_folder(self, raw: Any) -> bool:
+        """Whether ``raw`` is a folder on the SSH machine (a reply's link,
+        desktop issue 686): one bounded step, no root to check against."""
+        path = self._norm(raw)
+        lines = self._run(f'[ -d {shlex.quote(path)} ] && echo folder || echo other')
+        return "folder" in lines
+
     def _check(self, root: str, raw: Any, resolve: bool = True) -> str:
         path = self._norm(raw)
         if not self._inside(root, path):

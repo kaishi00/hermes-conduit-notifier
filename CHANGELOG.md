@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.206.1 (2026-11-28)
+
+### Fixes
+
+- Control from Hermes: an action Stop answered can no longer run on a computer whose poll took it at the same moment, and a computer's answer the bot read at once no longer counts as lost.
+- A folder a reply names on a profile whose files are on its SSH machine opens as a folder even when it was written without a trailing slash.
+
 ## 0.206.0 (2026-11-28)
 
 ### New and improved

@@ -19,7 +19,8 @@ processes that share only this profile's home, so the queue is files under
   when Stop was pressed elsewhere.
 
 Nothing here holds what was typed or seen beyond the one round trip: the
-request and result files are removed when the tool reads the answer, and the
+request and result files are removed when the tool reads the answer (an
+answer that comes after the tool gave up is removed as it's written), and the
 log keeps the action, the chat and the time only.
 
 The dashboard loads this file by path (it can't import the plugin), so it
@@ -199,8 +200,15 @@ class PcControlStore:
         for request in self._requests(include_claimed=True):
             if request.get("computer") != computer:
                 continue
-            # A waiting one is taken off the queue first, so the computer's next
-            # poll can't claim and run it after Stop.
+            # The stopped answer goes first: claim() checks for an answer again
+            # after it takes a request, so a poll racing this one can't run it.
+            # One the computer already answered keeps its answer: it ran.
+            result = self._dir("results") / f"{request['id']}.json"
+            if not result.exists():
+                self._write_file(result, {"ok": False, "code": "stopped"})
+                stopped += 1
+            # Then a waiting one is taken off the queue, so the computer's next
+            # poll doesn't even see it.
             waiting = folder / f"{request['id']}.json"
             try:
                 os.replace(waiting, waiting.with_suffix(".claimed"))
@@ -209,12 +217,7 @@ class PcControlStore:
             except OSError:
                 # Can't move it (Windows holds a file another reader has open):
                 # claim() skips a request that has a result, so it still won't run.
-                pass
-            # One the computer already answered keeps its answer: it ran.
-            result = self._dir("results") / f"{request['id']}.json"
-            if not result.exists():
-                self._write_file(result, {"ok": False, "code": "stopped"})
-                stopped += 1
+                logger.debug("conduit_push: couldn't take %s off the queue", waiting, exc_info=True)
         return stopped
 
     # --- requests -------------------------------------------------------------
@@ -253,6 +256,8 @@ class PcControlStore:
                 os.replace(path, path.with_suffix(".claimed"))
             except OSError:
                 continue  # another poll took it, or the tool gave up on it
+            if (self._dir("results") / f"{request['id']}.json").exists():
+                continue  # Stop answered it while it was being taken: never run it
             taken.append(request)
         return sorted(taken, key=lambda item: float(item.get("at") or 0))
 
@@ -276,8 +281,11 @@ class PcControlStore:
         path = self._dir("results") / f"{request_id}.json"
         self._write_file(path, result)
         # The tool may have given up and dropped the request meanwhile: then
-        # nothing would read or sweep this answer.
+        # nothing would read or sweep this answer. Unless the tool already
+        # read it: then the answer is gone with the request, and it was taken.
         if not any((folder / f"{request_id}{suffix}").exists() for suffix in (".claimed", ".json")):
+            if not path.exists():
+                return True
             try:
                 path.unlink()
             except OSError:

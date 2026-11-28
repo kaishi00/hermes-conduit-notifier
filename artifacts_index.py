@@ -723,10 +723,11 @@ def _bare_candidate(raw: str, suffix: str) -> Optional[str]:
 
 
 def _path_tokens(text: str, suffix: str, *, quoted_whole: bool = True) -> Iterable[str]:
-    """Absolute paths in ``text`` that end in ``suffix`` (a whole name or
+    """Absolute paths in ``text`` that contain ``suffix`` (a whole name or
     whole trailing folders: ``/a/b/AppState.swift`` for
     ``AppState.swift``, never ``/a/MyAppState.swift``), in the order they
-    appear. A quoted run that is one path with spaces, brackets or an
+    appear. A candidate ends in it, or (a folder's own path,
+    ``_path_candidate``) is cut at it. A quoted run that is one path with spaces, brackets or an
     apostrophe in it is never read in pieces; with ``quoted_whole`` it is
     read whole. Only a host that checks each candidate can tell a quoted
     path from quoted prose that ends in one, so an SSH profile, which

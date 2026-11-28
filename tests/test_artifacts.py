@@ -1026,3 +1026,44 @@ def test_a_folder_link_resolves_from_a_path_inside_it_and_says_its_a_folder(tmp_
     # A folder that only shares the name's start isn't it.
     assert resolve("skills/link-para")["path"] is None
 
+
+
+class _SshShell:
+    """Hermes' SSH adapter, run against this machine's shell."""
+
+    def _normalize(self, text):
+        return text
+
+    def _execute(self, command, *, stdin_data=None, timeout=None):
+        import subprocess
+        done = subprocess.run(["sh", "-c", command], input=stdin_data, capture_output=True, text=True,
+                              timeout=timeout or 30)
+        return {"output": done.stdout + done.stderr, "returncode": done.returncode}
+
+
+def test_an_ssh_profile_asks_its_machine_whether_a_named_path_is_a_folder(tmp_path, monkeypatch):
+    # notifier#1139: a folder named without its trailing slash still opens as a folder.
+    (tmp_path / "skills" / "x").mkdir(parents=True)
+    (tmp_path / "notes.md").write_text("x")
+    client = _resolve_client(tmp_path, monkeypatch, [
+        ("s1", "assistant", f"Made `{tmp_path}/skills/x` and wrote `{tmp_path}/notes.md`.")])
+    monkeypatch.setattr(sys.modules["hermes_cli.web_routers.files"], "_fs_backend", lambda profile: _SshShell())
+
+    def resolve(name):
+        return client.get(f"{BASE}/workspace/resolve", params={"path": name, "session_id": "s1"}).json()
+
+    folder = resolve("skills/x")
+    assert folder["path"] == f"{tmp_path}/skills/x" and folder["isDirectory"] is True
+    file = resolve("notes.md")
+    assert file["path"] == f"{tmp_path}/notes.md" and file["isDirectory"] is False
+
+
+def test_an_ssh_machine_that_doesnt_answer_falls_back_to_the_names_slash(tmp_path, monkeypatch):
+    client = _resolve_client(tmp_path, monkeypatch, [("s1", "assistant", "Made `/srv/app/skills/x/`.")])
+
+    class Down(_SshShell):
+        def _execute(self, command, *, stdin_data=None, timeout=None):
+            return {"output": "", "returncode": 255}
+    monkeypatch.setattr(sys.modules["hermes_cli.web_routers.files"], "_fs_backend", lambda profile: Down())
+    body = client.get(f"{BASE}/workspace/resolve", params={"path": "skills/x/", "session_id": "s1"}).json()
+    assert body["path"] == "/srv/app/skills/x" and body["isDirectory"] is True
