@@ -225,9 +225,10 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
             for day in found:
                 day["cycle_start"] = bool(day.get("cycle_start"))
             return {**base, "from": start, "to": end, "days": found, **({"truncated": True} if more else {}),
-                    "note": ("Each day of a period the user logged in Apple Health, with its flow. cycle_start marks "
-                             "the first day of a period. A day not listed wasn't logged, which isn't the same as "
-                             "no flow.")}
+                    "note": ("Each day of a period the user logged in Apple Health, with its flow. cycle_start is true "
+                             "on the first day of a period. A day not listed wasn't logged in this range, which "
+                             "isn't the same as no flow; for earlier periods ask for a longer from/to, and check "
+                             "overview for whether cycle is shared at all.")}
         metrics = _metrics(args.get("metrics"), default=[])
         if len(metrics) != 1:
             return {"ok": False, "error": "one_metric", "note": "samples reads one metric at a time."}
