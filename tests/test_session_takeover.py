@@ -861,4 +861,23 @@ def test_a_deliberate_keep_without_a_lease_id_is_not_a_failed_check(caplog):
     with caplog.at_level(logging.INFO):
         takeover._log_own_claims([entry], kept, OWN_PID)
     line = next(r.getMessage() for r in caplog.records if "kept this process's claim" in r.getMessage())
-    assert "checks failed on 'other'" in line and "'sid'" not in line, line
+    # notifier#1141: the deliberate keep is named, not "no runtime seen", and
+    # another runtime's failed check isn't pinned on it.
+    assert ("can't be tied to this claim: the claim names no live session and the kept runtime's lease names no id"
+            in line), line
+    assert "checks failed" not in line and "no runtime in this process was seen" not in line, line
+
+
+def test_a_deliberate_keep_that_cant_be_tied_to_the_claim_says_so(tmp_path, caplog):
+    """notifier#1141: a runtime kept on purpose, with a claim that names no
+    lease id and no live session, isn't logged as no runtime seen."""
+    import logging
+    registry, gateway = FakeRegistry(tmp_path), FakeGateway()
+    _seed(tmp_path, [_entry("chat", pid=OWN_PID, lease=None)])
+    _runtime(gateway, registry, tmp_path, "sid", "chat", transport=LIVE)
+    with caplog.at_level(logging.INFO):
+        assert _take_with(tmp_path, ["chat"], gateway, registry)["status"] == "same_host"
+    lines = [r.getMessage() for r in caplog.records if "kept this process's claim" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert "can't be tied to this claim: the claim names no live session and the claim names no lease id" in lines[0], lines[0]
+    assert "no runtime in this process was seen" not in lines[0] and "checks failed" not in lines[0]
