@@ -101,6 +101,9 @@ METRICS: dict[str, tuple[str, str, str]] = {
     "exercise_time": ("activity", "min", "sum"),
     "stand_time": ("activity", "min", "sum"),
     "flights_climbed": ("activity", "count", "sum"),
+    "basal_energy": ("activity", "kcal", "sum"),
+    "time_in_daylight": ("activity", "min", "sum"),
+    "physical_effort": ("activity", "kcal/(hr*kg)", "stats"),
     "heart_rate": ("heart", "count/min", "stats"),
     "resting_heart_rate": ("heart", "count/min", "stats"),
     "walking_heart_rate_average": ("heart", "count/min", "stats"),
@@ -116,12 +119,28 @@ METRICS: dict[str, tuple[str, str, str]] = {
     "vo2_max": ("fitness", "mL/(kg*min)", "stats"),
     "walking_speed": ("fitness", "m/s", "stats"),
     "six_minute_walk_distance": ("fitness", "m", "stats"),
+    "running_speed": ("fitness", "m/s", "stats"),
+    "running_stride_length": ("fitness", "m", "stats"),
+    "running_ground_contact_time": ("fitness", "ms", "stats"),
+    "running_vertical_oscillation": ("fitness", "cm", "stats"),
+    "running_power": ("fitness", "W", "stats"),
+    "walking_step_length": ("mobility", "m", "stats"),
+    "walking_double_support": ("mobility", "%", "stats"),
+    "walking_asymmetry": ("mobility", "%", "stats"),
+    "stair_ascent_speed": ("mobility", "m/s", "stats"),
+    "stair_descent_speed": ("mobility", "m/s", "stats"),
+    "walking_steadiness": ("mobility", "%", "stats"),
     "sleep": ("sleep", "min", "night"),
     "workout": ("workouts", "", "event"),
+    # One event per logged day of a period, as Apple Health keeps it.
+    "menstrual_flow": ("cycle", "", "event"),
 }
-CATEGORIES = ("activity", "heart", "sleep", "workouts", "body", "vitals", "fitness")
+CATEGORIES = ("activity", "heart", "sleep", "workouts", "body", "vitals", "fitness", "mobility", "cycle")
 GRAINS = ("hour", "day", "night")
-EVENT_KINDS = ("workout", "sleep", "sample")
+EVENT_KINDS = ("workout", "sleep", "sample", "cycle")
+# How heavy a logged day of a period was; "unspecified" is a day logged
+# without a level, "none" one logged as no flow.
+FLOWS = ("unspecified", "none", "light", "medium", "heavy")
 SLEEP_STAGES = ("in_bed", "asleep", "core", "deep", "rem", "awake")
 NIGHT_FIELDS = ("asleep", "in_bed", "core", "deep", "rem", "awake", "unspecified")
 
@@ -542,9 +561,13 @@ class HealthStore:
 
     def status(self, device_id: Any = None) -> dict[str, Any]:
         with self._read() as db:
+            # Every metric this plugin keeps, so the phone sends only those: a
+            # window of one it doesn't know refuses the whole batch, and an
+            # older plugin, which leaves this out, knows only its own.
             if db is None:
-                return {"stored": False, "generation": None, "device": None}
-            answer: dict[str, Any] = {"stored": True, "generation": _meta(db, "generation"), "device": None}
+                return {"stored": False, "generation": None, "device": None, "metrics": sorted(METRICS)}
+            answer: dict[str, Any] = {"stored": True, "generation": _meta(db, "generation"), "device": None,
+                                      "metrics": sorted(METRICS)}
             if isinstance(device_id, str) and _DEVICE_ID.match(device_id):
                 row = db.execute("SELECT kid, last_seen, categories FROM devices WHERE id=?", (device_id,)).fetchone()
                 if row is not None:
@@ -1123,7 +1146,7 @@ def _parse_event(event: Any, index: int) -> dict[str, Any]:
         raise HealthError("malformed", f"{field}.id is malformed")
     if kind not in EVENT_KINDS:
         raise HealthError("malformed", f"{field}.kind must be one of {', '.join(EVENT_KINDS)}")
-    expected = {"workout": "workout", "sleep": "sleep"}.get(kind)
+    expected = {"workout": "workout", "sleep": "sleep", "cycle": "menstrual_flow"}.get(kind)
     if expected and metric != expected:
         raise HealthError("malformed", f"{field}.metric must be {expected!r}")
     if kind == "sample" and (metric not in METRICS or METRICS[metric][2] not in ("sum", "stats")):
@@ -1145,6 +1168,11 @@ def _parse_event(event: Any, index: int) -> dict[str, Any]:
     elif kind == "sleep":
         if data.get("stage") not in SLEEP_STAGES:
             raise HealthError("malformed", f"{field}.data.stage must be one of {', '.join(SLEEP_STAGES)}")
+    elif kind == "cycle":
+        if data.get("flow") not in FLOWS:
+            raise HealthError("malformed", f"{field}.data.flow must be one of {', '.join(FLOWS)}")
+        if set(data) - {"flow", "cycle_start"} or data.get("cycle_start", 1) not in (0, 1):
+            raise HealthError("malformed", f"{field}.data holds flow and cycle_start (1 or 0) only")
     elif not isinstance(data.get("activity"), str):
         raise HealthError("malformed", f"{field}.data.activity names the workout")
     entry["data"] = json.dumps(data, sort_keys=True) if data else None

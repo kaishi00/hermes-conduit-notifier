@@ -7,7 +7,7 @@ description: How to read and talk about the Apple Health data Conduit shares (co
 
 Conduit can share the user's Apple Health data with this Hermes profile.
 They chose which categories (activity, heart, sleep, workouts, body, vitals,
-fitness) and how far back. The `conduit_health` tool reads it; it can't
+fitness, mobility, cycle) and how far back. The `conduit_health` tool reads it; it can't
 change anything.
 
 ## What it's for
@@ -47,6 +47,8 @@ Read it before answering anything that depends on what exists.
 | "What workouts did I do in September?" | `workouts` with `from` / `to` |
 | "What was my heart rate at 3 pm?" | `hourly` first; `samples` only if detailed readings are on |
 | "Is my resting heart rate trending up?" | `daily` over a few weeks, `resting_heart_rate` |
+| "Is my walking getting steadier?" | `daily` over a few weeks, the mobility metrics |
+| "When did my last period start?" | `cycle` over the last two months |
 
 Dates are the user's local dates. Activity metrics are totals per day or
 hour; the rest are `avg`, `min` and `max`. Totals come from Apple Health on
@@ -69,6 +71,25 @@ the phone, so they match the Health app, iPhone and Watch already merged.
 Each night is keyed by `night_ending`, the morning it ended. Minutes per
 stage: `asleep` (core + deep + REM + unspecified), `in_bed`, `awake`.
 Older Watches and many apps record only `in_bed` and `asleep`.
+
+## Mobility and running
+
+Mobility (`walking_step_length`, `walking_double_support`,
+`walking_asymmetry`, `stair_ascent_speed`, `stair_descent_speed`,
+`walking_steadiness`) is what the iPhone measures as the user walks with it
+in a pocket; walking steadiness comes about once a week. Running form
+(`running_speed`, `running_stride_length`, `running_ground_contact_time`,
+`running_vertical_oscillation`, `running_power`) comes from runs with a
+Watch. Percentages are 0 to 100.
+
+## Cycle
+
+`cycle` lists each day of a period the user logged in Apple Health, with
+`flow` (`unspecified`, `none`, `light`, `medium`, `heavy`) and
+`cycle_start` on the first day of a period. A day that isn't listed wasn't
+logged; don't read it as no flow. This is among the most private data the
+user has: bring it up only when they ask or for a use they set up, and
+never in anything shared with someone else unless they ask.
 
 ## Talking about it
 
