@@ -2875,7 +2875,8 @@ through Hermes' `/api/fs/*` routes.
   Conduit asks when such a name is tapped, and opens the Folder there
   (capability `workspace-resolve`, plugin 0.132+; folders and `isDirectory`,
   capability `workspace-resolve-folders`, plugin 0.205.5+). On an SSH profile
-  a folder is told by its trailing slash.
+  its machine is asked whether the path is a folder; if it doesn't answer
+  within a few seconds, a folder is told by its trailing slash.
 
 Capability `workspace-files`. Conduit's own copy of the scope is a view, not a
 lock: Hermes' `/api/fs/*` routes already reach the home folder.

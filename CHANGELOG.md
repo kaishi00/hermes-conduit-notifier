@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.206.2 (2026-11-28)
+
+### Fixes
+
+- Control from Hermes: Stop and a computer taking its next actions no longer overlap, so an action Stop answered never runs.
+- Workspace files: on an SSH profile whose machine doesn't answer, a folder a reply names opens after a few seconds instead of failing with "took too long".
+
 ## 0.206.1 (2026-11-28)
 
 ### Fixes

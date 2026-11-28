@@ -1067,3 +1067,20 @@ def test_an_ssh_machine_that_doesnt_answer_falls_back_to_the_names_slash(tmp_pat
     monkeypatch.setattr(sys.modules["hermes_cli.web_routers.files"], "_fs_backend", lambda profile: Down())
     body = client.get(f"{BASE}/workspace/resolve", params={"path": "skills/x/", "session_id": "s1"}).json()
     assert body["path"] == "/srv/app/skills/x" and body["isDirectory"] is True
+
+
+def test_the_ssh_folder_check_ends_well_inside_the_resolve_requests_limit(tmp_path, monkeypatch):
+    # notifier#1145 review: a hung machine falls back to the name's slash rather than the request's 504.
+    import workspace_files
+    client = _resolve_client(tmp_path, monkeypatch, [("s1", "assistant", "Made `/srv/app/skills/x/`.")])
+    asked = []
+
+    class Slow(_SshShell):
+        def _execute(self, command, *, stdin_data=None, timeout=None):
+            asked.append(timeout)
+            raise TimeoutError("no answer")
+    monkeypatch.setattr(sys.modules["hermes_cli.web_routers.files"], "_fs_backend", lambda profile: Slow())
+    body = client.get(f"{BASE}/workspace/resolve", params={"path": "skills/x/", "session_id": "s1"}).json()
+    assert body["isDirectory"] is True
+    assert asked and asked[-1] == workspace_files.SSH_FOLDER_CHECK_TIMEOUT_S
+    assert workspace_files.SSH_FOLDER_CHECK_TIMEOUT_S * 3 <= workspace_files.SSH_STEP_TIMEOUT_S

@@ -197,27 +197,31 @@ class PcControlStore:
             grants["stopped"] = stops
         stopped = 0
         folder = self._dir("requests")
-        for request in self._requests(include_claimed=True):
-            if request.get("computer") != computer:
-                continue
-            # The stopped answer goes first: claim() checks for an answer again
-            # after it takes a request, so a poll racing this one can't run it.
-            # One the computer already answered keeps its answer: it ran.
-            result = self._dir("results") / f"{request['id']}.json"
-            if not result.exists():
-                self._write_file(result, {"ok": False, "code": "stopped"})
-                stopped += 1
-            # Then a waiting one is taken off the queue, so the computer's next
-            # poll doesn't even see it.
-            waiting = folder / f"{request['id']}.json"
-            try:
-                os.replace(waiting, waiting.with_suffix(".claimed"))
-            except FileNotFoundError:
-                pass  # already claimed
-            except OSError:
-                # Can't move it (Windows holds a file another reader has open):
-                # claim() skips a request that has a result, so it still won't run.
-                logger.debug("conduit_push: couldn't take %s off the queue", waiting, exc_info=True)
+        # Under the queue's lock, which claim() takes too: a poll takes a
+        # request either before Stop (it runs, and its answer stands) or
+        # after Stop answered it (never run).
+        with _file_lock(self.root / "requests"):
+            for request in self._requests(include_claimed=True):
+                if request.get("computer") != computer:
+                    continue
+                # The stopped answer goes first: claim() checks for an answer again
+                # after it takes a request, so a poll racing this one can't run it.
+                # One the computer already answered keeps its answer: it ran.
+                result = self._dir("results") / f"{request['id']}.json"
+                if not result.exists():
+                    self._write_file(result, {"ok": False, "code": "stopped"})
+                    stopped += 1
+                # Then a waiting one is taken off the queue, so the computer's next
+                # poll doesn't even see it.
+                waiting = folder / f"{request['id']}.json"
+                try:
+                    os.replace(waiting, waiting.with_suffix(".claimed"))
+                except FileNotFoundError:
+                    pass  # already claimed
+                except OSError:
+                    # Can't move it (Windows holds a file another reader has open):
+                    # claim() skips a request that has a result, so it still won't run.
+                    logger.debug("conduit_push: couldn't take %s off the queue", waiting, exc_info=True)
         return stopped
 
     # --- requests -------------------------------------------------------------
@@ -246,19 +250,21 @@ class PcControlStore:
         so a second poll doesn't run them again."""
         computer = clean_id(computer, "computer")
         taken = []
-        for request in self._requests(include_claimed=False):
-            if request.get("computer") != computer:
-                continue
-            if (self._dir("results") / f"{request['id']}.json").exists():
-                continue  # answered already (stopped): never run it
-            path = self._dir("requests") / f"{request['id']}.json"
-            try:
-                os.replace(path, path.with_suffix(".claimed"))
-            except OSError:
-                continue  # another poll took it, or the tool gave up on it
-            if (self._dir("results") / f"{request['id']}.json").exists():
-                continue  # Stop answered it while it was being taken: never run it
-            taken.append(request)
+        # Stop holds the same lock while it answers (stop()).
+        with _file_lock(self.root / "requests"):
+            for request in self._requests(include_claimed=False):
+                if request.get("computer") != computer:
+                    continue
+                if (self._dir("results") / f"{request['id']}.json").exists():
+                    continue  # answered already (stopped): never run it
+                path = self._dir("requests") / f"{request['id']}.json"
+                try:
+                    os.replace(path, path.with_suffix(".claimed"))
+                except OSError:
+                    continue  # another poll took it, or the tool gave up on it
+                if (self._dir("results") / f"{request['id']}.json").exists():
+                    continue  # Stop answered it while it was being taken: never run it
+                taken.append(request)
         return sorted(taken, key=lambda item: float(item.get("at") or 0))
 
     def has_waiting(self, computer: str) -> bool:
