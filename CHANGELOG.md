@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.208.2 (2026-11-28)
+
+### Fixes
+
+- With an up-to-date iPhone app, Hermes couldn't place a board between paragraphs of its reply, Pulse cards drawn from their picks didn't show, Hermes wasn't told it may write HTML, and a computer's ask didn't reach the phone: the plugin kept only the first 16 things Conduit said it could do. It now keeps them all.
+
 ## 0.208.1 (2026-11-28)
 
 ### Fixes

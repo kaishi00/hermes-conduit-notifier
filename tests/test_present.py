@@ -238,6 +238,22 @@ def test_a_go_prompt_goes_only_to_a_conduit_that_can_open_maps(store, clock):
     assert not store.has_feature("maps-navigate")
 
 
+# What Conduit for iPhone sends (PresentedScreens.features, app main 2026-11-28).
+SHIPPED_FEATURES = ["maps-navigate", "show-cards", "chat-cards", "info-cards", "media-cards", "live-cards",
+                    "text-drafts", "email-texts", "board-cards", "room-boards", "diff-cards", "composed-cards",
+                    "review-cards", "room-asks", "link-asks", "room-work", "pulse-looks", "pulse-more-shapes",
+                    "placed-boards", "reply-html", "pc-asks"]
+
+
+def test_every_feature_the_phone_sends_is_kept(store):
+    # Issue 1147: a cap of 16 dropped placed-boards and the Pulse looks.
+    store.exchange({"installation_id": PHONE, "features": SHIPPED_FEATURES, "results": []})
+    for name in SHIPPED_FEATURES:
+        assert store.has_feature(name), name
+    # Room for many more before the bound bites.
+    assert store_module.MAX_FEATURES >= 2 * len(SHIPPED_FEATURES)
+
+
 def test_an_install_not_used_for_days_doesnt_hold_back_a_feature(store, clock):
     # .52, 2026-11-04: old iPads and an old iPhone, last used days ago, kept
     # boards off for the phone in use.
