@@ -34,6 +34,10 @@ watch_paths:
   - session_rules/session_ids.py
   - hermes_state.py
   - gateway/hosted_room*.py
+  # reactions.py: conduit_react runs Hermes' react_to_message_tool (loaded with importlib), which
+  # paints the reaction live through tools.desktop_ui.emit.
+  - tools/react_to_message_tool.py
+  - tools/desktop_ui.py
   # room_work posts a room workstream's report with deliver_to_room (loaded with importlib).
   - cron/scheduler_delivery_room.py
   - website/docs/user-guide/features/plugins.md
@@ -124,6 +128,13 @@ notes:
     feeds the session titles that tell a Bot Chat (its step budget, board and coordination), cron
     reports shown in a Bot Chat, voice calls' rows and tags, room chat cleanup, workstream
     transcripts and the stored source that keeps a woken Kanban worker's turns quiet (automation turns). A missing repository verb turns its feature off or fails its route.
+  message reactions: >-
+    reactions.py hands a turn the user's reactions since the last one (the messages repository's
+    take_unseen_reactions, author "user", through hermes_store.py; SessionDB.take_unseen_reactions
+    on a release), since Hermes announces them only behind display.message_reactions and only on
+    hermes dashboard (tui_gateway/methods_prompt.py's _pending_reaction_notes). conduit_react calls
+    tools.react_to_message_tool.react_to_message_tool(emoji, message_row_id, messages_back), whose
+    desktop_ui toolset only Hermes' desktop sessions get (feature map: "Message row actions").
   off-turn push home: >-
     __init__.py's _in_session_home runs a background task's finish push (subagent_stop) and a chat's
     close (on_session_finalize, on Hermes' own thread) under hermes_constants.set_hermes_home_override

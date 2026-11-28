@@ -2077,7 +2077,7 @@ def test_strict_keeps_tools_to_workstreams(on, hermes, tool):
 
 
 @pytest.mark.parametrize("tool", ["work_start", "work_send", "clarify", "memory", "tool_search", "tool_describe",
-                                  "conduit_show", "conduit_maps", "browser_vault"])
+                                  "conduit_show", "conduit_maps", "browser_vault", "conduit_react"])
 def test_strict_allows_the_coordinators_own_tools(on, hermes, tool):
     assert work.tool_block(BOT_CHAT, tool, {}) is None
 

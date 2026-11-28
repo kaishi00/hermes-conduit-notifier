@@ -19,7 +19,7 @@ from hermes_constants import get_hermes_home
 from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_done_tool, chat_mute, chat_on_screen, clarify_loop, client, compaction_skip, conduit_first, cron_bot_chat, cron_runs,
                desktop_selected, forks, health_tool, helper_holds, inbox_tool, leaked_calls, link_ask_tool, link_asks, live_activity, live_steps,
                location_tool, maps_tool, memory_scan, notify_tool, pc_control_tool, phone_tool, present_tool, profile_copies, pulse,
-               quiet_turns, reply_sources, reply_speed, review_notices,
+               quiet_turns, reactions, reply_sources, reply_speed, review_notices,
                room_asks, room_chats, room_cleanup, room_cutoff, room_free_busy, room_identity, room_invites,
                room_memory, room_planner, room_posts, room_rules, room_tool,
                room_wakeups, screen_lock, session_titles, settings_tool, show_tool, turn_surface, voice_archive, work_tool)
@@ -201,6 +201,7 @@ def register(ctx: Any) -> None:
     # The agent marks its chat done in Conduit's Sessions list, when the user
     # or their own instructions ask (hermes-conduit: Done chats).
     chat_done_tool.register(ctx, is_child=_is_child)
+    reactions.register(ctx, is_child=_is_child)
     # Where the user is, as Conduit shares it, with place rules and its skill.
     location_tool.register(ctx, is_child=_is_child, profile=_current_profile,
                            skill_path=Path(__file__).resolve().parent / "skills" / location_tool.SKILL_NAME / "SKILL.md")
@@ -1655,6 +1656,8 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         None if child else _work_digest(session_id),
         # Another chat's own questions that still wait on the user (work_tool).
         None if child else _asked_note(session_id, turn_surface.turn_entry(session_id) == "spoken"),
+        # Reactions the user added to messages since (reactions), once.
+        None if child else reactions.note(session_id),
         # Checklist cards the user ticked in Conduit since (checklist_store), once.
         None if child else _checklist_note(session_id),
         # A card's tap button the user tapped, with their message about it (card_actions), once.

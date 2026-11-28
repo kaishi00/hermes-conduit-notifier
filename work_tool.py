@@ -87,8 +87,9 @@ SHOW = "conduit_show"
 # workstream's would wait in its own chat, where the user isn't. Maps' Go
 # button and the vault's unlock, save-login and code prompts show only in the
 # chat that called them (Eric 2026-11-08: W14's map never reached the Bot
-# Chat; notifier issue 619: a vault prompt couldn't open there).
-SHOWS_OR_ASKS = frozenset({"clarify", "conduit_notify", SHOW, "conduit_maps", "browser_vault"})
+# Chat; notifier issue 619: a vault prompt couldn't open there). A reaction
+# lands on a message in the chat it's called from (issue 3439).
+SHOWS_OR_ASKS = frozenset({"clarify", "conduit_notify", SHOW, "conduit_maps", "browser_vault", "conduit_react"})
 # The Bot Chat's own under every setting, never counted as a step: its work
 # tools, its memory, Tool Search's bridge (checked by what it calls) and what
 # shows or asks (C.4). Strict, "Only Coordinates", allows only these.
@@ -7346,7 +7347,7 @@ ROOM_WORK_ACTIONS = {"start": "work_start", "list": "work_list", "read": "work_r
 # What a Linked Room's workstream never calls: what's in the room isn't the owner's to keep, and the work answers
 # only through the bot.
 LINKED_WORKER_NEVER = frozenset({
-    "memory", "skill_manage", "send_message", "message_agent", "react_to_message", "cronjob", "cronjob_manage",
+    "memory", "skill_manage", "send_message", "message_agent", "react_to_message", "conduit_react", "cronjob", "cronjob_manage",
     "conduit_call_user", "conduit_call_watch", "conduit_settings", "conduit_room",
     # A helper's chat isn't this work's, so the limits wouldn't follow it.
     "delegate_task",
