@@ -162,3 +162,8 @@ def test_every_chat_turn_gets_the_note_but_never_a_room_or_a_subagent():
     # After the room's own framing returns, among the owner's notes, and only for the chat itself.
     assert hook.index("room_framing = _room_framing(") < hook.index("reactions.note(session_id)")
     assert "None if child else reactions.note(session_id)" in hook
+
+
+def test_an_entry_of_no_known_role_is_named_by_no_one():
+    assert reactions.format_note([{"emoji": "❤️", "text": "hi"}]).endswith('- ❤️ on a message: "hi"')
+    assert reactions.format_note([{"emoji": "❤️"}]).endswith("- ❤️ on an earlier message")

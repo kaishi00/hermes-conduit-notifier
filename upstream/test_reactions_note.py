@@ -50,8 +50,15 @@ try:
 finally:
     handle.close()
 
-first = reactions.take(sid)
-json.dump({"first": first, "formatted": reactions.format_note(first), "again": reactions.note(sid)}, sys.stdout)
+# The note itself first, as a turn reads it; then what Hermes hands the mapping, on a second reaction.
+note = reactions.note(sid)
+again = reactions.note(sid)
+handle = assembly.open_persistence(assembly.profile_scope(home=home))
+try:
+    handle.messages.set_reaction(sid, row, "👍", author="user")
+finally:
+    handle.close()
+json.dump({"note": note, "again": again, "first": reactions.take(sid)}, sys.stdout)
 """
 
 
@@ -65,9 +72,9 @@ def test_a_reaction_reaches_the_next_turn_once(tmp_path: Path) -> None:
     found = json.loads(out.stdout.strip().splitlines()[-1])
     if found.get("skip"):
         pytest.skip("a release before Hermes' storage interface keeps SessionDB's own take_unseen_reactions")
-    [entry] = found["first"]
-    assert (entry["role"], entry["emoji"], entry["text"]) == ("assistant", "❤️", "Here is the second design.")
-    assert isinstance(entry["row_id"], int)
-    assert found["formatted"].endswith('- ❤️ on your message: "Here is the second design."')
+    assert found["note"].endswith('- ❤️ on your message: "Here is the second design."')
     # Stamped seen as it was read: the next turn hears nothing.
     assert found["again"] is None
+    [entry] = found["first"]
+    assert (entry["role"], entry["emoji"], entry["text"]) == ("assistant", "👍", "Here is the second design.")
+    assert isinstance(entry["row_id"], int)

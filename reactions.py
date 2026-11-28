@@ -73,7 +73,8 @@ SCHEMA: dict[str, Any] = {
 def _line(entry: Any) -> str:
     entry = entry if isinstance(entry, dict) else {}
     emoji = str(entry.get("emoji") or "").strip()
-    whose = "their own" if entry.get("role") == "user" else "your"
+    role = entry.get("role")
+    whose = "their own" if role == "user" else "your" if role == "assistant" else "a"
     text = entry.get("text")
     snippet = " ".join(text.split()) if isinstance(text, str) else ""
     if len(snippet) > SNIPPET_CHARS:
@@ -81,7 +82,7 @@ def _line(entry: Any) -> str:
     if snippet:
         return f'- {emoji} on {whose} message: "{snippet}"'
     # A row of only a card, a picture or tool calls: no quote beats an empty one.
-    return f"- {emoji} on {whose} earlier message"
+    return f"- {emoji} on {whose} earlier message" if whose != "a" else f"- {emoji} on an earlier message"
 
 
 def format_note(pending: Any) -> Optional[str]:

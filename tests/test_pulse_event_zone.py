@@ -5,7 +5,7 @@ report reads in, everywhere Pulse tells or matches it
 from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from test_pulse import pulse
+from test_pulse import SID, pulse
 from test_pulse_brief_open import brief
 from test_pulse_dates import at
 from test_pulse_followup import live  # noqa: F401
@@ -38,6 +38,10 @@ def test_where_an_event_was_made_is_said_only_when_its_clock_differs():
     moved = dates.in_zone(TOKYO_FIVE, PARIS)
     assert dates.elsewhere(TOKYO_FIVE, moved, "Asia/Tokyo") == "Asia/Tokyo"
     assert dates.elsewhere(TOKYO_FIVE, moved, None) == "UTC+09:00"  # no zone name synced: its offset
+    odd = "2026-11-27T17:00:00+09:05:42"  # an offset to the second still reads as hours and minutes
+    assert dates.elsewhere(odd, dates.in_zone(odd, PARIS), None) == "UTC+09:06"
+    west = "2026-11-27T17:00:00-03:30"
+    assert dates.elsewhere(west, dates.in_zone(west, PARIS), "") == "UTC-03:30"
     # A zone with no name (the host's own, when the phone gives none) still gets the note.
     host = dates.in_zone(TOKYO_FIVE, timezone(timedelta(hours=1)))
     assert dates.elsewhere(TOKYO_FIVE, host, "Asia/Tokyo") == "Asia/Tokyo"
@@ -67,3 +71,11 @@ def test_a_card_matched_to_an_event_takes_the_day_it_falls_on_for_the_reader():
     assert pulse.candidates._event_named([late], eve, PARIS, "Flight to Osaka tonight") is late
     assert pulse.candidates._event_named([late], pulse.candidates._due("2026-11-27", PARIS), PARIS,
                                          "Flight to Osaka tonight") is None
+
+
+def test_the_report_tells_the_calendar_in_pulses_own_zone(live):
+    phone_home(live.home)  # a London phone: Standup at 09:30+01:00 on the 14th
+    live.store.set("time_zone", "America/New_York")
+    text = pulse.report.gather(live.home, live.store, home_chat_id=SID, now=at(14, 7)).text
+    assert "(America/New_York)" in text.split("## Now")[1].split("\n")[1]  # the header's zone
+    assert "Standup (2026-10-14T04:30:00-04:00; event set in Europe/London;" in text
