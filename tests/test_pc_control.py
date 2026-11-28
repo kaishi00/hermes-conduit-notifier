@@ -232,6 +232,33 @@ def test_a_poll_that_takes_a_request_as_stop_answers_it_never_runs_it(store, mon
     assert store.take_result(request["id"]) == {"ok": False, "code": "stopped"}
 
 
+def test_stop_waits_for_a_poll_taking_requests_under_the_queues_lock(store, monkeypatch):
+    # notifier#1145 review: Stop's check and write can't fall between a poll's take and its re-check.
+    import threading
+    import time
+    store.note_computer(PC, "Asuka", "windows")
+    request = store.add_request(PC, SESSION, "A", "click", {"element": 1})
+    real = store_mod.os.replace
+    stopper = None
+    stopped = threading.Event()
+
+    def stop_during_take(src, dst, *rest):
+        nonlocal stopper
+        if stopper is None and str(src).endswith(f"{request['id']}.json"):
+            stopper = threading.Thread(target=lambda: (store.stop(PC), stopped.set()))
+            stopper.start()
+            time.sleep(0.2)
+            assert not stopped.is_set(), "Stop ran while the poll held the queue"
+        return real(src, dst, *rest)
+    monkeypatch.setattr(store_mod.os, "replace", stop_during_take)
+    taken = store.claim(PC)
+    stopper.join(5)
+    monkeypatch.undo()
+    # Taken before Stop: it runs, and Stop's answer waits for the computer's own.
+    assert [item["id"] for item in taken] == [request["id"]]
+    assert stopped.is_set()
+
+
 def test_an_answer_the_tool_read_at_once_counts_as_taken(store, monkeypatch):
     store.note_computer(PC, "Asuka", "windows")
     request = store.add_request(PC, SESSION, "A", "capture", {})

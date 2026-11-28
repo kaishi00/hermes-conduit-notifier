@@ -56,6 +56,9 @@ MAX_ENTRIES = 2000
 DUPLICATE_NAMES_TRIED = 100
 # A single SSH step (not a walk) that takes longer is given up on.
 SSH_STEP_TIMEOUT_S = 25
+# A folder check for a reply's link: well inside the resolve request's own
+# limit, so a machine that doesn't answer falls back to the name's slash.
+SSH_FOLDER_CHECK_TIMEOUT_S = 6
 SEARCH_MAX_RESULTS = 200
 SEARCH_MAX_MATCHES_PER_FILE = 5
 SEARCH_MAX_FILES = 20000
@@ -801,7 +804,7 @@ class SshWorkspace:
         """Whether ``raw`` is a folder on the SSH machine (a reply's link,
         desktop issue 686): one bounded step, no root to check against."""
         path = self._norm(raw)
-        lines = self._run(f'[ -d {shlex.quote(path)} ] && echo folder || echo other')
+        lines = self._run(f'[ -d {shlex.quote(path)} ] && echo folder || echo other', timeout=SSH_FOLDER_CHECK_TIMEOUT_S)
         return "folder" in lines
 
     def _check(self, root: str, raw: Any, resolve: bool = True) -> str:
