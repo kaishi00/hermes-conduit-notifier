@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.208.2 (2026-11-28)
+
+### Fixes
+
+- The plugin stopped reading a device's capability list after 16 entries, so newer iPhone builds silently lost features past the 16th (inline boards, Pulse shapes, HTML replies, and approving or stopping Control from Hermes on the phone). The cap is now 64 so every advertised capability is kept.
+
 ## 0.208.1 (2026-11-28)
 
 ### Fixes

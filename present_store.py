@@ -68,7 +68,7 @@ MAPS_MODES = ("driving", "walking", "transit", "cycling")
 # it as a plain confirm, and its yes would never open Maps.
 NAVIGATE_FEATURE = "maps-navigate"
 MAX_MAPS_TO_CHARS = 200
-MAX_FEATURES = 16
+MAX_FEATURES = 64
 # A room's ask (room_asks, Ask me first): an agent in a room with other
 # people's agents asks its owner before it shares something. Only a Conduit
 # that says it shows them gets one, and only its answer counts: another would

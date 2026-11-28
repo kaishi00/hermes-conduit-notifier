@@ -267,6 +267,28 @@ def test_an_older_build_used_lately_doesnt_hold_back_a_feature(store, clock):
     assert not store.has_feature_everywhere("review-cards"), "2.10 is newer than 2.4"
 
 
+def test_exchange_keeps_all_shipped_client_features(store):
+    # Issue #1147: iOS sends >16 capabilities; trailing flags (pulse-looks,
+    # pulse-more-shapes, placed-boards, reply-html, pc-asks) were silently cut
+    # off when MAX_FEATURES was 16.
+    shipped = [
+        "maps-navigate", "show-cards", "chat-cards", "info-cards", "media-cards", "live-cards",
+        "text-drafts", "email-texts", "board-cards", "room-boards", "diff-cards", "composed-cards",
+        "review-cards", "room-asks", "link-asks", "room-work", "pulse-looks", "pulse-more-shapes",
+        "placed-boards", "reply-html", "pc-asks",
+    ]
+    store.exchange({"installation_id": PHONE, "app_version": "2.5.1", "features": shipped, "results": []})
+    for flag in ("pulse-looks", "pulse-more-shapes", "placed-boards", "reply-html", "pc-asks"):
+        assert store.has_feature(flag), f"missing feature {flag}"
+        assert store.has_feature_everywhere(flag), f"missing feature everywhere {flag}"
+    ask = store.ask_pc(
+        "Let Hermes control my PC?",
+        "This chat asked to list windows.",
+        pc={"computer": "pc-1", "request": "req-1", "name": "Work PC", "bot": "Eva"},
+    )
+    assert [p["id"] for p in store.exchange({"installation_id": PHONE, "features": shipped, "results": []})["prompts"]] == [ask["id"]]
+
+
 def test_a_malformed_exchange_is_refused(store):
     for body in (None, {"installation_id": "x"}, {"installation_id": PHONE, "results": "no"},
                  {"installation_id": PHONE, "results": [{}] * (store_module.MAX_RESULTS + 1)}):
