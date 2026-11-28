@@ -409,7 +409,7 @@ def test_the_tool_answers_from_the_store(home):
     phone.accept(store.register_key(phone.key_request()))
     store.ingest(phone.seal(_batch()))
     overview = _call({"action": "overview"})
-    assert overview["devices"][0]["categories_not_shared"] == ["body", "vitals", "fitness"]
+    assert overview["devices"][0]["categories_not_shared"] == ["body", "vitals", "fitness", "mobility", "cycle"]
     assert overview["devices"][0]["metrics"]["steps"]["first"] == "2026-10-11"
     daily = _call({"action": "daily", "metrics": ["steps"]})
     assert daily["days"][-1] == {"date": "2026-10-12", "steps": 800.0} and daily["units"] == {"steps": "count"}
@@ -663,3 +663,49 @@ def test_another_profile_sees_only_the_devices_that_share_with_it(home):
     with reader._read() as db:
         assert reader.latest_device(db)[0] == DEVICE
     assert {device["id"] for device in store.overview()["devices"]} == {DEVICE, "ipad-installation-2"}
+
+
+def test_status_lists_the_metrics_this_plugin_keeps(store, phone, tmp_path):
+    # The phone sends only these (issue 3459): a window of a metric the
+    # plugin doesn't know refuses the whole batch.
+    assert store.status(DEVICE)["metrics"] == sorted(health.METRICS)
+    empty = health.HealthStore(tmp_path / "empty", clock=lambda: NOW)
+    assert empty.status()["metrics"] == sorted(health.METRICS)
+    assert {"walking_steadiness", "running_power", "basal_energy", "menstrual_flow"} <= set(health.METRICS)
+
+
+def _cycle_day(day, flow, start=None, event_id=None):
+    data = {"flow": flow}
+    if start is not None:
+        data["cycle_start"] = start
+    return {"id": event_id or f"CYCLE-{day}", "kind": "cycle", "metric": "menstrual_flow",
+            "start": f"{day}T00:00:00+02:00", "end": f"{day}T23:59:59+02:00", "source": "Health", "data": data}
+
+
+def test_mobility_and_cycle_land_and_read_back(store, phone):
+    batch = _batch(categories=["activity", "mobility", "cycle"], windows=[
+        {"metric": "walking_steadiness", "grain": "day", "unit": "%",
+         "from": "2026-10-12T00:00:00+02:00", "to": "2026-10-13T00:00:00+02:00",
+         "buckets": [{"start": "2026-10-12T00:00:00+02:00", "end": "2026-10-13T00:00:00+02:00", "avg": 92.5}]},
+        {"metric": "basal_energy", "grain": "day", "unit": "kcal",
+         "from": "2026-10-12T00:00:00+02:00", "to": "2026-10-13T00:00:00+02:00",
+         "buckets": [{"start": "2026-10-12T00:00:00+02:00", "end": "2026-10-13T00:00:00+02:00", "sum": 1650}]},
+    ], events=[_cycle_day("2026-10-11", "medium", 1), _cycle_day("2026-10-12", "light", 0)])
+    result = store.ingest(phone.seal(batch))
+    assert result["windows"] == 2 and result["events"] == 2 and result["skipped_events"] == 0
+    with store.reader() as (db, (device_id, _, _)):
+        assert store.daily(db, device_id, ["walking_steadiness", "basal_energy"], "2026-10-12", "2026-10-12") == [
+            {"date": "2026-10-12", "walking_steadiness": {"avg": 92.5}, "basal_energy": 1650.0}]
+    answer = tool.voice_handle({"action": "cycle", "from": "2026-10-10", "to": "2026-10-13"},
+                               device_id=DEVICE, store=store, today=lambda: date(2026, 10, 13))
+    assert [(day["flow"], day["cycle_start"]) for day in answer["days"]] == [("medium", True), ("light", False)]
+    overview = tool._overview(store)
+    assert "mobility" in overview["devices"][0]["categories_shared"]
+
+
+def test_a_cycle_day_the_store_cant_keep_is_left_out(store, phone):
+    bad = [_cycle_day("2026-10-11", "spotting", event_id="CYCLE-a"),
+           _cycle_day("2026-10-12", "light", 2, event_id="CYCLE-b"),
+           {**_cycle_day("2026-10-12", "light", event_id="CYCLE-c"), "metric": "workout"}]
+    result = store.ingest(phone.seal(_batch(events=bad + [_cycle_day("2026-10-13", "heavy", 1)])))
+    assert result["skipped_events"] == 3 and result["events"] == 1

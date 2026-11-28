@@ -3607,7 +3607,8 @@ Plugins as "Conduit boards", off until you turn it on there.
 Conduit can share Apple Health data with a Hermes profile so the agent can
 answer "how did I sleep?" or "how active was I this week?". It's off until
 the user turns it on in Conduit, per category (activity, heart, sleep,
-workouts, body, vitals, fitness), with how far back to start.
+workouts, body, vitals, fitness, mobility, cycle; plugin 0.208+ for mobility,
+cycle and the newer activity and fitness metrics), with how far back to start.
 
 - **Straight to this host.** The phone posts to
   `POST /api/plugins/conduit_push/health/ingest` over your dashboard
@@ -3636,18 +3637,19 @@ workouts, body, vitals, fitness), with how far back to start.
   location routes answer the same way. Other errors carry only `detail`.
 - **Summaries first.** Conduit sends the hourly and daily totals Apple
   Health computes on the phone (iPhone and Watch already merged), a summary
-  per night of sleep, sleep stage segments and workouts. Raw readings go
+  per night of sleep, sleep stage segments, workouts and the logged days of
+  a period. Raw readings go
   only for categories where the user turns on detailed readings.
 - **Stored here only.** The profile's `conduit-health.sqlite3`, mode `0600`.
   A newer computation of a window replaces the older one; a deleted workout
   or reading stays deleted (its id is kept for 30 days to turn away a late
   re-send). History is kept as long as the phone shares it. `GET
   /health/status` reports the device's key, categories and last sync, never
-  values; `POST /health/wipe` deletes one device's data and key (or
+  values, and the metrics this plugin keeps (so Conduit sends only those); `POST /health/wipe` deletes one device's data and key (or
   everything with `{"all": true}`), and Conduit's "Delete health data on
   this host" calls it. Only the voice read below returns health data.
 - **Read-only tool.** `conduit_health` (actions `overview`, `daily`,
-  `hourly`, `sleep`, `workouts`, `samples`; at most 92 days per call) with
+  `hourly`, `sleep`, `workouts`, `cycle`, `samples`; at most 92 days per call) with
   its skill `conduit_push:reading-health-data`. It shows only once a phone
   has synced data, and subagents can't use it. What it returns goes to your
   agent's model like any tool result, which Conduit tells the user before

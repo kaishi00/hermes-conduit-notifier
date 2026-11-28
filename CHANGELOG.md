@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.208.0 (2026-11-28)
+
+### New and improved
+
+- Health sharing takes two new categories, Mobility (step length, double support, asymmetry, stair speed, walking steadiness) and Cycle (the days of a period logged in Apple Health), plus basal energy, time in daylight, physical effort and running form, so Hermes can build a daily health report without a second exporter.
+
 ## 0.207.1 (2026-11-28)
 
 ### Fixes
