@@ -86,8 +86,10 @@ Watch. Percentages are 0 to 100.
 
 `cycle` lists each day of a period the user logged in Apple Health, with
 `flow` (`unspecified`, `none`, `light`, `medium`, `heavy`) and
-`cycle_start` on the first day of a period. A day that isn't listed wasn't
-logged; don't read it as no flow. This is among the most private data the
+`cycle_start`, true on the first day of a period and false otherwise. A day
+that isn't listed wasn't logged; don't read it as no flow. The default range
+is the last 7 days: ask for a month or two to find the last period, and
+check `overview` that cycle is shared before saying nothing was logged. This is among the most private data the
 user has: bring it up only when they ask or for a use they set up, and
 never in anything shared with someone else unless they ask.
 
