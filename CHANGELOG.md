@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.207.1 (2026-11-28)
+
+### Fixes
+
+- On a Hermes that doesn't name its root home, which Conduit apps reached the host is kept in the root home rather than the profile's, so a phone on one profile and Conduit for desktop on another still see each other.
+
 ## 0.207.0 (2026-11-28)
 
 ### New and improved

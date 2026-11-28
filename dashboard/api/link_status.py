@@ -6,6 +6,7 @@ import importlib.util
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException, Response
@@ -38,7 +39,6 @@ _link_app_noted: Dict[str, float] = {}
 # Platform ("ios" or "desktop", as X-Conduit-Platform names it) -> when a
 # request from that app last reached a route here, on any profile.
 _link_client_noted: Dict[str, float] = {}
-CLIENT_PLATFORMS = ("ios", "desktop")  # link_status.py's CLIENT_PLATFORMS
 
 
 def _link_status() -> Any:
@@ -71,18 +71,25 @@ def _platform(headers: Any) -> Optional[str]:
     older app, or one that doesn't say). Read only with X-Conduit-Client."""
     if headers.get("x-conduit-client") is None:
         return None
-    platform = str(headers.get("x-conduit-platform") or "").strip().lower()
-    return platform if platform in CLIENT_PLATFORMS else None
+    return _link_status().client_platform(headers.get("x-conduit-platform"))
 
 
 def _host_root() -> Any:
-    """The root Hermes home, which keeps the host's per-app sightings."""
-    try:
-        from hermes_constants import get_default_hermes_root
-    except (ImportError, AttributeError):  # an older Hermes: one home
-        from hermes_constants import get_hermes_home
-        return get_hermes_home()
-    return get_default_hermes_root()
+    """The root Hermes home, which keeps the host's per-app sightings:
+    Hermes' own answer where it has one, else the home with
+    ``profiles/<name>`` taken off (room_identity.root_home's rule)."""
+    import hermes_constants
+
+    home = Path(hermes_constants.get_hermes_home())
+    root_of = getattr(hermes_constants, "get_default_hermes_root", None)
+    if callable(root_of):
+        try:
+            return Path(root_of(home=home))
+        except Exception:  # noqa: BLE001 - a Hermes that answers oddly gets the plain rule
+            pass
+    if home.parent.name == "profiles":
+        return home.parent.parent
+    return home
 
 
 def _note_app_request(connection: Any) -> None:
@@ -93,6 +100,8 @@ def _note_app_request(connection: Any) -> None:
             return
         key = core._limiter_key(connection.query_params.get("profile"))
         now = time.time()
+        # Before the lock: reading the platform loads link_status.py under it.
+        platform = _platform(connection.headers)
         with _link_status_lock:
             if key not in _link_app_noted and len(_link_app_noted) >= core.LIMITER_MAX_KEYS:
                 # Bounded whatever profiles callers send: sightings past the
@@ -102,7 +111,6 @@ def _note_app_request(connection: Any) -> None:
                 if len(_link_app_noted) >= core.LIMITER_MAX_KEYS:
                     return
             _link_app_noted[key] = now
-            platform = _platform(connection.headers)
             if platform is not None:
                 _link_client_noted[platform] = now
     except Exception:  # noqa: BLE001 — never fails Conduit's request
@@ -111,7 +119,7 @@ def _note_app_request(connection: Any) -> None:
 
 def link_status_summary(home: Any, pairing: Optional[Dict[str, Any]], open_sockets: int,
                         observing: bool, *, requested_at: Optional[float] = None,
-                        now: Optional[float] = None, root: Any = None,
+                        now: Optional[float] = None, root: Any,
                         client_sockets: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     """What the card shows for ``home``: the app's state and the push state.
     ``requested_at`` is this process's newest Conduit request, which the
@@ -127,10 +135,10 @@ def link_status_summary(home: Any, pairing: Optional[Dict[str, Any]], open_socke
     else:
         app_state = "never"
     # Which apps reached this host, on any profile: the root home's record.
-    host = recorded if root is None else _link_status().read(root)
+    host = _link_status().read(root)
     clients = {platform: {"seen_at": host.get(f"{platform}_seen_at"),
                           "open_sockets": (client_sockets or {}).get(platform, 0)}
-               for platform in CLIENT_PLATFORMS}
+               for platform in _link_status().CLIENT_PLATFORMS}
     ok_at, failed_at = recorded.get("push_ok_at"), recorded.get("push_failed_at")
     if pairing is None:
         push_state = "not_paired"
