@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.206.3 (2026-11-28)
+
+### Fixes
+
+- Control from Hermes: Stop pressed just as a computer sends back an action it already ran no longer replaces that answer with "stopped".
+- A link to a folder on a slow SSH machine opens as a folder again: the check waits up to 15 seconds for the machine before going by the name.
+
 ## 0.206.2 (2026-11-28)
 
 ### Fixes
