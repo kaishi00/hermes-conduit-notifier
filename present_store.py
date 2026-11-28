@@ -68,7 +68,12 @@ MAPS_MODES = ("driving", "walking", "transit", "cycling")
 # it as a plain confirm, and its yes would never open Maps.
 NAVIGATE_FEATURE = "maps-navigate"
 MAX_MAPS_TO_CHARS = 200
-MAX_FEATURES = 16
+# How many capability names a device's exchange keeps. Each Conduit feature
+# that changes what the host sends adds one, so the bound leaves room for
+# years of them: iOS build 284 sent 19 and 16 dropped the last three
+# (placed-boards, Pulse looks), issue 1147. Names past it are dropped, so keep
+# it well above the longest list Conduit sends (tests/test_present.py).
+MAX_FEATURES = 64
 # A room's ask (room_asks, Ask me first): an agent in a room with other
 # people's agents asks its owner before it shares something. Only a Conduit
 # that says it shows them gets one, and only its answer counts: another would
