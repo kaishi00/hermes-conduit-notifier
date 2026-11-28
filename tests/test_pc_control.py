@@ -234,8 +234,6 @@ def test_a_poll_that_takes_a_request_as_stop_answers_it_never_runs_it(store, mon
 
 def test_stop_waits_for_a_poll_taking_requests_under_the_queues_lock(store, monkeypatch):
     # notifier#1145 review: Stop's check and write can't fall between a poll's take and its re-check.
-    import threading
-    import time
     store.note_computer(PC, "Asuka", "windows")
     request = store.add_request(PC, SESSION, "A", "click", {"element": 1})
     real = store_mod.os.replace
@@ -261,8 +259,6 @@ def test_stop_waits_for_a_poll_taking_requests_under_the_queues_lock(store, monk
 
 def test_stop_waits_for_an_answer_being_written_so_the_answer_stands(store, monkeypatch):
     # notifier#1146 review: Stop's check and its stopped write can't fall either side of an answer.
-    import threading
-    import time
     store.note_computer(PC, "Asuka", "windows")
     request = store.add_request(PC, SESSION, "A", "click", {"element": 1})
     store.claim(PC)
@@ -473,6 +469,11 @@ def test_a_phone_edit_or_decline_is_a_no_and_never_an_outcome_for_chats(tmp_path
     other = present.ask_pc("Allow?", "Chat: A", pc={"computer": PC, "request": "request-0002", "name": "Asuka"})
     assert present.settle_pc(other["id"], True, computer="someone-else-1") == "gone"
     assert present.settle_pc(other["id"], True, computer=PC) == "confirmed"
+    # Answered on the computer, so it isn't marked as a phone's tap (hermes-conduit#3424).
+    settled = present.pc_ask(other["id"])
+    assert settled["via"] == "computer"
+    # A phone's answer stays a tap.
+    assert present.pc_ask(prompt["id"])["via"] == "tap"
 
 
 def test_ask_routes_follow_and_settle_the_phones_copy(client, tmp_path):

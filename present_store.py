@@ -58,6 +58,8 @@ OUTCOMES = ("confirmed", "declined", "edit")
 # "auto": Conduit opened Apple Maps for a navigate prompt itself, because the
 # user was in that chat with Conduit open.
 VIAS = ("tap", "voice", "auto")
+# How a computer's ask answered in its own dialog reads: not a phone's tap.
+PC_VIA = "computer"
 # What a navigate prompt (conduit_maps navigate) carries: where to and how.
 # Conduit opens Apple Maps with these when the user says go.
 MAPS_MODES = ("driving", "walking", "transit", "cycling")
@@ -502,8 +504,9 @@ class PresentStore:
             if prompt is None or not prompt.get("pc") or (computer and prompt["pc"]["computer"] != computer):
                 return "gone"
             if prompt["status"] == "waiting":
-                prompt.update(status="confirmed" if allowed else "declined", via="tap", finished_at=int(self.clock()),
-                              reported=True)
+                # Answered on the computer, not tapped on a phone (hermes-conduit#3424).
+                prompt.update(status="confirmed" if allowed else "declined", via=PC_VIA,
+                              finished_at=int(self.clock()), reported=True)
             return _pc_status(prompt)
 
     def withdraw_pc(self, prompt_id: Any) -> str:
@@ -984,7 +987,8 @@ def _prompt(raw: Any, now: float) -> dict[str, Any] | None:
         if pc is None:
             return None
         prompt["pc"] = pc
-    if raw.get("via") in VIAS:
+    # A computer's own ask may be answered on the computer itself.
+    if raw.get("via") in VIAS or (raw.get("via") == PC_VIA and "pc" in prompt):
         prompt["via"] = raw["via"]
     edit_text = _text(raw.get("edit_text"), MAX_EDIT_TEXT_CHARS)
     if edit_text:
