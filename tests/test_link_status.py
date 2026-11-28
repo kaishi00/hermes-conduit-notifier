@@ -248,7 +248,7 @@ def test_requests_name_the_app_that_reached_the_host(route, tmp_path):
 def test_sightings_of_each_app_are_kept_for_the_whole_host(monkeypatch, route, tmp_path):
     root = tmp_path / "root"
     root.mkdir()
-    monkeypatch.setattr(sys.modules["hermes_constants"], "get_default_hermes_root", lambda: root, raising=False)
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_default_hermes_root", lambda home=None: root, raising=False)
     route.get(f"{BASE}/sessions/desktop-views?profile=work",
               headers={"user-agent": CONDUIT, "x-conduit-client": "conduit", "x-conduit-platform": "ios"})
     assert _status(route)["clients"]["ios"]["seen_at"] is not None
@@ -315,6 +315,10 @@ def test_an_open_socket_names_its_app(monkeypatch, route, tmp_path):
     clients = _status(route)["clients"]
     assert clients["ios"]["open_sockets"] == 1 and clients["ios"]["seen_at"] is not None
     assert clients["desktop"] == {"seen_at": None, "open_sockets": 0}
+    # While the socket stays open, each sweep past the throttle renews the host's sighting.
+    first = link.read(tmp_path)["ios_seen_at"]
+    route.hook.sweep(now=first + 3600)
+    assert link.read(tmp_path)["ios_seen_at"] == first + 3600
     socket.closed = True
     route.hook.sweep()
     assert _status(route)["clients"]["ios"]["open_sockets"] == 0
@@ -343,3 +347,14 @@ def test_the_manifest_puts_the_card_on_the_sessions_page():
     bundle = (ROOT / "dashboard" / "dist" / "index.js").read_text()
     assert 'registerSlot("conduit_push", "sessions:top"' in bundle
     assert "/api/plugins/conduit_push/link-status" in bundle
+
+
+def test_sightings_go_to_the_root_home_on_a_hermes_that_doesnt_name_it(monkeypatch, tmp_path):
+    constants = types.ModuleType("hermes_constants")
+    constants.get_hermes_home = lambda: tmp_path / "profiles" / "work"
+    monkeypatch.setitem(sys.modules, "hermes_constants", constants)
+    assert api.link_status._host_root() == tmp_path
+    constants.get_hermes_home = lambda: tmp_path
+    assert api.link_status._host_root() == tmp_path
+    constants.get_default_hermes_root = lambda home: tmp_path / "root"
+    assert api.link_status._host_root() == tmp_path / "root"
