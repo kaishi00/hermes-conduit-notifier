@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.206.4 (2026-11-28)
+
+### Fixes
+
+- Control from Hermes: an answer given in the computer's own dialog is no longer recorded as a tap on a phone.
+
 ## 0.206.3 (2026-11-28)
 
 ### Fixes
