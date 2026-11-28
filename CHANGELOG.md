@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.208.1 (2026-11-28)
+
+### Fixes
+
+- Asked about a period, Hermes could read a day outside the range it looked at as a day with no flow. It now says the answer covers only that range and looks further back when asked.
+
 ## 0.208.0 (2026-11-28)
 
 ### New and improved
